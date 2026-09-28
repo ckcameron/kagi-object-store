@@ -1,0 +1,7 @@
+.TH TEST-ALL 1 "September 2026" "Kagi 0.38.0" "Developer Commands"
+.SH NAME
+test-all \- run the standard Kagi validation suite
+.SH SYNOPSIS
+.B scripts/test-all
+.SH DESCRIPTION
+Runs rustfmt check, cargo check, unit tests, and Clippy. Set STRICT=1 to deny warnings. If nvcc is present, it also validates the optional CUDA feature.

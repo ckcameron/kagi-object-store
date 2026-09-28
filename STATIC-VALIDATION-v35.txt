@@ -1,0 +1,21 @@
+Kagi 0.35.0 static validation
+=============================
+PASS: Cargo.toml parses and declares version 0.35.0
+PASS: binary kagi-montecarlo source path
+PASS: binary kagi-cluster-host source path
+PASS: binary kagi-host source path
+PASS: binary kagi-volume-nbd source path
+PASS: YAML parse (7 files, multi-document streams supported)
+PASS: Kagi product/interface naming consistency
+PASS: top-level Rust documentation (498 items; 0 undocumented)
+PASS: non-raw Rust readability line limit (lines >300 chars: 0)
+PASS: E0308 Vec::drain call is a statement
+PASS: Rust-aware reflow token preservation established before final attr_raw readability expansion
+PASS: bash -n helper scripts
+NOT RUN: cargo fmt --check (cargo/rustfmt unavailable in packaging environment).
+NOT RUN: cargo check --all-targets (cargo unavailable in packaging environment).
+NOT RUN: cargo test --all-targets (cargo unavailable in packaging environment).
+NOT RUN: cargo clippy --all-targets (cargo unavailable in packaging environment).
+NOT RUN: CUDA compilation/tests (Rust/CUDA toolchain unavailable in packaging environment).
+
+Run ./scripts/test-all on a Rust builder before deployment.

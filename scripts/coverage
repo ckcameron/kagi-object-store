@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 2; }
+if ! cargo llvm-cov --version >/dev/null 2>&1; then
+  echo "cargo-llvm-cov is required. Install with: cargo install cargo-llvm-cov" >&2
+  exit 2
+fi
+mkdir -p coverage
+FEATURE_ARGS=()
+if [[ "${KAGI_COVERAGE_ALL_FEATURES:-0}" == "1" ]]; then FEATURE_ARGS=(--all-features); fi
+THRESHOLD_ARGS=()
+if [[ -n "${KAGI_COVERAGE_MIN_LINES:-}" ]]; then THRESHOLD_ARGS=(--fail-under-lines "${KAGI_COVERAGE_MIN_LINES}"); fi
+cargo llvm-cov clean --workspace
+cargo llvm-cov --workspace --all-targets "${FEATURE_ARGS[@]}" "${THRESHOLD_ARGS[@]}" --lcov --output-path coverage/lcov.info
+cargo llvm-cov --workspace --all-targets "${FEATURE_ARGS[@]}" "${THRESHOLD_ARGS[@]}" --html --output-dir coverage/html
+echo "LCOV: coverage/lcov.info"
+echo "HTML: coverage/html/index.html"

@@ -1,0 +1,10 @@
+.TH KAGI-VOLUME-IMAGE 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-volume-image \- materialize a Kagi volume into a hypervisor image format
+.SH SYNOPSIS
+.B kagi-volume-image
+SOURCE OUTPUT FORMAT
+.SH DESCRIPTION
+Uses qemu-img-compatible conversion to create an independent qcow2, vmdk, vhdx, or other supported image from a Kagi block endpoint. The image is an export/copy; Kagi's native representation remains sparse object extents.
+.SH SEE ALSO
+kagi-volume-nbd(1), qemu-img(1)

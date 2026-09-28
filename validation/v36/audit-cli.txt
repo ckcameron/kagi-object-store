@@ -1,0 +1,40 @@
+   Compiling kagi-object-store v0.36.0 (/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v36)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.92s
+     Running `work/kagi-v36/target/debug/kagi-cluster-host --config work/kagi-v36/examples/node-v6.example.yaml audit`
+[
+  {
+    "id": "baseline.backups",
+    "severity": "info",
+    "resource": "cluster",
+    "message": "Durability modeling does not replace backups or restore exercises.",
+    "recommendation": "Keep an independent backup, test restores, and protect configuration/key material from rollback."
+  },
+  {
+    "id": "transport.public_listener",
+    "severity": "warning",
+    "resource": "listener",
+    "message": "The HTTP listener binds beyond loopback; tls config currently protects the internal client, not axum::serve.",
+    "recommendation": "Bind loopback behind a TLS-authenticating reverse proxy or restrict the listener to a trusted private network. Never send Basic credentials over untrusted plaintext links."
+  },
+  {
+    "id": "security.kernel_not_enforcing",
+    "severity": "warning",
+    "resource": "kernel",
+    "message": "Kernel policy is disabled or audit-only.",
+    "recommendation": "Build with --features ebpf, configure inode policies, and enable enforcement after target-kernel verification."
+  },
+  {
+    "id": "security.empty_object_policy",
+    "severity": "warning",
+    "resource": "objects",
+    "message": "No logical-object policy is configured.",
+    "recommendation": "Add rules for sensitive key prefixes and privileged objects; marking an object privileged alone does not deny access."
+  },
+  {
+    "id": "security.identity_headers",
+    "severity": "warning",
+    "resource": "public_api",
+    "message": "Legacy ACL principals are supplied in request headers.",
+    "recommendation": "Use a trusted authenticating gateway that strips and supplies identity headers; do not expose the public object API directly to untrusted clients."
+  }
+]

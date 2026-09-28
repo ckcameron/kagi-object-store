@@ -1,0 +1,79 @@
+[package]
+name = "kagi-object-store"
+version = "0.38.0"
+edition = "2021"
+publish = false
+license-file = "LICENSE"
+readme = "README.md"
+description = "Kagi: proprietary distributed 64-bit keyspace object storage, topology simulator, web console, and SCSI block-volume system"
+
+[package.metadata.kagi]
+product-name = "Kagi"
+compatibility-prefix = "kagi"
+
+[[bin]]
+name = "kagi-config"
+path = "src/main.rs"
+
+[[bin]]
+name = "kagi-cluster-host"
+path = "src/bin/kagi-cluster-host.rs"
+
+[[bin]]
+name = "kagi-host"
+path = "src/bin/kagi-host.rs"
+
+[[bin]]
+name = "kagi-volume-nbd"
+path = "src/bin/kagi-volume-nbd.rs"
+
+[features]
+default = []
+cuda = []
+hip = []
+opencl = []
+isa-l = []
+ipp = []
+aocl = []
+rocm = ["hip"]
+scsi-target = []
+ebpf = ["dep:aya"]
+
+[dependencies]
+libc = "0.2"
+futures-util = "0.3"
+percent-encoding = "2"
+aya = { version = "0.14.0", default-features = false, optional = true }
+anyhow = "1"
+argon2 = "0.5"
+axum = "0.7"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rand = "0.8"
+rand_chacha = "0.3"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+statrs = "0.17"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+base64 = "0.22"
+bytes = "1"
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+tower-http = { version = "0.6", features = ["trace"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+async-trait = "0.1"
+reed-solomon-erasure = "6"
+chacha20poly1305 = "0.10"
+fips204 = "0.4.6"
+chrono = { version = "0.4", features = ["clock"] }
+chrono-tz = "0.10"
+clay-codes = "0.2.2"
+
+[build-dependencies]
+cc = "1"

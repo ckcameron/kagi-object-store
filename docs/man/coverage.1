@@ -1,0 +1,7 @@
+.TH COVERAGE 1 "September 2026" "Kagi 0.38.0" "Developer Commands"
+.SH NAME
+coverage \- generate Kagi LLVM source coverage reports
+.SH SYNOPSIS
+.B scripts/coverage
+.SH DESCRIPTION
+Runs cargo-llvm-cov across workspace targets and writes LCOV and HTML reports under coverage/. Optional CUDA coverage can be enabled with KAGI_COVERAGE_ALL_FEATURES=1.

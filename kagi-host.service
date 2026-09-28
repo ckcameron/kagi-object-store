@@ -1,0 +1,15 @@
+[Unit]
+Description=Kagi Storage Host
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kagi-host --config /etc/kagi/host.yaml serve
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=1048576
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

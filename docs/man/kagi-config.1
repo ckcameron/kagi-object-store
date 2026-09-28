@@ -1,0 +1,90 @@
+.TH KAGI-CONFIG 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-config \- model Kagi failure domains, optimize EC chunk geometry, and emit a 64-bit slot plan
+.SH SYNOPSIS
+.B kagi-config
+[\fB--config\fR FILE | \fB--wizard\fR] [OPTIONS]
+.SH DESCRIPTION
+Runs Monte Carlo and deterministic failure-domain analysis over site/rack/host/network/disk topology. It selects a placement salt, compares Reed-Solomon, LRC, MSR and CLAY chunk geometries, and emits explicit global and per-disk slot/key ranges.
+.PP
+The minimum supported topology is six servers with at least six disks per server. Each failure category is configured to tolerate two simultaneous losses where at least three independent domains exist, one loss where exactly two domains exist, and zero where only one domain exists.
+.SH WIZARD
+.B --wizard
+starts by asking whether to use quick defaults.
+.PP
+Quick mode asks only for number of sites, racks per site, hosts per rack, and NVMe disks per host. It uses 8 TB NVMe disks, weight 1.0, default failure/repair rates, slot_bits 16, automatic EC geometry selection, and sequential /24 networks from 10.0.0.0/8. Host addresses are assigned .1 through .254 in each generated subnet.
+.PP
+Answer no to receive the full questionnaire for disk classes, AFRs, capacities, site/rack CIDRs, multi-homing, host names, device identities, failure rates, repair behavior, and policy constraints.
+.SH OPTIONS
+.TP
+.BR -c ", " --config " FILE"
+Read YAML topology/model configuration.
+.TP
+.B --wizard
+Run the interactive quick/full topology wizard.
+.TP
+.B --wizard-config-output FILE
+Save wizard input as reusable YAML. Default: kagi.wizard.yaml.
+.TP
+.B --mount-root DIR
+Override the generated disk mount root.
+.TP
+.BR -o ", " --output " FILE"
+Write generated plan YAML.
+.TP
+.B --trials N
+Ordinary Monte Carlo trials per placement candidate.
+.TP
+.B --candidates N
+Placement salts evaluated.
+.TP
+.B --seed N
+Deterministic simulation seed.
+.TP
+.B --rare-trials N
+Importance-sampling trials per finalist.
+.TP
+.B --finalists N
+Ordinary-MC finalists evaluated with rare-event simulation.
+.TP
+.B --validation-keys N
+Key samples used for deterministic failure-tolerance validation.
+.TP
+.B --time-trials N
+Continuous-time trajectories.
+.TP
+.B --horizon-years YEARS
+Years per continuous-time trajectory.
+.SH EC GEOMETRY OPTIMIZATION
+For every policy, the output reports the lowest-loss feasible tested geometry for Reed-Solomon, LRC, MSR, and CLAY. If optimize.auto_geometry is true, the policy's selected protection is changed to the feasible family/geometry with the lowest simulated unreadable probability, with the configured objective used as the secondary criterion.
+.PP
+Automatic search is bounded by topology placement limits and defaults to no more than 32 total chunks. Set optimize.max_total_fragments to change this ceiling.
+.SH OUTPUT
+The YAML output contains infrastructure, optimizer results, selected policy protection, per-schema geometry reports, placement salt, global slot assignments, and keyspace.disks[].slot_ranges. Disk mount names are generated as host-diskclass-ordinal under the configured mount root.
+.SH FILES
+.I kagi.join.key
+contains a newly generated cluster admission secret unless overridden.
+.SH SEE ALSO
+kagi-cluster-host(1), kagi-host(1), kagi-install(1)
+.SH LIVE PROGRESS
+When standard error is an interactive terminal, the optimizer displays a continuously refreshed status panel. The panel shows overall phase progress, current-operation progress, cumulative simulation count and rate, elapsed time, the lowest-failure placement/keyspace candidate observed so far, and the lowest-failure erasure-code geometry observed so far.
+.PP
+Progress output is written to standard error. Generated YAML remains on standard output and in the file selected by
+.BR --output .
+.TP
+.B --no-progress
+Disable the interactive progress display.
+.TP
+.B --progress-interval-ms N
+Set the progress refresh interval in milliseconds. Default: 150. Values are internally clamped to 50 through 2000 milliseconds.
+.PP
+Progress is automatically disabled when standard error is not a terminal.
+
+.SH CUDA AND RUNTIME MODES
+Build with the cuda, hip, or opencl feature and use --mc-backend auto, cpu, cuda, hip, or opencl. GPU execution accelerates batched EC readability scoring while topology/failure generation and deterministic validation remain CPU-side.
+.PP
+--run-mode quick30 and quick60 select reduced-confidence simulation workloads intended to complete substantially sooner than full mode. The names are approximate runtime classes, not completion-time guarantees.
+.SH CHECKPOINTS
+Use --checkpoint DIR to save normalized inputs, run settings, admission key and completed trial batches. --checkpoint-seconds defaults to 60 and --checkpoint-batch-trials defaults to 1024. Saves occur at completed batch boundaries and phase boundaries. Use --resume DIR to reuse saved settings and committed batches; conflicting simulation options and incompatible versions are rejected.
+.SH SCHEDULING
+Use kagi-run to select scheduling policy and CPU affinity before the planner starts its workers.

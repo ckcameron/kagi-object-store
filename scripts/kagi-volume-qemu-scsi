@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+# Emit QEMU arguments for a live Kagi zvol-like volume. The NBD transport is
+# backend-only; the guest sees a SCSI disk behind virtio-scsi or an emulated SAS HBA.
+MODE="${1:?usage: kagi-volume-qemu-scsi virtio-scsi|sas nbd-host nbd-port [device-id]}"
+HOST="${2:?NBD host}"; PORT="${3:?NBD port}"; ID="${4:-keyspace0}"
+case "$MODE" in
+ virtio-scsi)
+   printf '%q ' -blockdev "driver=nbd,server.type=inet,server.host=$HOST,server.port=$PORT,node-name=ksblk,cache.direct=on,cache.no-flush=off" \
+     -device "virtio-scsi-pci,id=ksscsi" -device "scsi-hd,drive=ksblk,bus=ksscsi.0,id=$ID,rotation_rate=1"
+   ;;
+ sas)
+   # LSI SAS1068 emulation. Guest sees SAS/SCSI semantics; backend remains Kagi.
+   printf '%q ' -blockdev "driver=nbd,server.type=inet,server.host=$HOST,server.port=$PORT,node-name=ksblk,cache.direct=on,cache.no-flush=off" \
+     -device "mptsas1068,id=kssas" -device "scsi-hd,drive=ksblk,bus=kssas.0,id=$ID"
+   ;;
+ *) echo "mode must be virtio-scsi or sas" >&2; exit 2;;
+esac
+printf '\n'

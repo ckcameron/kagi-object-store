@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# The default suite validates formatting, all targets, unit tests, and Clippy.
+# STRICT=1 additionally promotes every compiler/Clippy warning to an error; this
+# is useful for release CI once compatibility-only/deferred frontends are clean.
+cargo fmt --all -- --check
+cargo check --all-targets
+cargo test --all-targets
+if [[ "${STRICT:-0}" == "1" ]]; then
+  cargo clippy --all-targets -- -D warnings
+else
+  cargo clippy --all-targets
+fi
+
+# Compile and test the userspace loader without attaching privileged kernel hooks.
+if [[ "$(uname -s)" == "Linux" ]]; then
+  cargo check --all-targets --features ebpf
+  cargo test --all-targets --features ebpf
+  cargo clippy --all-targets --features ebpf -- -D warnings
+fi
+
+# CUDA is optional because only CUDA-capable builders are expected to have nvcc.
+if command -v nvcc >/dev/null 2>&1; then
+  cargo check --all-targets --features cuda
+  cargo test --all-targets --features cuda
+else
+  echo "nvcc not found; CUDA feature validation skipped" >&2
+fi

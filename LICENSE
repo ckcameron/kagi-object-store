@@ -1,0 +1,28 @@
+KAGI — PROPRIETARY AND CONFIDENTIAL LICENSE NOTICE
+
+Copyright (c) 2026 CK Cameron. All Rights Reserved.
+
+1. Ownership and reservation of rights
+All source code, object code, documentation, configuration, designs, algorithms, test materials, specifications, build artifacts, and related materials in this distribution (collectively, the "Software") are proprietary works. All rights are reserved. Except for rights expressly granted in a separate written agreement signed by the copyright owner, no license or permission is granted to use, copy, reproduce, modify, create derivative works from, distribute, publish, sublicense, sell, lease, host, disclose, reverse engineer, decompile, disassemble, or otherwise exploit the Software.
+
+2. Confidentiality
+The Software is confidential information. Any person or entity receiving or obtaining access to the Software is required to protect it from unauthorized access, use, copying, and disclosure; to use it solely for a purpose expressly authorized in writing by the copyright owner; and to disclose it only to persons who are themselves authorized in writing and bound by confidentiality obligations at least as protective as these terms. The recipient must use reasonable administrative, technical, and physical safeguards to protect the Software and must promptly notify the copyright owner of any known or suspected unauthorized disclosure or access.
+
+The confidentiality obligation does not apply to information that the recipient can demonstrate by contemporaneous written records: (a) was lawfully known to the recipient without confidentiality obligation before disclosure; (b) becomes publicly available through no breach of these terms; (c) is lawfully received from a third party without confidentiality restriction; or (d) is independently developed without use of or reference to the Software.
+
+If disclosure is required by law, subpoena, or court order, the recipient must, to the extent legally permitted, provide prompt written notice to the copyright owner and disclose only the minimum portion legally required while seeking confidential treatment where available.
+
+3. No redistribution
+Possession of a copy does not convey redistribution rights. The Software and any copies must not be provided to third parties without prior written authorization from the copyright owner.
+
+4. No implied patent, trademark, or other license
+No rights under any patent, trademark, trade secret, database right, or other intellectual-property right are granted by implication, estoppel, exhaustion beyond applicable law, or otherwise.
+
+5. Return or destruction
+Upon request by the copyright owner, an unauthorized recipient must cease use and return or destroy all copies of the Software in its possession or control, except to the extent retention is required by law.
+
+6. Disclaimer
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AVAILABILITY, OR CORRECTNESS. TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE COPYRIGHT OWNER SHALL NOT BE LIABLE FOR DAMAGES ARISING FROM POSSESSION OR USE OF THE SOFTWARE.
+
+7. Separate agreements control
+A separately executed written license, nondisclosure agreement, evaluation agreement, employment agreement, or other contract may grant additional rights or impose additional obligations. If such an agreement expressly conflicts with this notice, the signed agreement controls to the extent of that conflict.

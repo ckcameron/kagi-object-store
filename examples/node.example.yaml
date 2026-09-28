@@ -1,0 +1,44 @@
+join_key_b64: "REPLACE_WITH_KAGI_JOIN_KEY"
+cluster:
+  join_key_hash_hex: "REPLACE_WITH_HASH_FROM_KAGI_GENERATED_YAML"
+  id: prod-a
+  placement_salt: 1161981756646125696
+  replication: 3
+  write_quorum: 2
+  hosts:
+    - id: host-a1
+      endpoint: http://10.0.1.11:7400
+      site: site-a
+      rack: rack-a1
+      disks:
+        - { id: a1d0, capacity_bytes: 7680000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme0n1, serial_number: NVME-SERIAL-0 }
+        - { id: a1d1, capacity_bytes: 18000000000000, weight: 1.0, storage_kind: sas_hdd, device_path: /dev/disk/by-id/wwn-0x5000c500example, wwn: 5000c500example }
+    - id: host-a2
+      endpoint: http://10.0.1.12:7400
+      site: site-a
+      rack: rack-a2
+      disks:
+        - { id: a2d0, capacity_bytes: 7680000000000, weight: 1.0 }
+    - id: host-b1
+      endpoint: http://10.1.1.11:7400
+      site: site-b
+      rack: rack-b1
+      disks:
+        - { id: b1d0, capacity_bytes: 7680000000000, weight: 1.0 }
+
+local_host: host-a1
+data_root: /var/lib/kagi
+listen: 0.0.0.0:7400
+
+garbage_collection:
+  enabled: true
+  grace_period_ms: 86400000
+  interval_ms: 30000
+  max_versions_per_cycle: 32
+
+# Kagi web operations console. Use TLS or a trusted TLS reverse proxy.
+web_console:
+  enabled: true
+  userdb: /etc/kagi/users.yaml
+  log_path: /var/log/kagi/kagi.log
+  max_log_lines: 500

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+cat <<'TXT'
+VMware: export the Kagi volume as an iSCSI LUN, add it as a datastore/RDM as appropriate, and select VMware Paravirtual (PVSCSI) for the VM SCSI controller. PVSCSI is a guest controller model chosen by ESXi; Kagi supplies the backing SCSI LUN.
+Hyper-V: expose the Kagi volume through iSCSI when a raw SAN LUN is required, or materialize VHDX when Hyper-V-managed virtual disks are required. Attach the resulting disk to the VM's synthetic SCSI controller. The synthetic SCSI controller is implemented by Hyper-V, not by the storage target.
+KVM/QEMU: use kagi-volume-qemu-scsi. virtio-scsi is the preferred paravirtualized SCSI presentation; sas selects an emulated LSI SAS HBA.
+TXT

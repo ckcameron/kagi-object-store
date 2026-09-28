@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+# Export an already attached /dev/nbdX through Linux LIO. VMware ESXi and Windows Hyper-V can consume the iSCSI LUN.
+DEV="${1:?usage: kagi-volume-iscsi-export /dev/nbdN iqn target_portal_ip [lun]}"; IQN="${2:?iqn required}"; IP="${3:?portal IP required}"; LUN="${4:-0}"
+command -v targetcli >/dev/null || { echo "targetcli is required" >&2; exit 1; }
+NAME="keyspace-$(basename "$DEV")"
+targetcli /backstores/block create name="$NAME" dev="$DEV"
+targetcli /iscsi create "$IQN"
+targetcli /iscsi/"$IQN"/tpg1/luns create /backstores/block/"$NAME" lun="$LUN"
+targetcli /iscsi/"$IQN"/tpg1/portals create "$IP" 3260 || true
+# Explicit ACLs/authentication should be configured before exposing the target outside a trusted storage network.
+targetcli saveconfig

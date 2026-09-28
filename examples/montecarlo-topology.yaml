@@ -1,0 +1,467 @@
+# Kagi 0.38.0 example: minimum six-host cluster, six 8 TB NVMe disks per host, three failure-domain sites.
+slot_bits: 12
+topology:
+  mount_root: /var/lib/kagi/disks
+  network_domains:
+  - id: site-01-rack-01-net-01
+    cidr: 10.0.0.0/24
+    site: site-01
+    rack: site-01-rack-01
+  - id: site-02-rack-01-net-01
+    cidr: 10.0.1.0/24
+    site: site-02
+    rack: site-02-rack-01
+  - id: site-03-rack-01-net-01
+    cidr: 10.0.2.0/24
+    site: site-03
+    rack: site-03-rack-01
+  disk_classes:
+  - name: nvme
+    media: nvme
+    annual_failure_probability: 0.01
+    default_capacity_bytes: 8000000000000
+    default_weight: 1.0
+  hosts:
+  - name: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    networks:
+    - site-01-rack-01-net-01
+    addresses:
+    - 10.0.0.1
+  - name: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    networks:
+    - site-01-rack-01-net-01
+    addresses:
+    - 10.0.0.2
+  - name: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    networks:
+    - site-02-rack-01-net-01
+    addresses:
+    - 10.0.1.1
+  - name: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    networks:
+    - site-02-rack-01-net-01
+    addresses:
+    - 10.0.1.2
+  - name: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    networks:
+    - site-03-rack-01-net-01
+    addresses:
+    - 10.0.2.1
+  - name: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    networks:
+    - site-03-rack-01-net-01
+    addresses:
+    - 10.0.2.2
+  disks:
+  - id: site-01-rack-01-host-01-nvme-01
+    host: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 1
+    mount_name: site-01-rack-01-host-01-nvme-01
+    path: /var/lib/kagi/disks/site-01-rack-01-host-01-nvme-01
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-01-nvme-02
+    host: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 2
+    mount_name: site-01-rack-01-host-01-nvme-02
+    path: /var/lib/kagi/disks/site-01-rack-01-host-01-nvme-02
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-01-nvme-03
+    host: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 3
+    mount_name: site-01-rack-01-host-01-nvme-03
+    path: /var/lib/kagi/disks/site-01-rack-01-host-01-nvme-03
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-01-nvme-04
+    host: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 4
+    mount_name: site-01-rack-01-host-01-nvme-04
+    path: /var/lib/kagi/disks/site-01-rack-01-host-01-nvme-04
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-01-nvme-05
+    host: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 5
+    mount_name: site-01-rack-01-host-01-nvme-05
+    path: /var/lib/kagi/disks/site-01-rack-01-host-01-nvme-05
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-01-nvme-06
+    host: site-01-rack-01-host-01
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 6
+    mount_name: site-01-rack-01-host-01-nvme-06
+    path: /var/lib/kagi/disks/site-01-rack-01-host-01-nvme-06
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-02-nvme-01
+    host: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 1
+    mount_name: site-01-rack-01-host-02-nvme-01
+    path: /var/lib/kagi/disks/site-01-rack-01-host-02-nvme-01
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-02-nvme-02
+    host: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 2
+    mount_name: site-01-rack-01-host-02-nvme-02
+    path: /var/lib/kagi/disks/site-01-rack-01-host-02-nvme-02
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-02-nvme-03
+    host: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 3
+    mount_name: site-01-rack-01-host-02-nvme-03
+    path: /var/lib/kagi/disks/site-01-rack-01-host-02-nvme-03
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-02-nvme-04
+    host: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 4
+    mount_name: site-01-rack-01-host-02-nvme-04
+    path: /var/lib/kagi/disks/site-01-rack-01-host-02-nvme-04
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-02-nvme-05
+    host: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 5
+    mount_name: site-01-rack-01-host-02-nvme-05
+    path: /var/lib/kagi/disks/site-01-rack-01-host-02-nvme-05
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-01-rack-01-host-02-nvme-06
+    host: site-01-rack-01-host-02
+    site: site-01
+    rack: site-01-rack-01
+    class: nvme
+    ordinal: 6
+    mount_name: site-01-rack-01-host-02-nvme-06
+    path: /var/lib/kagi/disks/site-01-rack-01-host-02-nvme-06
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-01-nvme-01
+    host: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 1
+    mount_name: site-02-rack-01-host-01-nvme-01
+    path: /var/lib/kagi/disks/site-02-rack-01-host-01-nvme-01
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-01-nvme-02
+    host: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 2
+    mount_name: site-02-rack-01-host-01-nvme-02
+    path: /var/lib/kagi/disks/site-02-rack-01-host-01-nvme-02
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-01-nvme-03
+    host: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 3
+    mount_name: site-02-rack-01-host-01-nvme-03
+    path: /var/lib/kagi/disks/site-02-rack-01-host-01-nvme-03
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-01-nvme-04
+    host: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 4
+    mount_name: site-02-rack-01-host-01-nvme-04
+    path: /var/lib/kagi/disks/site-02-rack-01-host-01-nvme-04
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-01-nvme-05
+    host: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 5
+    mount_name: site-02-rack-01-host-01-nvme-05
+    path: /var/lib/kagi/disks/site-02-rack-01-host-01-nvme-05
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-01-nvme-06
+    host: site-02-rack-01-host-01
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 6
+    mount_name: site-02-rack-01-host-01-nvme-06
+    path: /var/lib/kagi/disks/site-02-rack-01-host-01-nvme-06
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-02-nvme-01
+    host: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 1
+    mount_name: site-02-rack-01-host-02-nvme-01
+    path: /var/lib/kagi/disks/site-02-rack-01-host-02-nvme-01
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-02-nvme-02
+    host: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 2
+    mount_name: site-02-rack-01-host-02-nvme-02
+    path: /var/lib/kagi/disks/site-02-rack-01-host-02-nvme-02
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-02-nvme-03
+    host: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 3
+    mount_name: site-02-rack-01-host-02-nvme-03
+    path: /var/lib/kagi/disks/site-02-rack-01-host-02-nvme-03
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-02-nvme-04
+    host: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 4
+    mount_name: site-02-rack-01-host-02-nvme-04
+    path: /var/lib/kagi/disks/site-02-rack-01-host-02-nvme-04
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-02-nvme-05
+    host: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 5
+    mount_name: site-02-rack-01-host-02-nvme-05
+    path: /var/lib/kagi/disks/site-02-rack-01-host-02-nvme-05
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-02-rack-01-host-02-nvme-06
+    host: site-02-rack-01-host-02
+    site: site-02
+    rack: site-02-rack-01
+    class: nvme
+    ordinal: 6
+    mount_name: site-02-rack-01-host-02-nvme-06
+    path: /var/lib/kagi/disks/site-02-rack-01-host-02-nvme-06
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-01-nvme-01
+    host: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 1
+    mount_name: site-03-rack-01-host-01-nvme-01
+    path: /var/lib/kagi/disks/site-03-rack-01-host-01-nvme-01
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-01-nvme-02
+    host: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 2
+    mount_name: site-03-rack-01-host-01-nvme-02
+    path: /var/lib/kagi/disks/site-03-rack-01-host-01-nvme-02
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-01-nvme-03
+    host: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 3
+    mount_name: site-03-rack-01-host-01-nvme-03
+    path: /var/lib/kagi/disks/site-03-rack-01-host-01-nvme-03
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-01-nvme-04
+    host: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 4
+    mount_name: site-03-rack-01-host-01-nvme-04
+    path: /var/lib/kagi/disks/site-03-rack-01-host-01-nvme-04
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-01-nvme-05
+    host: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 5
+    mount_name: site-03-rack-01-host-01-nvme-05
+    path: /var/lib/kagi/disks/site-03-rack-01-host-01-nvme-05
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-01-nvme-06
+    host: site-03-rack-01-host-01
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 6
+    mount_name: site-03-rack-01-host-01-nvme-06
+    path: /var/lib/kagi/disks/site-03-rack-01-host-01-nvme-06
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-02-nvme-01
+    host: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 1
+    mount_name: site-03-rack-01-host-02-nvme-01
+    path: /var/lib/kagi/disks/site-03-rack-01-host-02-nvme-01
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-02-nvme-02
+    host: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 2
+    mount_name: site-03-rack-01-host-02-nvme-02
+    path: /var/lib/kagi/disks/site-03-rack-01-host-02-nvme-02
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-02-nvme-03
+    host: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 3
+    mount_name: site-03-rack-01-host-02-nvme-03
+    path: /var/lib/kagi/disks/site-03-rack-01-host-02-nvme-03
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-02-nvme-04
+    host: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 4
+    mount_name: site-03-rack-01-host-02-nvme-04
+    path: /var/lib/kagi/disks/site-03-rack-01-host-02-nvme-04
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-02-nvme-05
+    host: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 5
+    mount_name: site-03-rack-01-host-02-nvme-05
+    path: /var/lib/kagi/disks/site-03-rack-01-host-02-nvme-05
+    capacity_bytes: 8000000000000
+    weight: 1.0
+  - id: site-03-rack-01-host-02-nvme-06
+    host: site-03-rack-01-host-02
+    site: site-03
+    rack: site-03-rack-01
+    class: nvme
+    ordinal: 6
+    mount_name: site-03-rack-01-host-02-nvme-06
+    path: /var/lib/kagi/disks/site-03-rack-01-host-02-nvme-06
+    capacity_bytes: 8000000000000
+    weight: 1.0
+policies:
+  default:
+    protection:
+      type: reed_solomon
+      k: 4
+      m: 2
+    locality:
+      site: spread
+      rack: spread
+      max_fragments_per_host: 1
+      max_fragments_per_disk: 1
+    tolerate:
+      disks: 2
+      hosts: 2
+      racks: 2
+      sites: 2
+      networks: 2
+    optimize:
+      auto_geometry: true
+      max_total_fragments: 6
+      min_data_fragments: 2
+failure_model:
+  disk_annual_probability: 0.01
+  host_annual_probability: 0.002
+  rack_annual_probability: 0.0005
+  site_annual_probability: 0.0001
+  network_annual_probability: 0.001
+  importance_bias: 8.0
+  correlated_events: []
+repair_model:
+  disk_mttr_hours: 24
+  host_mttr_hours: 4
+  rack_mttr_hours: 4
+  site_mttr_hours: 24
+  network_mttr_hours: 1
+  repair_bandwidth_bytes_per_sec: 1000000000
+optimization:
+  loss_weight: 1000000
+  overhead_weight: 1
+  imbalance_weight: 100

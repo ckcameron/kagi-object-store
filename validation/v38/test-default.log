@@ -1,0 +1,109 @@
+   Compiling kagi-object-store v0.38.0 (/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v38)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.42s
+     Running unittests src/bin/kagi-cluster-host.rs (work/kagi-v36/target/debug/deps/kagi_cluster_host-6b15babf5017b224)
+
+running 48 tests
+test block::tests::pr_key_mismatch_is_rejected ... ok
+test block::tests::pr_register_reserve_and_release ... ok
+test block::tests::preempt_transfers_reservation ... ok
+test block::tests::scsi_identity_is_stable ... ok
+test block::tests::volume_validation_rejects_bad_geometry ... ok
+test erasure::tests::clay_exact_plan_fetches_only_minimum_subchunks ... ok
+test erasure::tests::clay_linearized_encoder_matches_reference ... ok
+test erasure::tests::gf_inverse_roundtrip ... ok
+test erasure::tests::clay_requires_repairable_geometry ... ok
+test erasure::tests::clay_roundtrip_and_exact_repair ... ok
+test erasure::tests::clay_linearized_decoder_matches_reference ... ok
+test erasure::cpu_isa::tests::dispatched_field_arithmetic_matches_all_byte_pairs ... ok
+test erasure::cpu_isa::tests::avx2_all_coefficients_match_reference ... ok
+test erasure::tests::clay_recovers_from_every_k_subset_and_repairs_every_node ... ok
+test erasure::tests::matrix_rejects_overflowing_dimensions ... ok
+test filesystem::tests::explicit_deny_overrides_allow ... ok
+test erasure::tests::runtime_default_prefers_clay ... ok
+test filesystem::tests::owner_permission_matches_owner_principal ... ok
+test erasure::cpu_isa::tests::avx512_all_coefficients_match_reference ... ok
+test monitoring::tests::history_is_bounded_filtered_and_reports_gaps ... ok
+test monitoring::tests::publication_delivers_live_events ... ok
+test runtime_security::tests::encoded_keys_and_versions_use_same_policy_identity ... ok
+test erasure::tests::old_manifest_scheme_default_remains_reed_solomon ... ok
+test erasure::tests::product_matrix_requires_canonical_helper_count ... ok
+test scsi_pr::tests::decode_clear_accepts_reserved_zero_type ... ok
+test scsi_pr::tests::decode_preempt_and_abort_carries_type_and_keys ... ok
+test scsi_pr::tests::decode_register_accepts_reserved_zero_type ... ok
+test scsi_pr::tests::decode_register_ignore_existing_accepts_reserved_zero_type ... ok
+test scsi_pr::tests::decode_reserve_requires_supported_type ... ok
+test erasure::tests::reed_solomon_roundtrip_with_losses ... ok
+test erasure::tests::product_matrix_exact_plan_downloads_one_projection_per_helper ... ok
+test erasure::tests::product_matrix_msr_roundtrip_and_exact_repair ... ok
+test scsi_pr::tests::type_code_round_trip ... ok
+test scsi_pr::tests::decode_type_bearing_action_rejects_nonzero_scope ... ok
+test scsi_pr::tests::encode_read_keys_contains_generation_and_keys ... ok
+test scsi_pr::tests::unsupported_service_action_is_reported_before_reserved_type ... ok
+test security::action_tests::invalid_actions_and_operations_fail_closed ... ok
+test security::tests::subtree_boundary_and_literal_arguments ... ok
+test security::tests::deny_wins_and_privileged_rules_are_selective ... ok
+test storage::tests::ata_rotational_is_sata_hdd ... ok
+test storage::tests::fc_rotational_is_fc_hdd ... ok
+test storage::tests::nvme_is_detected_by_device_name ... ok
+test storage::tests::sas_rotational_is_sas_hdd ... ok
+test storage::tests::rotational_requirement_is_enforced ... ok
+test security::action_tests::allow_and_deny_both_deliver_configured_actions ... ok
+test erasure::tests::product_matrix_recovers_from_every_k_subset_and_repairs_every_node ... ok
+test webui::tests::local_userdb_hashes_and_authenticates ... ok
+test security_integration_tests::http_gate_and_monitoring_authentication ... ok
+
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.39s
+
+     Running unittests src/main.rs (work/kagi-v36/target/debug/deps/kagi_config-419e350a025531c1)
+
+running 28 tests
+test durability::tests::fractional_nines_and_boundaries ... ok
+test durability::tests::twenty_nines_survive_decimal_formatting ... ok
+test tests::cidr_allocator_returns_host_address ... ok
+test tests::mds_schemas_survive_two_fragment_losses ... ok
+test tests::class_afr_overrides_global ... ok
+test tests::automatic_geometry_is_bounded_by_host_locality ... ok
+test tests::minimum_tolerance_targets_two_when_possible ... ok
+test tests::invalid_msr_repair_fanin_is_rejected ... ok
+test checkpoint::tests::roundtrip_lock_and_corruption_detection ... ok
+test tests::mount_root_override_changes_generated_paths ... ok
+test tests::mount_name_is_deterministic ... ok
+test tests::multihoming_requires_all_paths_failed ... ok
+test tests::normalization_assigns_ordinals_and_mounts ... ok
+test tests::protection_summary_exposes_erasure_geometry ... ok
+test tests::quick_cidrs_advance_serially ... ok
+test tests::progress_bar_reports_fraction_and_bounds ... ok
+test tests::slot_key_bounds_are_exact ... ok
+test tests::validation_rejects_unknown_network ... ok
+test checkpoint::tests::ordered_reduction_matches_across_thread_counts ... ok
+test tests::reed_solomon_four_plus_two_meets_two_host_tolerance ... ok
+test tests::validation_rejects_fewer_than_six_disks_per_host ... ok
+test tests::validation_rejects_fewer_than_six_hosts ... ok
+test tests::quick_modes_reduce_simulation_work ... ok
+test tests::validation_rejects_duplicate_disk_ids ... ok
+test tests::validation_enforces_minimum_failure_tolerance ... ok
+test tests::per_disk_ranges_match_global_counts ... ok
+test tests::yaml_config_round_trip_preserves_topology ... ok
+test tests::slot_ranges_cover_keyspace ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/bin/kagi-host.rs (work/kagi-v36/target/debug/deps/kagi_host-17cbd4d445adca7b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/kagi-run.rs (work/kagi-v36/target/debug/deps/kagi_run-496c51488c914e47)
+
+running 1 test
+test tests::policy_priority_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/kagi-volume-nbd.rs (work/kagi-v36/target/debug/deps/kagi_volume_nbd-4b149d6f298d84ae)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

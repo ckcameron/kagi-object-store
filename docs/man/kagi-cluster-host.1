@@ -1,0 +1,26 @@
+.TH KAGI-CLUSTER-HOST 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-cluster-host \- distributed Kagi cluster daemon and administrative CLI
+.SH SYNOPSIS
+.B kagi-cluster-host
+--config FILE COMMAND [ARGS]
+.SH DESCRIPTION
+Runs the cluster object/metadata service or issues administrative operations. The daemon integrates Raft metadata, joint-consensus membership, PQ-authenticated peer traffic, health/recovery, CLAY/MSR/Reed-Solomon erasure coding, snapshots, maintenance scheduling, capacity expansion, filesystem namespace operations, and object-backed block volumes.
+.SH COMMANDS
+Serve, status, object put/get, repair/scrub, health clearance, PQ identity/key operations, membership operations, snapshot operations, capacity changes, and block-volume operations are exposed through this CLI and its REST service. Use `--help` for the exact build-specific command list.
+.SH CONSISTENCY
+Externally visible object mutations return success only after the configured Raft commit/apply barrier. Followers do not serve stale linearizable object reads as authoritative results.
+.SH SECURITY
+Internal requests require configured ML-DSA identity/authentication and cluster admission credentials. Protect node private keys and persistent session/replay state.
+.SH SEE ALSO
+kagi-config(1), kagi-install(1), kagi-volume-nbd(1)
+
+.SH ERASURE CODING
+The runtime supports Reed-Solomon, canonical product-matrix MSR with d=2k-2, and CLAY. CLAY is the default configured EC family. With the cuda feature, data-heavy GF(256) transforms use the CUDA matrix engine when above gpu_threshold_bytes. Single-chunk CLAY/MSR recovery uses bandwidth-optimal helper requests rather than downloading complete helper chunks.
+.SH TOPOLOGY MINIMUM
+The daemon requires at least six configured hosts and at least six disks on every host.
+
+.SH KAGI WEB CONSOLE
+Each serving node exposes the Kagi operations console at /ui when web_console.enabled is true. The local user database stores Argon2id password hashes and viewer/admin roles. Use the web-user-add subcommand with --password-file to bootstrap users. The browser authentication exchange must be protected by TLS or a trusted TLS reverse proxy.
+.PP
+The console provides cluster monitoring, object/chunk locality inspection, known pending object operations, local/cluster logs, and Raft-backed bucket/WORM lifecycle administration.

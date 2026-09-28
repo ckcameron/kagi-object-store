@@ -1,0 +1,2 @@
+icx-cc: error #10408: The Intel LLVM Based compiler cannot be found in the expected location. Please check your installation or documentation for more information.
+/opt/intel/oneapi/compiler/2026.0/bin/clang: No such file or directory

@@ -1,0 +1,36 @@
+# Merge this top-level section into an existing Kagi node configuration.
+security:
+  kernel:
+    enabled: false
+    object: /usr/lib/kagi/kagi-guard-ebpf
+    audit_only: false
+    rules:
+      - path: /var/lib/kagi/pq
+        recursive: true
+        operations: [read, write, delete, rename]
+        decision: deny
+        action: audit
+  objects:
+    - key: confidential
+      recursive: true
+      operations: [delete]
+      decision: deny
+      action: audit
+    - key: ""
+      recursive: true
+      privileged_only: true
+      operations: [delete]
+      decision: deny
+      action: audit
+    - key: "@api/v1/pq"
+      recursive: true
+      operations: [write]
+      decision: allow
+      action: audit
+  actions:
+    audit:
+      type: log
+    # alert:
+    #   type: exec
+    #   program: /usr/local/libexec/kagi-alert
+    #   args: ["--resource", "{path}", "--operation", "{operation}", "--decision", "{decision}"]

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+PREFIX=${PREFIX:-/usr/local}
+ETC=${ETC:-/etc/kagi}
+DATA=${DATA:-/var/lib/kagi}
+PORT=${PORT:-7400}
+NODE_ID=${NODE_ID:-$(hostname -s)}
+SITE=${SITE:-site-a}
+RACK=${RACK:-rack-a}
+ENDPOINT=${ENDPOINT:-http://$(hostname -I 2>/dev/null | awk '{print $1}'):${PORT}}
+JOIN_KEY_B64=${JOIN_KEY_B64:-}
+JOIN_KEY_HASH=${JOIN_KEY_HASH:-}
+METADATA_KEY_B64=${METADATA_KEY_B64:-}
+LEADER_ID=${LEADER_ID:-}
+LEADER_ENDPOINT=${LEADER_ENDPOINT:-}
+LEADER_PQ_PUB=${LEADER_PQ_PUB:-}
+NONINTERACTIVE=0
+REMOTE_SPECS=()
+usage(){ cat <<USAGE
+kagi-install [--non-interactive] [--node-id ID] [--site SITE] [--rack RACK]
+                 [--endpoint URL] [--remote user@host,node,site,rack,endpoint]...
+Environment may provide JOIN_KEY_B64/JOIN_KEY_HASH/METADATA_KEY_B64 and LEADER_* for remote bootstrap.
+USAGE
+}
+while [[ $# -gt 0 ]]; do case "$1" in
+ --non-interactive) NONINTERACTIVE=1;shift;; --node-id) NODE_ID=$2;shift 2;; --site) SITE=$2;shift 2;; --rack) RACK=$2;shift 2;; --endpoint) ENDPOINT=$2;shift 2;; --remote) REMOTE_SPECS+=("$2");shift 2;; -h|--help)usage;exit 0;; *) echo "unknown option $1" >&2;exit 2;; esac; done
+if [[ $EUID -ne 0 ]]; then echo "run as root (or sudo)" >&2; exit 1; fi
+install -d -m 0750 "$ETC/pki" "$DATA" "$DATA/pq"
+BIN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+for b in kagi-cluster-host kagi-host kagi-config kagi-run; do if [[ -x "$BIN_DIR/$b" ]]; then install -m 0755 "$BIN_DIR/$b" "$PREFIX/bin/$b"; fi; done
+if [[ -d "$BIN_DIR/docs/man" ]]; then
+  install -d -m 0755 "$PREFIX/share/man/man1"
+  for m in "$BIN_DIR"/docs/man/*.1; do [[ -f "$m" ]] && install -m 0644 "$m" "$PREFIX/share/man/man1/$(basename "$m")"; done
+fi
+if ! command -v kagi-cluster-host >/dev/null; then echo "kagi-cluster-host must be built and available in PATH" >&2; exit 1; fi
+if [[ -z "$JOIN_KEY_B64" ]]; then JOIN_KEY_B64=$(openssl rand -base64 32 | tr -d '\n'); fi
+if [[ -z "$JOIN_KEY_HASH" ]]; then JOIN_KEY_HASH=$(printf '%s' "$JOIN_KEY_B64" | base64 -d | b3sum --no-names 2>/dev/null || true); fi
+if [[ -z "$JOIN_KEY_HASH" ]]; then echo "b3sum is required to derive the admission hash (or set JOIN_KEY_HASH)" >&2; exit 1; fi
+if [[ -z "$METADATA_KEY_B64" ]]; then METADATA_KEY_B64=$(openssl rand -base64 32 | tr -d '\n'); fi
+PUB="$ETC/pki/$NODE_ID.mldsa87.pub"; SEC="$ETC/pki/$NODE_ID.mldsa87.key"
+if [[ ! -s "$PUB" || ! -s "$SEC" ]]; then kagi-cluster-host --config /dev/null generate-pq-identity --public "$PUB" --secret "$SEC"; chmod 0600 "$SEC"; fi
+PEERS="[]"; PEER_KEYS="{}"
+if [[ -n "$LEADER_ID" ]]; then
+  install -m 0644 "$LEADER_PQ_PUB" "$ETC/pki/$LEADER_ID.mldsa87.pub"
+  PEERS="[{ id: $LEADER_ID, endpoint: $LEADER_ENDPOINT }]"
+  PEER_KEYS="{ $LEADER_ID: $ETC/pki/$LEADER_ID.mldsa87.pub }"
+fi
+cat > "$ETC/node.yaml" <<YAML
+join_key_b64: "$JOIN_KEY_B64"
+cluster:
+  join_key_hash_hex: "$JOIN_KEY_HASH"
+  id: keyspace-cluster
+  placement_salt: 1161981756646125696
+  replication: 3
+  write_quorum: 2
+  chunk_replicas: 1
+  metadata_key_b64: "$METADATA_KEY_B64"
+  hosts:
+    - id: $NODE_ID
+      endpoint: $ENDPOINT
+      site: $SITE
+      rack: $RACK
+      disks:
+        - { id: data0, capacity_bytes: 1000000000000, weight: 1.0 }
+local_host: $NODE_ID
+data_root: $DATA
+listen: 0.0.0.0:$PORT
+metadata:
+  node_id: $NODE_ID
+  election_min_ms: 1500
+  election_max_ms: 3000
+  heartbeat_ms: 400
+  peers: $PEERS
+post_quantum:
+  required: true
+  identity_secret: $SEC
+  identity_public: $PUB
+  peer_public_keys: $PEER_KEYS
+recovery:
+  heartbeat_ms: 2000
+  suspect_after_ms: 6000
+  down_after_ms: 15000
+  out_after_ms: 120000
+  repair_interval_ms: 10000
+  max_parallel_repairs: 4
+  return_probe_successes: 3
+  flap_window_ms: 300000
+  flap_transition_threshold: 4
+  minimum_reinclude_uptime_ms: 600000
+garbage_collection:
+  enabled: true
+  grace_period_ms: 86400000
+  interval_ms: 30000
+  max_versions_per_cycle: 32
+YAML
+chmod 0600 "$ETC/node.yaml"
+if [[ -f "$BIN_DIR/kagi-host.service" ]]; then install -m 0644 "$BIN_DIR/kagi-host.service" /etc/systemd/system/kagi-host.service; systemctl daemon-reload; systemctl enable --now kagi-host.service; fi
+printf 'Installed %s (%s / %s)\nEndpoint: %s\nPQ public key: %s\n' "$NODE_ID" "$SITE" "$RACK" "$ENDPOINT" "$PUB"
+if [[ $NONINTERACTIVE -eq 0 && ${#REMOTE_SPECS[@]} -eq 0 ]]; then
+ read -r -p "Configure additional hosts over SSH now? [y/N] " yn
+ if [[ ${yn,,} == y* ]]; then
+   while true; do read -r -p "Remote spec user@host,node,site,rack,endpoint (blank to finish): " spec; [[ -z "$spec" ]] && break; REMOTE_SPECS+=("$spec"); done
+ fi
+fi
+for spec in "${REMOTE_SPECS[@]}"; do
+ IFS=, read -r sshhost rid rsite rrack rendpoint <<<"$spec"
+ [[ -n "$sshhost" && -n "$rid" && -n "$rendpoint" ]] || { echo "bad remote spec: $spec" >&2; exit 2; }
+ echo "Bootstrapping $rid via $sshhost ..."
+ scp -q "$0" "$PUB" "$sshhost:/tmp/"
+ for b in kagi-cluster-host kagi-host kagi-config kagi-run; do command -v "$b" >/dev/null && scp -q "$(command -v "$b")" "$sshhost:/tmp/$b"; done
+ ssh "$sshhost" "sudo install -m0755 /tmp/keyspace-* /usr/local/bin/ 2>/dev/null || true; sudo JOIN_KEY_B64='$JOIN_KEY_B64' JOIN_KEY_HASH='$JOIN_KEY_HASH' METADATA_KEY_B64='$METADATA_KEY_B64' LEADER_ID='$NODE_ID' LEADER_ENDPOINT='$ENDPOINT' LEADER_PQ_PUB='/tmp/$(basename "$PUB")' NODE_ID='$rid' SITE='$rsite' RACK='$rrack' ENDPOINT='$rendpoint' bash /tmp/kagi-install --non-interactive"
+ ssh "$sshhost" "sudo cat /etc/kagi/pki/$rid.mldsa87.pub" > "/tmp/$rid.mldsa87.pub"
+ kagi-cluster-host --config "$ETC/node.yaml" membership add node "$rid" --endpoint "$rendpoint" --site "$rsite" --rack "$rrack" --pq-public-key "/tmp/$rid.mldsa87.pub"
+ done

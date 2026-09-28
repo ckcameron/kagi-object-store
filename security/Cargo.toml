@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["kagi-guard-common", "kagi-guard-ebpf"]
+default-members = ["kagi-guard-common"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+aya-ebpf = { version = "0.2.1", default-features = false }
+
+[profile.release.package.kagi-guard-ebpf]
+debug = 2
+codegen-units = 1
+strip = false

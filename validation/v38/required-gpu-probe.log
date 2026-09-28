@@ -1,0 +1,26 @@
+Exit code: 101
+
+running 3 tests
+test erasure::tests::gpu_exact_repair_matches_persisted_chunks ... FAILED
+test erasure::tests::gpu_clay_matches_reference_and_reconstructs ... FAILED
+test erasure::tests::gpu_product_matrix_matches_cpu_reference ... FAILED
+
+failures:
+
+failures:
+    erasure::tests::gpu_clay_matches_reference_and_reconstructs
+    erasure::tests::gpu_exact_repair_matches_persisted_chunks
+    erasure::tests::gpu_product_matrix_matches_cpu_reference
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 50 filtered out; finished in 0.74s
+
+
+thread 'erasure::tests::gpu_clay_matches_reference_and_reconstructs' (11) panicked at src/bin/../erasure.rs:2155:13:
+GPU execution required but no compiled backend has an available device
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'erasure::tests::gpu_product_matrix_matches_cpu_reference' (13) panicked at src/bin/../erasure.rs:2104:13:
+GPU execution required but no compiled backend has an available device
+
+thread 'erasure::tests::gpu_exact_repair_matches_persisted_chunks' (12) panicked at src/bin/../erasure.rs:2196:13:
+GPU execution required but no compiled backend has an available device

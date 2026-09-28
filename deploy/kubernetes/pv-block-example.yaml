@@ -1,0 +1,33 @@
+# Attach the Kagi volume to a Kubernetes worker with scripts/kagi-volume-attach first.
+# This presents the resulting /dev/nbd device as a raw Block PersistentVolume.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: keyspace-block-example
+spec:
+  capacity:
+    storage: 100Gi
+  volumeMode: Block
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  local:
+    path: /dev/nbd0
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values: [REPLACE_WITH_NODE]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: keyspace-block-example
+spec:
+  volumeMode: Block
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: keyspace-block-example

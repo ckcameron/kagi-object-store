@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Reproducible CPU targeting without changing portable release defaults.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+target=${KAGI_CPU_TARGET:-portable}
+case "$target" in
+  portable) flags='-C target-cpu=x86-64' ;;
+  native) flags='-C target-cpu=native' ;;
+  avx2) flags='-C target-cpu=x86-64 -C target-feature=+avx2' ;;
+  avx512) flags='-C target-cpu=x86-64 -C target-feature=+avx512f,+avx512bw' ;;
+  avx10.1) flags='-C target-cpu=x86-64 -C target-feature=+avx10.1' ;;
+  avx10.2) flags='-C target-cpu=x86-64 -C target-feature=+avx10.2' ;;
+  *) echo 'KAGI_CPU_TARGET must be portable, native, avx2, avx512, avx10.1 or avx10.2' >&2; exit 2 ;;
+esac
+if [[ "$target" == avx10.* ]]; then
+  if ! rustc --print target-features | awk -v requested="$target" '$1 == requested {found=1} END {exit !found}'; then
+    echo "This Rust toolchain does not support $target" >&2; exit 2
+  fi
+fi
+# CXX may select AOCC or an installed oneAPI compiler for native host shims.
+# HIP kernels always use hipcc; CUDA kernels always use nvcc.
+export RUSTFLAGS="${RUSTFLAGS:-} $flags"
+printf 'Building CPU target %s; nonportable targets require matching deployment CPUs.\n' "$target" >&2
+exec cargo build --release "$@"

@@ -1,0 +1,12 @@
+.TH KAGI-HOST 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-host \- local Kagi object host and disk-placement service
+.SH SYNOPSIS
+.B kagi-host
+--config FILE
+.SH DESCRIPTION
+Runs the host-local object service used by earlier/simple deployments. It validates disk identity, maps keys deterministically to local storage, and reports disk capacity/health. For full distributed metadata, recovery, snapshots, and block volumes use kagi-cluster-host.
+.SH STORAGE
+Disk configuration should use generated mount paths and stable device identity where possible. Supported backend classes include NVMe, SATA HDD, SAS HDD, Fibre Channel HDD/LUN, and directory-backed development storage.
+.SH SEE ALSO
+kagi-cluster-host(1), kagi-config(1)

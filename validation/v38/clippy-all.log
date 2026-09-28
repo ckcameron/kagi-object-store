@@ -1,0 +1,41 @@
+   Compiling kagi-object-store v0.38.0 (/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v38)
+error: constant `OP_PERSISTENT_RESERVE_IN` is never used
+  --> src/bin/../scsi_pr.rs:14:11
+   |
+14 | pub const OP_PERSISTENT_RESERVE_IN: u8 = 0x5e;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: constant `OP_PERSISTENT_RESERVE_OUT` is never used
+  --> src/bin/../scsi_pr.rs:15:11
+   |
+15 | pub const OP_PERSISTENT_RESERVE_OUT: u8 = 0x5f;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `type_from_code` is never used
+  --> src/bin/../scsi_pr.rs:17:8
+   |
+17 | pub fn type_from_code(c: u8) -> Result<PrType> {
+   |        ^^^^^^^^^^^^^^
+
+error: function `type_code` is never used
+  --> src/bin/../scsi_pr.rs:29:8
+   |
+29 | pub fn type_code(t: PrType) -> u8 {
+   |        ^^^^^^^^^
+
+error: function `decode_pr_out` is never used
+  --> src/bin/../scsi_pr.rs:49:8
+   |
+49 | pub fn decode_pr_out(cdb: &[u8], p: &[u8], initiator: &str) -> Result<PrOut> {
+   |        ^^^^^^^^^^^^^
+
+error: function `encode_pr_in` is never used
+   --> src/bin/../scsi_pr.rs:116:8
+    |
+116 | pub fn encode_pr_in(cdb: &[u8], state: &PrIn) -> Result<Vec<u8>> {
+    |        ^^^^^^^^^^^^
+
+error: could not compile `kagi-object-store` (bin "kagi-cluster-host") due to 6 previous errors

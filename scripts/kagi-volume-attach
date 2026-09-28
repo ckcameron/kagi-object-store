@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+# Attach a Kagi NBD export as a Linux block device. Useful for KVM and Kubernetes local-block PVs.
+SERVER="${1:?usage: kagi-volume-attach HOST[:PORT] /dev/nbdN [block-size]}"; DEV="${2:?device required}"; BS="${3:-4096}"
+command -v nbd-client >/dev/null || { echo "nbd-client is required" >&2; exit 1; }
+modprobe nbd max_part=16 2>/dev/null || true
+HOST="${SERVER%:*}"; PORT="${SERVER##*:}"; [[ "$HOST" == "$PORT" ]] && PORT=10809
+exec nbd-client -N keyspace "$HOST" "$PORT" "$DEV" -b "$BS"

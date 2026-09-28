@@ -1,0 +1,1 @@
+cudaGetDeviceCount status=35, devices=0

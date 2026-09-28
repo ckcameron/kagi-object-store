@@ -1,0 +1,109 @@
+[
+  {
+    "check": "fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "check-default",
+    "command": [
+      "cargo",
+      "check",
+      "--all-targets",
+      "--locked"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "test-default",
+    "command": [
+      "cargo",
+      "test",
+      "--all-targets",
+      "--locked"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "check-ebpf",
+    "command": [
+      "cargo",
+      "check",
+      "--all-targets",
+      "--features",
+      "ebpf",
+      "--locked"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "test-ebpf",
+    "command": [
+      "cargo",
+      "test",
+      "--all-targets",
+      "--features",
+      "ebpf",
+      "--locked"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "clippy-ebpf",
+    "command": [
+      "cargo",
+      "clippy",
+      "--all-targets",
+      "--features",
+      "ebpf",
+      "--locked",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "clippy-default",
+    "command": [
+      "cargo",
+      "clippy",
+      "--all-targets",
+      "--locked",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "check-cuda",
+    "command": [
+      "cargo",
+      "check",
+      "--all-targets",
+      "--features",
+      "cuda",
+      "--locked"
+    ],
+    "exit_code": 0
+  },
+  {
+    "check": "test-cuda",
+    "command": [
+      "cargo",
+      "test",
+      "--all-targets",
+      "--features",
+      "cuda",
+      "--locked"
+    ],
+    "exit_code": 0
+  }
+]

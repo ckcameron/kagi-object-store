@@ -1,0 +1,12 @@
+.TH KAGI-VOLUME-ISCSI-EXPORT 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-volume-iscsi-export \- expose a Kagi volume as a Linux LIO iSCSI LUN
+.SH SYNOPSIS
+.B kagi-volume-iscsi-export
+[ARGS]
+.SH DESCRIPTION
+Attaches a Kagi-backed block device locally and exports it through Linux LIO so VMware, Hyper-V, and other initiators can consume a conventional SCSI LUN.
+.SH PERSISTENT RESERVATIONS
+Kagi Raft state is intended to remain reservation authority. A transport frontend should map guest/initiator SCSI-3 PR commands into Kagi rather than relying on an unrelated local-only reservation database.
+.SH SEE ALSO
+kagi-volume-nbd(1), targetcli(8)

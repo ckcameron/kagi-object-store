@@ -1,0 +1,12 @@
+.TH KAGI-VOLUME-NBD 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-volume-nbd \- expose an object-backed Kagi volume over NBD
+.SH SYNOPSIS
+.B kagi-volume-nbd
+[OPTIONS]
+.SH DESCRIPTION
+Presents a sparse Kagi logical volume as an NBD block endpoint. Read/write/flush/trim operations are translated into volume-range operations against the authoritative Kagi extent map. Whole-extent trim can deallocate extents.
+.SH NOTES
+NBD is a transport/backend mechanism. Guest-facing presentation should normally be virtio-scsi or virtual SAS/SCSI through the hypervisor. NBD cannot itself carry arbitrary guest SCSI Persistent Reservation CDBs.
+.SH SEE ALSO
+kagi-volume-qemu-scsi(1), kagi-volume-libvirt-scsi(1), kagi-volume-iscsi-export(1)

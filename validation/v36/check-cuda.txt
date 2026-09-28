@@ -1,0 +1,14 @@
+    Checking kagi-object-store v0.36.0 (/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v36)
+warning: field `gpu_repairs` is never read
+    --> src/bin/../erasure.rs:1292:9
+     |
+1284 | pub struct ErasureMetrics {
+     |            -------------- field in this struct
+...
+1292 |     pub gpu_repairs: AtomicU64,
+     |         ^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kagi-object-store` (bin "kagi-cluster-host") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.10s

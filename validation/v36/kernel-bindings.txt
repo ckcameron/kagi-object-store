@@ -1,0 +1,4 @@
+make: Entering directory '/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v36/security'
+aya-tool is required: cargo install aya-tool
+make: *** [Makefile:4: bindings] Error 1
+make: Leaving directory '/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v36/security'

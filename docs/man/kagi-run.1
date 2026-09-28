@@ -1,0 +1,12 @@
+.TH KAGI-RUN 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-run \- launch a command with explicit Linux scheduling and CPU affinity
+.SH SYNOPSIS
+.B kagi-run
+[--policy normal|round-robin|fifo] [--priority N] [--cpus 2,3] -- COMMAND [ARGUMENTS]
+.SH DESCRIPTION
+Applies and verifies scheduling before replacing itself with COMMAND. Normal is the default and requires priority zero. Round-robin and FIFO require priority 1 through 99 and appropriate operating-system permission. Failure prevents COMMAND from starting.
+.PP
+Real-time policies must exclude at least one allowed logical CPU from their affinity. Without --cpus, the first allowed logical CPU is excluded automatically. This is not a hard real-time guarantee. Worker threads and child processes inherit scheduling unless they change it.
+.SH SEE ALSO
+sched(7), kagi-config(1)

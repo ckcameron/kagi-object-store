@@ -1,0 +1,12 @@
+.TH KAGI-INSTALL 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-install \- initialize a Kagi node and optionally bootstrap remote hosts over SSH
+.SH SYNOPSIS
+.B kagi-install
+[OPTIONS]
+.SH DESCRIPTION
+Creates local configuration/state directories, installs binaries/service files, generates node post-quantum identity material, initializes cluster credentials as appropriate, starts the service, and can repeat bootstrap steps on additional SSH-accessible hosts.
+.SH SECURITY
+Transferred bootstrap credentials are sensitive. Use trusted SSH host keys and remove temporary copies after installation.
+.SH SEE ALSO
+kagi-cluster-host(1), kagi-config(1)

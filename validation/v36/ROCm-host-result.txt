@@ -1,0 +1,14 @@
+GPU: AMD Radeon 780M Graphics; architecture: gfx1103
+PASS matrix 1 -> 1 rows, 1 bytes/row
+PASS matrix 4 -> 6 rows, 255 bytes/row
+PASS matrix 6 -> 9 rows, 256 bytes/row
+PASS matrix 257 -> 17 rows, 257 bytes/row
+PASS matrix 513 -> 4 rows, 513 bytes/row
+PASS matrix 4 -> 6 rows, 4097 bytes/row
+PASS matrix 2 -> 3 rows, 1 bytes/row
+PASS 20 randomized matrix cases
+PASS 20 matrix calls across four host threads
+PASS readability mode=0: 32 exhaustive failure patterns
+PASS readability mode=1: 256 exhaustive failure patterns
+PASS readability mode=2: 1024 exhaustive failure patterns
+PASS: 47 matrix cases and 1312 exhaustive readability patterns executed on the HIP GPU.

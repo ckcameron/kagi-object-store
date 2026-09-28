@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+set -euo pipefail
+# Materialize a Kagi NBD volume into a hypervisor-native image. This is an independent copy, not the live clustered backing device.
+SRC="${1:?usage: kagi-volume-image nbd://host:port output.(qcow2|vmdk|vhdx) format}"; OUT="${2:?output required}"; FMT="${3:?qcow2|vmdk|vhdx required}"
+case "$FMT" in qcow2|vmdk|vhdx) ;; *) echo "unsupported format: $FMT" >&2; exit 2;; esac
+exec qemu-img convert -p -f raw -O "$FMT" "$SRC" "$OUT"

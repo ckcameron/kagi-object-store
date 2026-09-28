@@ -1,0 +1,12 @@
+   Compiling kagi-object-store v0.38.0 (/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v38)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running unittests src/bin/kagi-run.rs (work/kagi-v36/target/debug/deps/kagi_run-496c51488c914e47)
+
+running 1 test
+test tests::policy_priority_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling kagi-object-store v0.38.0 (/home/chase@ckcameron.net/Documents/Codex/2026-09-27/referenced-chatgpt-conversation-this-is-an-2/work/kagi-v38)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.53s
+kagi-run 0.38.0

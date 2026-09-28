@@ -1,0 +1,25 @@
+cluster:
+  id: lab-cluster
+  placement_salt: 1161981756646125696
+
+host:
+  id: host-a1
+  site: site-a
+  rack: rack-a1
+  disks:
+    - id: d00
+      path: /storage/d0
+      weight: 1.0
+      expected_capacity_bytes: 7680000000000
+    - id: d01
+      path: /storage/d1
+      weight: 1.0
+      expected_capacity_bytes: 7680000000000
+
+server:
+  listen: 0.0.0.0:7400
+  admin_listen: 127.0.0.1:7401
+
+placement:
+  slot_bits: 24
+  max_fragments_per_disk: 1

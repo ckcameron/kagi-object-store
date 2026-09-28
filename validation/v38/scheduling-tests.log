@@ -1,0 +1,11 @@
+normal priority 0: exit 0
+Applied Normal scheduling, priority 0, logical CPUs {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+
+round-robin priority 1: exit 0
+Applied RoundRobin scheduling, priority 1, logical CPUs {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+
+fifo priority 0: exit 1
+Error: normal scheduling requires priority 0; real-time scheduling requires 1–99
+
+normal priority 1: exit 1
+Error: normal scheduling requires priority 0; real-time scheduling requires 1–99

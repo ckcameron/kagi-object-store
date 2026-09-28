@@ -1,0 +1,2 @@
+Interrupted with 15 committed batches
+PASS: interruption/resume equals cold run; key stable; committed batches retained; conflicts and corruption rejected

@@ -1,0 +1,10 @@
+.TH KAGI-VOLUME-LIBVIRT-SCSI 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.SH NAME
+kagi-volume-libvirt-scsi \- generate libvirt SCSI attachment configuration for a Kagi volume
+.SH SYNOPSIS
+.B kagi-volume-libvirt-scsi
+[ARGS]
+.SH DESCRIPTION
+Produces libvirt/QEMU configuration that presents the backend as a SCSI disk, normally via virtio-scsi, with discard/unmap enabled so guest TRIM can reclaim sparse Kagi extents.
+.SH SEE ALSO
+kagi-volume-qemu-scsi(1), virsh(1)
