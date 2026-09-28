@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Numerically stable presentation of modeled loss probabilities.
 //!
 //! Subtracting 1e-20 from an f64 one produces one. Percentage presentation instead

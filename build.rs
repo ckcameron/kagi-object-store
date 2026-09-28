@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 fn main() {
     if std::env::var_os("CARGO_FEATURE_CUDA").is_some() {
         println!("cargo:rerun-if-changed=cuda/erasure.cu");

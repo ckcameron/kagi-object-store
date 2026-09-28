@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Monte Carlo Planner, Quick Wizard, and Erasure-Geometry Optimizer
 
 ## Purpose

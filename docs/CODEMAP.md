@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Source Code Map
 
 The source files carry module-level comments; this document provides an additional map for reviewers navigating the code.

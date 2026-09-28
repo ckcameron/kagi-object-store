@@ -1,3 +1,5 @@
+// Upstream package: MIT OR Apache-2.0; kernel license marker: Dual MIT/GPL.
+// See THIRD-PARTY-NOTICES.md; these upstream declarations are preserved.
 #![no_std]
 #![no_main]
 

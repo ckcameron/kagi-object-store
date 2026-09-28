@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Kagi security policy and monitoring (0.38)
 
 The distributed `kagi-cluster-host` now owns kernel policy loading, logical-object

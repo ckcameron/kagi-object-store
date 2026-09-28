@@ -1,4 +1,5 @@
-// Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
+// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi TLS provider initialization.
 //!
 //! The node installs the rustls AWS-LC provider so hybrid X25519 + ML-KEM key exchange is

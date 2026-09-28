@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 // Kagi GF(256) and protection-readability kernels; no object-format changes.
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>

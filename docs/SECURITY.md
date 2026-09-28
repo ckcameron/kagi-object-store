@@ -1,6 +1,8 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Security Notes
 
-This repository is currently proprietary and confidential; see `LICENSE`.
+Kagi is licensed under CC BY-NC-SA 4.0; see `LICENSE` and `THIRD-PARTY-NOTICES.md` for upstream exceptions.
 
 Internal cluster operations use ML-DSA authenticated envelopes, per-node persistent session epochs, sequence windows, random nonces, replay caches, and Raft-managed key rotation/revocation. The shared join key is defense in depth and must not be treated as a substitute for node identity.
 

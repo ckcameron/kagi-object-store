@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Runtime-dispatched x86-64 GF(256) operations. The field polynomial is 0x11d.
 //! Specialized instructions are confined to target-feature functions, keeping the
 //! portable binary safe on older Intel and AMD processors.

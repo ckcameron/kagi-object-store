@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
 join_key_b64: "REPLACE_WITH_KAGI_JOIN_KEY"
 cluster:
   join_key_hash_hex: "REPLACE_WITH_HASH_FROM_KAGI_GENERATED_YAML"

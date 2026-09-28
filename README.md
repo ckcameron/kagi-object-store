@@ -1,11 +1,13 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Kagi
 
 **Development release 0.38.0 — experimental; not production-ready.**
 
 Kagi: a GPU-accelerated, CPU-optimized, CLAY/MSR Erasure-coded Enterprise Object Store.
-**Kagi** is a proprietary distributed object-storage, filesystem, block-volume, durability-planning, and cluster-operations system written primarily in Rust.
+**Kagi** is a distributed object-storage, filesystem, block-volume, durability-planning, and cluster-operations system written primarily in Rust.
 
-> **Proprietary and Confidential — All Rights Reserved.** See `LICENSE`.
+> **Licensed under [CC BY-NC-SA 4.0](LICENSE).** Copyright (c) 2026 CK Cameron. Third-party exceptions are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Current source edition: **0.38.0**.
 
@@ -394,4 +396,10 @@ The repository includes integration boundaries for hypervisors, iSCSI, identity 
 
 ## Licensing
 
-Kagi source is proprietary and confidential under `LICENSE`. Third-party Rust/CUDA dependencies retain their upstream licenses; see `THIRD-PARTY-NOTICES.md`.
+Kagi source and documentation are licensed under CC BY-NC-SA 4.0; see `LICENSE`. Third-party Rust/CUDA dependencies retain their upstream licenses; see `THIRD-PARTY-NOTICES.md`.
+
+## License
+
+Copyright (c) 2026 CK Cameron. Kagi source code, scripts, configuration examples, and documentation are licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE). Attribute CK Cameron and Kagi, retain notices, identify modifications, and follow the noncommercial and share-alike terms of the license. The canonical project is https://github.com/ckcameron/kagi-object-store.
+
+The fileguard-derived security workspace and third-party dependencies retain their upstream licenses; see [Third-Party Notices](THIRD-PARTY-NOTICES.md). Generated validation logs are historical evidence, not new license declarations.

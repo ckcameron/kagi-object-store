@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Acceleration and CPU targeting
 
 Kagi targets Intel and AMD x86-64. The default build keeps scalar fallbacks and

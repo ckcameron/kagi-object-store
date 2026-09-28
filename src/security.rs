@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Kagi access policy and asynchronous side actions.
 //!
 //! Logical rules add restrictions to existing ACL/WORM checks. They never grant an

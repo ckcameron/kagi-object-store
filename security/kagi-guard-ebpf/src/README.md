@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Kagi target-kernel bindings
 
 `vmlinux.rs` is intentionally not bundled: generate Aya field bindings from the

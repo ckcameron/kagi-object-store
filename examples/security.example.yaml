@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
 # Merge this top-level section into an existing Kagi node configuration.
 security:
   kernel:

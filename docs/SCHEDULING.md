@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Explicit process scheduling
 
 `kagi-run` launches any command, including `kagi-config`, with an explicitly

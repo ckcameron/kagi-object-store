@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 pub const OP_OPEN: u32 = 1 << 0;
 pub const OP_READ: u32 = 1 << 1;
 pub const OP_WRITE: u32 = 1 << 2;

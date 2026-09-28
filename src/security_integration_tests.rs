@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! HTTP regression checks for enforcement and authenticated monitoring.
 use crate::runtime_security;
 use crate::*;

@@ -1,4 +1,5 @@
-// Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
+// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi cluster daemon and administrative CLI.
 //!
 //! This is the runtime composition root. It loads and validates node configuration, starts

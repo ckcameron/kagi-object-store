@@ -1,4 +1,5 @@
-// Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
+// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi SCSI-3 persistent-reservation wire handling.
 //!
 //! This module decodes PR IN/OUT commands, validates service actions, updates the replicated

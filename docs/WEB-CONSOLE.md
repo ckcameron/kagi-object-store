@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Kagi Web Operations Console
 
 The Kagi node daemon serves an embedded operations console at `/ui` on every node. The console is dark-themed with teal/electric-blue accents and is intentionally backed by live Raft/health/data-plane state rather than a separate monitoring database.

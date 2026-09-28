@@ -1,4 +1,5 @@
-// Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
+// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi single-host storage daemon and local placement CLI.
 //!
 //! This smaller daemon is useful for validating disk identity, exercising deterministic

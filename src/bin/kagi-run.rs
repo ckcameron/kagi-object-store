@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Launch a process with explicit Linux scheduling before its worker threads start.
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};

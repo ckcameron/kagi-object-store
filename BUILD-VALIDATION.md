@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Kagi 0.38.0 development build validation
 
 **Experimental development release; not production-ready.**
@@ -69,3 +71,7 @@ BPF build tools and an appropriate test kernel; these were not executed here.
 The new source archive contains source and evidence, not installed services,
 secrets, build caches or third-party SDK binaries. No system services, kernel
 settings or permanent scheduling policy were changed.
+
+## Licensing-only update (2026-09-28)
+
+Source comments, package license metadata, and documentation were updated to CC BY-NC-SA 4.0, preserving upstream security licenses. No executable statements were changed. Rust formatting, package metadata, notice coverage, and distribution checksums were checked for this update; runtime results above refer to the preceding development build.

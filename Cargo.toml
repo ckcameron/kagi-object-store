@@ -1,11 +1,12 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
 [package]
 name = "kagi-object-store"
 version = "0.38.0"
 edition = "2021"
 publish = false
-license-file = "LICENSE"
+license = "CC-BY-NC-SA-4.0"
 readme = "README.md"
-description = "Kagi: proprietary distributed 64-bit keyspace object storage, topology simulator, web console, and SCSI block-volume system"
+description = "Kagi: distributed 64-bit keyspace object storage, topology simulator, web console, and SCSI block-volume system"
 
 [package.metadata.kagi]
 product-name = "Kagi"

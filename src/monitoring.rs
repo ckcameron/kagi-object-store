@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Bounded node-local event history and live delivery.
 //!
 //! Publication never waits for a subscriber. A slow client receives an explicit gap;

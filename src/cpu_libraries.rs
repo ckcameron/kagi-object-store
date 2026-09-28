@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Optional CPU libraries. Their public entry points perform their own ISA dispatch.
 //! Library handles intentionally live for the process lifetime with their symbols.
 use std::ffi::CStr;

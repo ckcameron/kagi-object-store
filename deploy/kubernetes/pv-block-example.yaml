@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
 # Attach the Kagi volume to a Kubernetes worker with scripts/kagi-volume-attach first.
 # This presents the resulting /dev/nbd device as a raw Block PersistentVolume.
 apiVersion: v1

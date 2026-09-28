@@ -1,6 +1,8 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Third-Party Notices
 
-Kagi itself is proprietary and confidential under the repository `LICENSE`. Third-party dependencies retain their own copyright and license terms; the Kagi license does not replace or restrict those upstream rights.
+Kagi source and documentation are licensed under CC BY-NC-SA 4.0 under the repository `LICENSE`. Third-party dependencies retain their own copyright and license terms; the Kagi license does not replace or restrict those upstream rights.
 
 ## clay-codes
 
@@ -12,7 +14,7 @@ Kagi itself is proprietary and confidential under the repository `LICENSE`. Thir
 
 ## Other Cargo dependencies
 
-All other Cargo dependencies listed in `Cargo.toml` and resolved by Cargo remain subject to their respective upstream licenses. Distribution of a binary must comply with the notices and attribution requirements of those dependencies in addition to the proprietary Kagi license.
+All other Cargo dependencies listed in `Cargo.toml` and resolved by Cargo remain subject to their respective upstream licenses. Distribution of a binary must comply with the notices and attribution requirements of those dependencies in addition to the Kagi license.
 
 ## argon2
 
@@ -26,3 +28,7 @@ Its Cargo manifests declare MIT OR Apache-2.0 and its BPF license section declar
 Dual MIT/GPL; those declarations are retained. The supplied archive included no
 separate LICENSE file. `security/FILEGUARD-UPSTREAM.md` preserves its original
 README and caveats. Aya and aya-ebpf retain their upstream license terms.
+
+## Scope of the Kagi license
+
+The default CC BY-NC-SA 4.0 license applies to Kagi-authored material, including its userspace adaptations. It does not relicense upstream material or remove existing upstream rights. The fileguard-derived `security/` workspace retains its existing MIT OR Apache-2.0 package declarations; its eBPF program retains the `Dual MIT/GPL` kernel license marker. `security/FILEGUARD-UPSTREAM.md` is preserved verbatim. Historical build logs and recorded upstream diagnostic text are preserved as evidence. External CUDA, ROCm, OpenCL, ISA-L, IPP, AOCL, and other SDKs/libraries retain their own licenses and are not relicensed by this repository.

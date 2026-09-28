@@ -1,4 +1,5 @@
-// Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
+// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi post-quantum signing, peer trust, and replay protection.
 //!
 //! Internal control traffic is authenticated with ML-DSA identities and bounded replay

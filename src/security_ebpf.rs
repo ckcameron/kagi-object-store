@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Aya adapter for the supplied fileguard LSM implementation.
 //!
 //! Load every policy before attaching hooks. Keep the Ebpf owner alive for the entire

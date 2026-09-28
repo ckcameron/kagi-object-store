@@ -1,6 +1,14 @@
+<!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
+
 # Kagi Changelog
 
-Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
+
+## 0.38.0 licensing update
+
+- License Kagi source and documentation under CC BY-NC-SA 4.0, replacing the proprietary/confidential notice.
+- Preserve upstream fileguard and dependency licenses and the BPF kernel license marker.
+- Prepare the development repository for public access; experimental status is unchanged.
 
 ## 0.38.0 (development release; not production-ready) — resumable configuration, optional acceleration and process scheduling
 

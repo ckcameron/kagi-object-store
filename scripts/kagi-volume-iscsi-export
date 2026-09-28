@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+# Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 set -euo pipefail
 # Export an already attached /dev/nbdX through Linux LIO. VMware ESXi and Windows Hyper-V can consume the iSCSI LUN.
 DEV="${1:?usage: kagi-volume-iscsi-export /dev/nbdN iqn target_portal_ip [lun]}"; IQN="${2:?iqn required}"; IP="${3:?portal IP required}"; LUN="${4:-0}"

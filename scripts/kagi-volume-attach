@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copyright (c) 2026 CK Cameron. All Rights Reserved. Proprietary and Confidential.
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+# Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 set -euo pipefail
 # Attach a Kagi NBD export as a Linux block device. Useful for KVM and Kubernetes local-block PVs.
 SERVER="${1:?usage: kagi-volume-attach HOST[:PORT] /dev/nbdN [block-size]}"; DEV="${2:?device required}"; BS="${3:-4096}"

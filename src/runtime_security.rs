@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 //! Runtime wiring for access policy, authenticated monitoring, and actionable audits.
 use crate::{monitoring::Filter, security::common::*, *};
 use axum::{
