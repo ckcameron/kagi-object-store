@@ -383,24 +383,10 @@ The generated YAML includes the full keyspace slot geometry, per-disk slot range
 - `docs/OPERATIONS.md` — deployment, maintenance, capacity, snapshots, recovery, and virtual volumes.
 - `docs/SECURITY.md` — admission, encryption, PQ signatures, replay protection, and transport notes.
 - `docs/TESTING.md` — test/Clippy/CUDA/coverage procedures.
-- `docs/SECURITY-VALIDATION.md` — Miri, sanitizers, fuzzing, dependency/exploit checks, and performance regression workflow.
 - `docs/CODEMAP.md` — source responsibilities and review paths.
 - `docs/WEB-CONSOLE.md` — console configuration and operations.
 - `docs/man/` — command manual pages.
 - `CHANGELOG.md` — release history.
-
-
-## Security validation and performance analysis
-
-The fast local robustness gate is `bash scripts/kagi-security-check quick`. The deep gate adds
-RustSec/dependency checks, unsafe-code inventory, Miri, native sanitizers, and short libFuzzer
-campaigns; see `docs/SECURITY-VALIDATION.md`. NVIDIA builds can additionally run
-`bash scripts/kagi-gpu-sanitize` under Compute Sanitizer.
-
-Kagi 0.39 also includes `kagi-bench`, a correctness-checked compute/data-path benchmark that
-reports encoding/reconstruction throughput and latency plus actual CPU/GPU dispatch counters.
-`bash scripts/kagi-perf-demo` builds for the selected CPU target, writes JSON/text results,
-captures Linux `perf stat` counters when available, and runs the Criterion regression suite.
 
 ## Design boundaries
 
