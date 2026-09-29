@@ -1504,9 +1504,7 @@ async fn rpc_delete_replica(
     let response = crate::pq::apply_headers(st.client.delete(url), auth)
         .send()
         .await?;
-    if !response.status().is_success()
-        && response.status() != reqwest::StatusCode::NOT_FOUND
-    {
+    if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
         bail!("peer delete {}", response.status())
     }
     Ok(())
@@ -1607,9 +1605,7 @@ async fn rpc_delete_replica(
     let response = crate::pq::apply_headers(st.client.delete(url), auth)
         .send()
         .await?;
-    if !response.status().is_success()
-        && response.status() != reqwest::StatusCode::NOT_FOUND
-    {
+    if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
         bail!("peer delete {}", response.status());
     }
     Ok(())
