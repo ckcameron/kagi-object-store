@@ -248,11 +248,13 @@ async fn read_request(recv: &mut quinn::RecvStream, max_body_bytes: usize) -> Re
     let mut body_len = [0u8; 8];
     recv.read_exact(&mut meta_len).await?;
     recv.read_exact(&mut body_len).await?;
-    let meta_len = u32::from_be_bytes(meta_len) as usize;
-    let body_len = u64::from_be_bytes(body_len) as usize;
-    if meta_len > MAX_META_BYTES || body_len > max_body_bytes {
-        bail!("QUIC request exceeds configured frame limit");
-    }
+    let (meta_len, body_len) = crate::wire::validate_frame_lengths(
+        u32::from_be_bytes(meta_len) as u64,
+        u64::from_be_bytes(body_len),
+        MAX_META_BYTES,
+        max_body_bytes,
+    )
+    .map_err(|error| anyhow::anyhow!("QUIC request rejected: {error}"))?;
     let mut meta = vec![0; meta_len];
     let mut body = vec![0; body_len];
     recv.read_exact(&mut meta).await?;
@@ -280,11 +282,13 @@ async fn read_response(recv: &mut quinn::RecvStream, max_body_bytes: usize) -> R
     let mut body_len = [0u8; 8];
     recv.read_exact(&mut meta_len).await?;
     recv.read_exact(&mut body_len).await?;
-    let meta_len = u32::from_be_bytes(meta_len) as usize;
-    let body_len = u64::from_be_bytes(body_len) as usize;
-    if meta_len > MAX_META_BYTES || body_len > max_body_bytes {
-        bail!("QUIC response exceeds configured frame limit");
-    }
+    let (meta_len, body_len) = crate::wire::validate_frame_lengths(
+        u32::from_be_bytes(meta_len) as u64,
+        u64::from_be_bytes(body_len),
+        MAX_META_BYTES,
+        max_body_bytes,
+    )
+    .map_err(|error| anyhow::anyhow!("QUIC response rejected: {error}"))?;
     let mut meta = vec![0; meta_len];
     let mut body = vec![0; body_len];
     recv.read_exact(&mut meta).await?;
