@@ -21,13 +21,18 @@ use std::{
 };
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the WebConsoleConfig path.
+/// Browser operations-console configuration.
 pub struct WebConsoleConfig {
+    /// Enable console routes. Default: true.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Local Argon2 user database. Default: /etc/kagi/users.yaml.
     #[serde(default = "default_userdb")]
     pub userdb: PathBuf,
+    /// Log file exposed by the authenticated console. Default: /var/log/kagi/kagi.log.
     #[serde(default = "default_log_path")]
     pub log_path: PathBuf,
+    /// Maximum log lines returned per request. Default: 500.
     #[serde(default = "default_log_lines")]
     pub max_log_lines: usize,
 }
