@@ -30,7 +30,8 @@ async fn fixture() -> (V6State, PathBuf) {
         client.clone(),
         identity.clone(),
         RuntimeKeyring::default(),
-    );
+    )
+    .unwrap();
     let meta = RaftNode::open(
         "test".into(),
         vec![],
@@ -63,6 +64,7 @@ async fn fixture() -> (V6State, PathBuf) {
             .unwrap(),
         namespace_lock: Arc::new(tokio::sync::Mutex::new(())),
         web_console: cfg.web_console.clone(),
+        telemetry: telemetry::TelemetryStore::new(cfg.telemetry.clone()),
         node_config: Arc::new(cfg),
     };
     (st, root)
