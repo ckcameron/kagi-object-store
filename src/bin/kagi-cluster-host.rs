@@ -38,6 +38,8 @@ mod security;
 mod security_ebpf;
 #[path = "../storage.rs"]
 mod storage;
+#[path = "../telemetry.rs"]
+mod telemetry;
 #[path = "../tls.rs"]
 mod tls;
 #[path = "../webui.rs"]
@@ -154,6 +156,8 @@ struct NodeConfig {
     maintenance: MaintenanceConfig,
     #[serde(default)]
     web_console: WebConsoleConfig,
+    #[serde(default)]
+    telemetry: telemetry::TelemetryConfig,
     local_host: String,
     data_root: PathBuf,
     #[serde(default = "listen")]
@@ -550,6 +554,7 @@ struct V6State {
     fs_index: FsIndex,
     namespace_lock: Arc<tokio::sync::Mutex<()>>,
     web_console: WebConsoleConfig,
+    telemetry: telemetry::TelemetryStore,
 }
 /// Implements the effective cluster config step and keeps its validation and state transitions visible at the call site.
 async fn effective_cluster_config(st: &V6State) -> ClusterConfig {
@@ -2728,7 +2733,7 @@ async fn local_console_summary(st: &V6State) -> serde_json::Value {
         .sum::<u64>();
     let (site, rack) = host_site_rack(st);
     serde_json::json!( {
-        "node_id":st.data.local_host,"site":site,"rack":rack,"role":format!("{:?}",raft.role).to_lowercase(),"term":raft.term,"leader":raft.leader,"objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"fragments":fragments,"healthy_resources":healthy,"capacity_bytes":capacity,"placement_epoch":ms.placement_epoch,"pending_gc":ms.garbage.len(),"snapshots":ms.snapshots.len(),"buckets":ms.buckets.len(),"system":webui::system_stats()
+        "node_id":st.data.local_host,"site":site,"rack":rack,"role":format!("{:?}",raft.role).to_lowercase(),"term":raft.term,"leader":raft.leader,"objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"fragments":fragments,"healthy_resources":healthy,"capacity_bytes":capacity,"placement_epoch":ms.placement_epoch,"pending_gc":ms.garbage.len(),"snapshots":ms.snapshots.len(),"buckets":ms.buckets.len(),"system":webui::system_stats(),"telemetry":st.telemetry.current(),"maintenance":st.maintenance.status()
     }
     )
 }
@@ -2816,6 +2821,141 @@ async fn ui_summary(State(st): State<V6State>, headers: axum::http::HeaderMap) -
     }
     )).into_response()
 }
+
+#[derive(Debug, Deserialize, Default)]
+struct TelemetryQuery {
+    #[serde(default)]
+    after_ms: u128,
+}
+
+/// Periodically sample kernel/device/network state. Sampling stays off the request path so
+/// a slow SMART/sysfs device never delays the browser or object I/O.
+async fn run_telemetry_sampler(st: V6State) {
+    let interval = std::time::Duration::from_millis(st.telemetry.config().sample_interval_ms);
+    loop {
+        let cfg = effective_cluster_config(&st).await;
+        st.telemetry.sample(&cfg, &st.data.local_host);
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Internal history endpoint used for authenticated cluster-wide dashboard aggregation.
+async fn internal_ui_telemetry(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    let path = "/internal/v1/ui/telemetry";
+    if pq::verify_request(&headers, "GET", path, &[], &st.data.pq_keys)
+        .await
+        .is_err()
+        || !request_authorized(&st.data.cfg, &headers)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(serde_json::json!({
+        "node": st.data.local_host,
+        "samples": st.telemetry.history(query.after_ms)
+    }))
+    .into_response()
+}
+
+/// Return local and peer telemetry histories.  The hierarchy is explicit in every sample
+/// (site/rack/node/disk) so clients can aggregate without guessing topology names.
+async fn ui_telemetry(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    if console_auth(&st, &headers, false).is_none() {
+        return webui::unauthorized();
+    }
+
+    let mut nodes = vec![serde_json::json!({
+        "node": st.data.local_host,
+        "samples": st.telemetry.history(query.after_ms)
+    })];
+
+    if let Some(identity) = st.data.pq_identity.as_ref() {
+        for peer in &st.data.cfg.hosts {
+            if peer.id == st.data.local_host {
+                continue;
+            }
+            let path = "/internal/v1/ui/telemetry";
+            let Ok(auth) = pq::signed_headers(identity, "GET", path, &[]) else {
+                continue;
+            };
+            let url = format!(
+                "{}{}?after_ms={}",
+                peer.endpoint.trim_end_matches('/'),
+                path,
+                query.after_ms
+            );
+            let request = st.data.client.get(url);
+            if let Ok(response) = pq::apply_headers(request, auth).send().await {
+                if response.status().is_success() {
+                    if let Ok(value) = response.json::<serde_json::Value>().await {
+                        nodes.push(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "after_ms": query.after_ms,
+        "nodes": nodes
+    }))
+    .into_response()
+}
+
+/// Change scheduler/cache policy only for a disk configured on this node.  The operation
+/// requires an administrator identity and emits a security/operations event for auditability.
+async fn ui_disk_tune(
+    State(st): State<V6State>,
+    Path(disk): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(tuning): Json<storage::QueueTuning>,
+) -> Response {
+    let Some(identity) = console_auth(&st, &headers, true) else {
+        return webui::unauthorized();
+    };
+    let Some(host) = st.data.cfg.hosts.iter().find(|host| host.id == st.data.local_host) else {
+        return (StatusCode::NOT_FOUND, "local host is not in topology").into_response();
+    };
+    let Some(configured) = host.disks.iter().find(|candidate| candidate.id == disk) else {
+        return (StatusCode::NOT_FOUND, "disk is not configured on this node").into_response();
+    };
+    let Some(device) = configured.device_path.as_deref() else {
+        return (StatusCode::BAD_REQUEST, "disk has no block device path").into_response();
+    };
+
+    match storage::apply_queue_tuning(device, &tuning) {
+        Ok(settings) => {
+            st.monitor.emit(
+                "info",
+                "storage",
+                &format!("disk/{disk}"),
+                &format!(
+                    "administrator {} changed block queue/cache settings",
+                    identity.username
+                ),
+            );
+            Json(serde_json::json!({
+                "disk": disk,
+                "device": device,
+                "settings": settings
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("unable to change disk settings: {error}"),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct PrefixQuery {
     #[serde(default)]
@@ -3119,6 +3259,7 @@ async fn main() -> Result<()> {
     let fs_index = FsIndex::open(cfg.data_root.join("index"), cfg.local_host.clone()).await?;
     let monitor = monitoring::Monitor::new(4096);
     let security = security::Security::new(cfg.security.clone(), monitor.clone())?;
+    let telemetry = telemetry::TelemetryStore::new(cfg.telemetry.clone());
     let v6 = V6State {
         security,
         monitor,
@@ -3133,6 +3274,7 @@ async fn main() -> Result<()> {
         fs_index,
         namespace_lock: Arc::new(tokio::sync::Mutex::new(())),
         web_console: cfg.web_console.clone(),
+        telemetry,
     };
     // Local administrative CLI object operations use the same configured rules.
     let cli_access = match &cli.command {
@@ -3181,6 +3323,9 @@ async fn main() -> Result<()> {
             tokio::spawn(run_rebalancer(v6.clone()));
             tokio::spawn(gossip_fs_index(v6.clone()));
             tokio::spawn(sync_pq_keyring(v6.clone()));
+            if v6.telemetry.config().enabled {
+                tokio::spawn(run_telemetry_sampler(v6.clone()));
+            }
             let public = Router::new()
                 .route("/v1/monitor/events", get(runtime_security::history))
                 .route("/v1/monitor/stream", get(runtime_security::stream))
@@ -3245,11 +3390,14 @@ async fn main() -> Result<()> {
                 .route("/", get(kagi_root))
                 .route("/ui", get(kagi_ui))
                 .route("/ui/api/summary", get(ui_summary))
+                .route("/ui/api/telemetry", get(ui_telemetry))
+                .route("/ui/api/disk/:disk/tune", axum::routing::post(ui_disk_tune))
                 .route("/ui/api/objects", get(ui_objects))
                 .route("/ui/api/object/*key", get(ui_object))
                 .route("/ui/api/logs", get(ui_logs))
                 .route("/ui/api/buckets", get(ui_buckets).post(ui_bucket_put))
                 .route("/internal/v1/ui/node", get(internal_ui_node))
+                .route("/internal/v1/ui/telemetry", get(internal_ui_telemetry))
                 .route("/internal/v1/ui/logs", get(internal_ui_logs))
                 .with_state(v6.clone());
             let maintenance = Router::new()
