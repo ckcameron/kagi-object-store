@@ -1399,6 +1399,55 @@ mod gpu {
         Ok(out)
     }
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct ErasureMetricsSnapshot {
+    pub cpu_bytes: u64,
+    pub gpu_bytes: u64,
+    pub gpu_fallbacks: u64,
+    pub gpu_inflight: u64,
+    pub gpu_repairs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccelerationStatus {
+    pub requested: BackendKind,
+    pub cuda_compiled: bool,
+    pub hip_compiled: bool,
+    pub opencl_compiled: bool,
+    pub isa_l_compiled: bool,
+    pub ipp_compiled: bool,
+    pub aocl_compiled: bool,
+    pub selected_gpu_available: bool,
+    pub avx2: bool,
+    pub avx512f: bool,
+    pub avx512bw: bool,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx2() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx2() -> bool {
+    false
+}
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx512f() -> bool {
+    std::arch::is_x86_feature_detected!("avx512f")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx512f() -> bool {
+    false
+}
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx512bw() -> bool {
+    std::arch::is_x86_feature_detected!("avx512bw")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx512bw() -> bool {
+    false
+}
+
 #[derive(Default)]
 /// Kagi state or configuration used by the ErasureMetrics path.
 pub struct ErasureMetrics {
@@ -1434,6 +1483,37 @@ impl AdaptiveBackend {
             cfg,
             cpu_rs: Arc::new(CpuBackend),
             metrics: Arc::new(ErasureMetrics::default()),
+        }
+    }
+
+    pub fn metrics_snapshot(&self) -> ErasureMetricsSnapshot {
+        ErasureMetricsSnapshot {
+            cpu_bytes: self.metrics.cpu_bytes.load(Ordering::Relaxed),
+            gpu_bytes: self.metrics.gpu_bytes.load(Ordering::Relaxed),
+            gpu_fallbacks: self.metrics.gpu_fallbacks.load(Ordering::Relaxed),
+            gpu_inflight: self.metrics.gpu_inflight.load(Ordering::Relaxed),
+            gpu_repairs: self.metrics.gpu_repairs.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn acceleration_status(&self) -> AccelerationStatus {
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let selected_gpu_available = gpu::available(self.cfg.backend);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let selected_gpu_available = false;
+
+        AccelerationStatus {
+            requested: self.cfg.backend,
+            cuda_compiled: cfg!(feature = "cuda"),
+            hip_compiled: cfg!(feature = "hip"),
+            opencl_compiled: cfg!(feature = "opencl"),
+            isa_l_compiled: cfg!(feature = "isa-l"),
+            ipp_compiled: cfg!(feature = "ipp"),
+            aocl_compiled: cfg!(feature = "aocl"),
+            selected_gpu_available,
+            avx2: cpu_feature_avx2(),
+            avx512f: cpu_feature_avx512f(),
+            avx512bw: cpu_feature_avx512bw(),
         }
     }
     fn configured_layout(&self, k: usize, m: usize) -> Result<ErasureLayout> {
