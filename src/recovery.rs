@@ -100,25 +100,25 @@ pub struct Heartbeat {
 // ---- Recovery/survivability policy ---------------------------------------------
 pub struct RecoveryConfig {
     /// Health-probe cadence in milliseconds. Default: 2,000.
-#[serde(default = "d_hb")]
+    #[serde(default = "d_hb")]
     pub heartbeat_ms: u64,
     /// Age without health confirmation before SUSPECT, in milliseconds. Default: 6,000.
-#[serde(default = "d_suspect")]
+    #[serde(default = "d_suspect")]
     pub suspect_after_ms: u64,
     /// Age before DOWN, in milliseconds. Default: 15,000.
-#[serde(default = "d_down")]
+    #[serde(default = "d_down")]
     pub down_after_ms: u64,
     /// Age before OUT/placement exclusion, in milliseconds. Default: 120,000.
-#[serde(default = "d_out")]
+    #[serde(default = "d_out")]
     pub out_after_ms: u64,
     /// Repair-controller cadence in milliseconds. Default: 10,000.
-#[serde(default = "d_repair")]
+    #[serde(default = "d_repair")]
     pub repair_interval_ms: u64,
     /// Maximum simultaneous repairs. Default: 4.
-#[serde(default = "d_parallel")]
+    #[serde(default = "d_parallel")]
     pub max_parallel_repairs: usize,
     /// Consecutive healthy probes required for return. Default: 3.
-#[serde(default = "d_return")]
+    #[serde(default = "d_return")]
     pub return_probe_successes: u32,
     /// Sliding interval in which state changes count toward flapping.
     #[serde(default = "d_flap_window")]
