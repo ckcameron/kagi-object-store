@@ -47,6 +47,8 @@ mod telemetry;
 mod tls;
 #[path = "../webui.rs"]
 mod webui;
+#[path = "../wire.rs"]
+mod wire;
 use anyhow::{Context, Result};
 use axum::{
     body::Bytes,
