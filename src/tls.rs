@@ -16,10 +16,10 @@
 
 use anyhow::{Context, Result};
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     ServerConfig,
 };
-use std::{fs::File, io::BufReader, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 /// Install the process-wide AWS-LC provider.  Rustls' prefer-post-quantum feature
 /// places hybrid ML-KEM key exchange ahead of classical-only groups.
@@ -29,10 +29,8 @@ pub fn install_pq_provider() -> Result<()> {
 }
 
 fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let mut reader = BufReader::new(
-        File::open(path).with_context(|| format!("open TLS certificate {}", path.display()))?,
-    );
-    let certificates = rustls_pemfile::certs(&mut reader)
+    let certificates = CertificateDer::pem_file_iter(path)
+        .with_context(|| format!("open TLS certificate {}", path.display()))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("parse TLS certificate chain")?;
     anyhow::ensure!(!certificates.is_empty(), "TLS certificate chain is empty");
@@ -40,11 +38,8 @@ fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn read_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let mut reader = BufReader::new(
-        File::open(path).with_context(|| format!("open TLS private key {}", path.display()))?,
-    );
-    rustls_pemfile::private_key(&mut reader)?
-        .context("TLS PEM does not contain a supported private key")
+    PrivateKeyDer::from_pem_file(path)
+        .with_context(|| format!("parse TLS private key {}", path.display()))
 }
 
 /// Build the native HTTPS configuration used by the Axum server.
