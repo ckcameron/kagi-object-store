@@ -33,20 +33,29 @@ pub enum StorageKind {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 /// Linux block queue controls surfaced by Kagi's operations API.
 pub struct QueueSettings {
+    /// Currently selected Linux block I/O scheduler, when exposed by the driver.
     pub scheduler: Option<String>,
+    /// Schedulers advertised by the kernel for this device.
     #[serde(default)]
     pub available_schedulers: Vec<String>,
+    /// Kernel write-cache policy string, such as write back or write through.
     pub write_cache: Option<String>,
+    /// Current Linux block read-ahead in KiB.
     pub read_ahead_kb: Option<u64>,
+    /// Current block queue request-depth setting.
     pub nr_requests: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 /// Requested queue/cache changes. Fields left unset are not modified.
 pub struct QueueTuning {
+    /// Scheduler to select; must appear in QueueSettings::available_schedulers.
     pub scheduler: Option<String>,
+    /// true requests write back; false requests write through; None leaves it unchanged.
     pub write_cache_enabled: Option<bool>,
+    /// Convenience read-ahead toggle. This controls Linux read-ahead, not vendor drive cache.
     pub read_cache_enabled: Option<bool>,
+    /// Explicit read-ahead in KiB; takes precedence over read_cache_enabled and is capped at 1,048,576.
     pub read_ahead_kb: Option<u64>,
 }
 
@@ -276,7 +285,13 @@ fn compatible(expected: &StorageKind, actual: &StorageKind, rotational: Option<b
         }
     }
 }
-/// Implements the probe step and keeps its validation and state transitions visible at the call site.
+/// Probe a configured storage device and decide whether it is safe for Kagi admission.
+///
+/// device=None represents directory-backed storage. For block devices, Kagi combines lsblk
+/// identity/transport data with smartctl JSON. expected_serial and expected_wwn, when supplied,
+/// are hard identity assertions: mismatches make the result unhealthy. SMART failure, NVMe
+/// media/critical errors, pending sectors, and uncorrectable sectors also prevent admission.
+/// Reallocated-sector count is reported diagnostically but is not by itself fatal.
 pub fn probe(
     device: Option<&str>,
     expected_kind: &StorageKind,
