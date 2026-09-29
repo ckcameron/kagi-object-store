@@ -43,6 +43,49 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     sync::RwLock,
 };
+#[derive(Debug, Clone, Deserialize, Serialize)]
+/// Ordered high-throughput transport policy. HTTPS remains the universal fallback.
+pub struct DataTransportConfig {
+    #[serde(default = "default_true")]
+    pub prefer_quic: bool,
+    #[serde(default = "default_quic_min_bytes")]
+    pub quic_min_bytes: usize,
+    #[serde(default = "default_transport_frame_bytes")]
+    pub max_frame_bytes: usize,
+    #[serde(default = "default_true")]
+    pub prefer_rdma: bool,
+    #[serde(default = "default_rdma_min_bytes")]
+    pub rdma_min_bytes: usize,
+}
+
+impl Default for DataTransportConfig {
+    fn default() -> Self {
+        Self {
+            prefer_quic: true,
+            quic_min_bytes: default_quic_min_bytes(),
+            max_frame_bytes: default_transport_frame_bytes(),
+            prefer_rdma: true,
+            rdma_min_bytes: default_rdma_min_bytes(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_quic_min_bytes() -> usize {
+    64 * 1024
+}
+
+fn default_rdma_min_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_transport_frame_bytes() -> usize {
+    256 * 1024 * 1024
+}
+
 #[derive(Debug, Clone, Deserialize)]
 // ---- Cluster topology and immutable object metadata ----------------------------
 pub struct ClusterConfig {
@@ -61,6 +104,8 @@ pub struct ClusterConfig {
     pub metadata_key_b64: Option<String>,
     #[serde(default)]
     pub join_key_hash_hex: Option<String>,
+    #[serde(default)]
+    pub transport: DataTransportConfig,
 }
 /// Implements the default replication step and keeps its validation and state transitions visible at the call site.
 fn default_replication() -> usize {
@@ -78,6 +123,15 @@ fn one_usize() -> usize {
 pub struct PeerHost {
     pub id: String,
     pub endpoint: String,
+    /// UDP QUIC socket advertised for bulk fragment traffic.
+    #[serde(default)]
+    pub quic_endpoint: Option<String>,
+    /// Certificate name used when authenticating this peer's QUIC listener.
+    #[serde(default)]
+    pub quic_server_name: Option<String>,
+    /// RDMA-CM address advertised when the optional direct-RDMA backend is enabled.
+    #[serde(default)]
+    pub rdma_endpoint: Option<String>,
     #[serde(default)]
     pub site: Option<String>,
     #[serde(default)]
@@ -230,6 +284,11 @@ pub struct ClusterState {
     pub erasure: Arc<dyn ErasureBackend>,
     pub pq_identity: Option<LocalPqIdentity>,
     pub pq_keys: RuntimeKeyring,
+    /// Raw admission material is retained in-memory only so non-HTTP transports can
+    /// carry the same admission proof as the existing internal HTTP client.
+    pub join_key_b64: Option<String>,
+    #[cfg(feature = "quic")]
+    pub quic: Option<Arc<crate::quic_transport::Client>>,
 }
 /// Implements the hash64 step and keeps its validation and state transitions visible at the call site.
 fn hash64(parts: &[&[u8]]) -> u64 {
