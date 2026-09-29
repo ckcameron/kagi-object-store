@@ -5,6 +5,8 @@
 Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 
 ## 0.39.0 (development) — accelerated transports, hardened telemetry, validation and benchmarking
+- Added a self-documenting runtime configuration example covering every accepted node/cluster option, units, bounds and defaults; configuration structs now reject unknown keys and CI tests the canonical example against the production deserializer.
+- Expanded Rustdoc/CLI help for transport, erasure, recovery, maintenance, telemetry, console and cluster-host command options so defaults and operational effects live next to the implementation.
 
 - Added TLS 1.3 QUIC as an optional authenticated fragment/repair transport with persistent
   multiplexed connections, disabled 0-RTT, strict frame-allocation bounds, ML-DSA request
