@@ -44,6 +44,7 @@ use tokio::{
     sync::RwLock,
 };
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Ordered high-throughput transport policy. HTTPS remains the universal fallback.
 /// Data-plane transport policy for fragment movement between Kagi peers.
 ///
