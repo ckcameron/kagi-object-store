@@ -20,6 +20,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the WebConsoleConfig path.
 /// Browser operations-console configuration.
 pub struct WebConsoleConfig {
