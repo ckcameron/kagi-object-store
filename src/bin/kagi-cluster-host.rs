@@ -22,6 +22,9 @@ mod maintenance;
 mod monitoring;
 #[path = "../pq.rs"]
 mod pq;
+#[cfg(feature = "quic")]
+#[path = "../quic_transport.rs"]
+mod quic_transport;
 #[path = "../raftmeta.rs"]
 mod raftmeta;
 #[path = "../recovery.rs"]
@@ -529,8 +532,24 @@ fn state(
     client: reqwest::Client,
     pq_identity: LocalPqIdentity,
     pq_keys: RuntimeKeyring,
-) -> ClusterState {
-    ClusterState {
+) -> Result<ClusterState> {
+    #[cfg(feature = "quic")]
+    let quic = if c.cluster.transport.prefer_quic
+        && c.cluster.hosts.iter().any(|host| host.quic_endpoint.is_some())
+    {
+        let tls = c
+            .tls
+            .as_ref()
+            .context("QUIC is configured but node TLS/CA configuration is missing")?;
+        Some(Arc::new(quic_transport::Client::new(
+            &tls.ca,
+            c.cluster.transport.max_frame_bytes,
+        )?))
+    } else {
+        None
+    };
+
+    Ok(ClusterState {
         cfg: Arc::new(c.cluster.clone()),
         local_host: c.local_host.clone(),
         root: c.data_root.clone(),
@@ -541,7 +560,10 @@ fn state(
         )),
         pq_identity: Some(pq_identity),
         pq_keys,
-    }
+        join_key_b64: Some(c.join_key_b64.clone()),
+        #[cfg(feature = "quic")]
+        quic,
+    })
 }
 // ---- Legacy/public object handlers (superseded paths retained for compatibility) ----
 async fn api_get(State(st): State<ClusterState>, Path(key): Path<String>) -> impl IntoResponse {
@@ -3251,7 +3273,7 @@ async fn main() -> Result<()> {
     validate_pq(&cfg)?;
     let client = http_client(&cfg)?;
     let (pq_identity, pq_keys) = bootstrap_pq(&cfg).await?;
-    let st = state(&cfg, client.clone(), pq_identity.clone(), pq_keys.clone());
+    let st = state(&cfg, client.clone(), pq_identity.clone(), pq_keys.clone())?;
     let mstore = MetadataStore::open(cfg.data_root.join("metadata")).await?;
     let meta = RaftNode::open(
         cfg.metadata.node_id.clone(),
