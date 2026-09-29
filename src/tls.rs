@@ -19,12 +19,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer},
     ServerConfig,
 };
-use std::{
-    fs::File,
-    io::BufReader,
-    path::Path,
-    sync::Arc,
-};
+use std::{fs::File, io::BufReader, path::Path, sync::Arc};
 
 /// Install the process-wide AWS-LC provider.  Rustls' prefer-post-quantum feature
 /// places hybrid ML-KEM key exchange ahead of classical-only groups.
@@ -58,11 +53,7 @@ fn read_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 /// first, followed by AES-128-GCM and ChaCha20-Poly1305.  TLS 1.2, when enabled,
 /// is constrained to rustls' ECDHE+AEAD suites.  HTTP/2 and HTTP/1.1 are both
 /// advertised through ALPN.
-pub fn server_config(
-    cert: &Path,
-    key: &Path,
-    allow_tls12: bool,
-) -> Result<Arc<ServerConfig>> {
+pub fn server_config(cert: &Path, key: &Path, allow_tls12: bool) -> Result<Arc<ServerConfig>> {
     install_pq_provider()?;
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let versions: &[&'static rustls::SupportedProtocolVersion] = if allow_tls12 {
