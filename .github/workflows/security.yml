@@ -4,7 +4,7 @@ name: security-and-robustness
 on:
   pull_request:
   push:
-    branches: [main, "feature/**"]
+    branches: [main]
   schedule:
     - cron: "17 7 * * 1"
   workflow_dispatch:
