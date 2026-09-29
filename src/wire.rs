@@ -18,7 +18,9 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MetadataTooLarge => formatter.write_str("frame metadata exceeds configured limit"),
+            Self::MetadataTooLarge => {
+                formatter.write_str("frame metadata exceeds configured limit")
+            }
             Self::BodyTooLarge => formatter.write_str("frame body exceeds configured limit"),
             Self::LengthNotAddressable => {
                 formatter.write_str("frame length cannot be represented on this platform")
