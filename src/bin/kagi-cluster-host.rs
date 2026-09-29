@@ -3705,3 +3705,29 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 #[path = "../security_integration_tests.rs"]
 mod security_integration_tests;
+
+#[cfg(test)]
+mod documented_config_tests {
+    use super::*;
+
+    /// The canonical example is executable documentation: every key must remain
+    /// accepted by the same deserializer used in production.
+    #[test]
+    fn canonical_node_example_deserializes() {
+        let input = include_str!("../../examples/node-v6.example.yaml");
+        let config: NodeConfig =
+            serde_yaml::from_str(input).expect("examples/node-v6.example.yaml must stay valid");
+        assert_eq!(config.local_host, "host-a1");
+        assert_eq!(config.cluster.transport.quic_min_bytes, 65_536);
+        assert_eq!(config.telemetry.sample_interval_ms, 1_000);
+    }
+
+    /// Unknown top-level keys are rejected rather than silently turning a typo
+    /// into an unexpected default.
+    #[test]
+    fn unknown_node_option_is_rejected() {
+        let input = include_str!("../../examples/node-v6.example.yaml");
+        let mutated = format!("{input}\nnot_a_kagi_option: true\n");
+        assert!(serde_yaml::from_str::<NodeConfig>(&mutated).is_err());
+    }
+}
