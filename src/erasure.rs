@@ -1423,6 +1423,31 @@ pub struct AccelerationStatus {
     pub avx512bw: bool,
 }
 
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx2() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx2() -> bool {
+    false
+}
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx512f() -> bool {
+    std::arch::is_x86_feature_detected!("avx512f")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx512f() -> bool {
+    false
+}
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx512bw() -> bool {
+    std::arch::is_x86_feature_detected!("avx512bw")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx512bw() -> bool {
+    false
+}
+
 #[derive(Default)]
 /// Kagi state or configuration used by the ErasureMetrics path.
 pub struct ErasureMetrics {
@@ -1486,12 +1511,9 @@ impl AdaptiveBackend {
             ipp_compiled: cfg!(feature = "ipp"),
             aocl_compiled: cfg!(feature = "aocl"),
             selected_gpu_available,
-            avx2: cfg!(target_arch = "x86_64")
-                && std::arch::is_x86_feature_detected!("avx2"),
-            avx512f: cfg!(target_arch = "x86_64")
-                && std::arch::is_x86_feature_detected!("avx512f"),
-            avx512bw: cfg!(target_arch = "x86_64")
-                && std::arch::is_x86_feature_detected!("avx512bw"),
+            avx2: cpu_feature_avx2(),
+            avx512f: cpu_feature_avx512f(),
+            avx512bw: cpu_feature_avx512bw(),
         }
     }
     fn configured_layout(&self, k: usize, m: usize) -> Result<ErasureLayout> {
