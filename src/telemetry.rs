@@ -24,6 +24,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Local operations-telemetry sampling and in-memory history policy.
 pub struct TelemetryConfig {
     /// Enable periodic telemetry collection. Default: true.
