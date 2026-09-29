@@ -17,9 +17,9 @@
 
 use anyhow::{bail, Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{pem::PemObject, CertificateDer};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::File, io::BufReader, net::SocketAddr, path::Path, sync::Arc};
+use std::{collections::BTreeMap, net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 const ALPN: &[u8] = b"kagi-fragment/1";
@@ -94,11 +94,10 @@ impl Client {
     pub fn new(ca: &Path, max_body_bytes: usize) -> Result<Self> {
         crate::tls::install_pq_provider()?;
         let mut roots = rustls::RootCertStore::empty();
-        let mut reader = BufReader::new(
-            File::open(ca).with_context(|| format!("open QUIC CA {}", ca.display()))?,
-        );
-        for certificate in rustls_pemfile::certs(&mut reader) {
-            roots.add(certificate?)?;
+        let certificates = CertificateDer::pem_file_iter(ca)
+            .with_context(|| format!("open QUIC CA {}", ca.display()))?;
+        for certificate in certificates {
+            roots.add(certificate.context("parse QUIC CA certificate")?)?;
         }
 
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
