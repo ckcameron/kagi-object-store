@@ -78,6 +78,7 @@ base64 = "0.22"
 bytes = "1"
 rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
 tokio-rustls = "0.26"
+rustls-pemfile = "2"
 tower-http = { version = "0.6", features = ["trace"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
