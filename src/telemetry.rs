@@ -24,11 +24,15 @@ use std::{
 };
 
 #[derive(Debug, Clone, Deserialize)]
+/// Local operations-telemetry sampling and in-memory history policy.
 pub struct TelemetryConfig {
+    /// Enable periodic telemetry collection. Default: true.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Sampling interval in milliseconds. Default: 1,000; clamped to 250..=60,000.
     #[serde(default = "default_sample_interval_ms")]
     pub sample_interval_ms: u64,
+    /// Number of samples retained in memory. Default: 3,600; clamped to 60..=86,400.
     #[serde(default = "default_retention_samples")]
     pub retention_samples: usize,
 }
