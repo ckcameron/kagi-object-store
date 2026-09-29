@@ -59,6 +59,7 @@ pub enum ErasureScheme {
     Clay,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Runtime erasure-coding and accelerator policy for newly protected objects.
 pub struct ErasureConfig {
     /// Requested execution backend. Default: auto.
