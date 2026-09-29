@@ -64,8 +64,8 @@ fuzz_target!(|input: &[u8]| {
         shards[lost] = None;
         let rebuilt = backend
             .reconstruct_layout(&mut shards, original_len, &layout)
-            .expect("runtime future creation");
-        let rebuilt = rebuilt.await.expect("valid single-shard reconstruction");
+            .await
+            .expect("valid single-shard reconstruction");
         assert_eq!(rebuilt, data);
     });
 });
