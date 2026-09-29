@@ -2,6 +2,92 @@
 
 # Configuration Reference
 
+## Runtime node configuration
+
+`examples/node-v6.example.yaml` is the canonical, self-documenting 0.39 runtime
+configuration. It intentionally includes every field currently deserialized by
+`kagi-cluster-host`, including optional fields, accepted values, units, bounds,
+security implications, and defaults. Copy it when creating a production node
+configuration; do not copy secrets from another node.
+
+A field described as **required** has no deserialization default. A section described
+as optional may be omitted and its Rust `Default` implementation applies. The most
+important defaults are:
+
+| Parameter | Default | Meaning |
+| --- | ---: | --- |
+| `listen` | `0.0.0.0:7400` | TCP API/web listener |
+| `cluster.replication` | 3 | replication copies |
+| `cluster.write_quorum` | 2 | acknowledgements required |
+| `cluster.chunk_replicas` | 1 | copies per encoded fragment |
+| `cluster.transport.prefer_quic` | true | prefer QUIC when compiled/configured |
+| `cluster.transport.quic_min_bytes` | 65,536 | QUIC selection threshold |
+| `cluster.transport.max_frame_bytes` | 268,435,456 | framed body limit |
+| `cluster.transport.prefer_rdma` | true | RDMA policy preference; 0.39 groundwork only |
+| `cluster.transport.rdma_min_bytes` | 262,144 | intended RDMA threshold |
+| `cluster.erasure.backend` | `auto` | runtime compute backend |
+| `cluster.erasure.scheme` | `clay` | codec for new EC objects |
+| `cluster.erasure.data_shards` | 6 | k |
+| `cluster.erasure.parity_shards` | 3 | m |
+| `cluster.erasure.gpu_threshold_bytes` | 1,048,576 | GPU dispatch threshold |
+| `cluster.erasure.max_gpu_inflight` | 32 | GPU concurrency |
+| `cluster.erasure.max_matrix_cache_bytes` | 268,435,456 | transform cache ceiling |
+| `metadata.election_min_ms` | 1,500 | Raft election lower bound |
+| `metadata.election_max_ms` | 3,000 | Raft election upper bound |
+| `metadata.heartbeat_ms` | 400 | Raft heartbeat |
+| `tls.allow_tls12` | false | TLS 1.3-only unless explicitly relaxed |
+| `recovery.heartbeat_ms` | 2,000 | health probe cadence |
+| `recovery.suspect_after_ms` | 6,000 | SUSPECT threshold |
+| `recovery.down_after_ms` | 15,000 | DOWN threshold |
+| `recovery.out_after_ms` | 120,000 | OUT threshold |
+| `recovery.repair_interval_ms` | 10,000 | repair cadence |
+| `recovery.max_parallel_repairs` | 4 | repair concurrency |
+| `recovery.return_probe_successes` | 3 | healthy probes for return |
+| `recovery.flap_window_ms` | 300,000 | flap observation window |
+| `recovery.flap_transition_threshold` | 4 | quarantine threshold |
+| `recovery.minimum_reinclude_uptime_ms` | 600,000 | automatic re-entry uptime |
+| `garbage_collection.grace_period_ms` | 86,400,000 | physical deletion grace |
+| `garbage_collection.interval_ms` | 30,000 | GC cadence |
+| `garbage_collection.max_versions_per_cycle` | 32 | GC work cap |
+| `snapshots.check_interval_ms` | 30,000 | snapshot evaluation cadence |
+| `snapshots.archive_after_delta_bytes` | 10 GiB | materialization byte trigger |
+| `snapshots.archive_after_delta_ratio` | 0.50 | materialization ratio trigger |
+| `maintenance.timezone` | `UTC` | schedule timezone |
+| `maintenance.scrub_interval_ms` | 300,000 | scrub scheduler cadence |
+| `maintenance.quotas.network_mbps` | 100 | background network budget |
+| `maintenance.quotas.cpu_percent` | 20 | background CPU budget |
+| `maintenance.quotas.memory_mib` | 512 | background memory budget |
+| `maintenance.quotas.max_concurrency` | 2 | background operation concurrency |
+| `telemetry.enabled` | true | collect node telemetry |
+| `telemetry.sample_interval_ms` | 1,000 | sample cadence; clamped 250–60,000 |
+| `telemetry.retention_samples` | 3,600 | in-memory samples; clamped 60–86,400 |
+| `web_console.enabled` | true | expose console routes |
+| `web_console.userdb` | `/etc/kagi/users.yaml` | local console users |
+| `web_console.log_path` | `/var/log/kagi/kagi.log` | console log source |
+| `web_console.max_log_lines` | 500 | per-request log line ceiling |
+
+The `security` section defaults to no additional kernel or logical-object rules.
+When present, security configuration uses `deny_unknown_fields`: misspelled security
+keys fail configuration parsing rather than being silently ignored.
+
+### Transport caveats
+
+QUIC requires the `quic` Cargo feature, a peer `quic_endpoint`, and TLS material.
+QUIC is TLS 1.3-only and Kagi disables 0-RTT for mutation traffic. HTTPS remains the
+fallback. The 0.39 `prefer_rdma`, `rdma_min_bytes`, and `rdma_endpoint` fields are
+an explicit configuration boundary for RDMA work; they must not be interpreted as
+evidence that the running build has a functional RDMA data path.
+
+### Storage queue controls
+
+Disk scheduler/cache changes are runtime administrator operations rather than static
+node YAML. `QueueTuning` accepts `scheduler`, `write_cache_enabled`,
+`read_cache_enabled`, and `read_ahead_kb`. Unset fields are left unchanged.
+`read_ahead_kb` is capped at 1,048,576 KiB. The read-cache switch currently controls
+Linux block read-ahead (zero when disabled, the current nonzero value or 128 KiB when
+enabled); it is not a vendor drive-cache command. Unsupported sysfs writes fail visibly.
+
+
 ## Monte Carlo topology
 
 ```yaml

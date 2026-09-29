@@ -22,6 +22,9 @@ mod maintenance;
 mod monitoring;
 #[path = "../pq.rs"]
 mod pq;
+#[cfg(feature = "quic")]
+#[path = "../quic_transport.rs"]
+mod quic_transport;
 #[path = "../raftmeta.rs"]
 mod raftmeta;
 #[path = "../recovery.rs"]
@@ -38,10 +41,15 @@ mod security;
 mod security_ebpf;
 #[path = "../storage.rs"]
 mod storage;
+#[path = "../telemetry.rs"]
+mod telemetry;
 #[path = "../tls.rs"]
 mod tls;
 #[path = "../webui.rs"]
 mod webui;
+#[cfg(any(test, feature = "quic"))]
+#[path = "../wire.rs"]
+mod wire;
 use anyhow::{Context, Result};
 use axum::{
     body::Bytes,
@@ -75,66 +83,101 @@ use webui::{ConsoleRole, WebConsoleConfig};
 #[derive(Parser)]
 // ---- CLI, node configuration, and security bootstrap -------------------------
 struct Cli {
+    /// Node YAML configuration file.
     #[arg(short, long, default_value = "/etc/kagi/node.yaml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Cmd,
 }
+
 #[derive(Subcommand)]
-/// Supported Cmd states or operations.
+/// Administrative and data-path commands exposed by the cluster-host binary.
 enum Cmd {
+    /// Run the node API, web console, metadata service and background controllers.
     Serve,
+    /// Print the local node/cluster health summary.
     Status,
+    /// Validate and print the effective security policy without serving traffic.
     Audit,
+    /// Store FILE as the immutable/versioned object KEY.
     Put {
+        /// Logical object key.
         key: String,
+        /// Local file whose bytes will be stored.
         file: PathBuf,
     },
+    /// Retrieve KEY and write its bytes to OUTPUT.
     Get {
+        /// Logical object key.
         key: String,
+        /// Local output path.
         output: PathBuf,
     },
+    /// Repair missing/damaged fragments for KEY using its current protection policy.
     Repair {
+        /// Logical object key to repair.
         key: String,
     },
+    /// Verify checksums/readability for KEY and report corruption.
     Scrub {
+        /// Logical object key to scrub.
         key: String,
     },
+    /// Print the current fragment placement/locality for KEY.
     Locate {
+        /// Logical object key to locate.
         key: String,
     },
+    /// Clear flap/quarantine health state for a resource after operator validation.
     ClearHealth {
+        /// Resource identifier understood by the recovery health map.
         resource: String,
     },
+    /// Generate a new ML-DSA-87 application identity for this node.
     GeneratePqIdentity {
+        /// Destination for the public identity.
         #[arg(long)]
         public: PathBuf,
+        /// Destination for the private identity; protect this file as a secret.
         #[arg(long)]
         secret: PathBuf,
     },
+    /// Add/update a local web-console user using a password read from a file.
     WebUserAdd {
+        /// Console login name.
         username: String,
+        /// Console role. Default: viewer; supported roles: viewer, admin.
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// File containing the password; avoids exposing it in process arguments.
         #[arg(long)]
         password_file: PathBuf,
     },
+    /// Change Raft membership/failure-domain metadata.
     Membership {
+        /// Membership operation accepted by the membership controller.
         action: String,
+        /// Failure-domain scope for the operation.
         scope: String,
+        /// Node/site/rack identifier affected by the operation.
         id: String,
+        /// Optional peer HTTPS endpoint.
         #[arg(long)]
         endpoint: Option<String>,
+        /// Optional site label.
         #[arg(long)]
         site: Option<String>,
+        /// Optional rack label.
         #[arg(long)]
         rack: Option<String>,
+        /// Optional file containing the peer ML-DSA public key.
         #[arg(long)]
         pq_public_key: Option<PathBuf>,
     },
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the NodeConfig path.
+#[serde(deny_unknown_fields)]
+/// Complete top-level node configuration. Unknown keys are rejected so typos cannot silently disable policy.
 struct NodeConfig {
     #[serde(default)]
     security: security::Config,
@@ -154,6 +197,8 @@ struct NodeConfig {
     maintenance: MaintenanceConfig,
     #[serde(default)]
     web_console: WebConsoleConfig,
+    #[serde(default)]
+    telemetry: telemetry::TelemetryConfig,
     local_host: String,
     data_root: PathBuf,
     #[serde(default = "listen")]
@@ -165,7 +210,8 @@ fn listen() -> String {
     "0.0.0.0:7400".into()
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the MetadataConfig path.
+#[serde(deny_unknown_fields)]
+/// Raft identity, peer set and timing configuration.
 struct MetadataConfig {
     node_id: String,
     peers: Vec<RaftPeer>,
@@ -189,7 +235,8 @@ fn raft_heartbeat() -> u64 {
     400
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the GarbageCollectionConfig path.
+#[serde(deny_unknown_fields)]
+/// Fenced physical garbage-collection policy.
 struct GarbageCollectionConfig {
     #[serde(default = "gc_enabled")]
     enabled: bool,
@@ -211,7 +258,8 @@ impl Default for GarbageCollectionConfig {
     }
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the SnapshotConfig path.
+#[serde(deny_unknown_fields)]
+/// Point-in-time snapshot materialization policy.
 struct SnapshotConfig {
     #[serde(default = "snap_enabled")]
     enabled: bool,
@@ -283,14 +331,19 @@ struct GcDeleteRequest {
     disk: String,
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the TlsConfig path.
+#[serde(deny_unknown_fields)]
+/// Native HTTPS/peer TLS identity and compatibility policy.
 struct TlsConfig {
     ca: PathBuf,
     cert: PathBuf,
     key: PathBuf,
+    /// Compatibility mode. Native Kagi listeners otherwise require TLS 1.3.
+    #[serde(default)]
+    allow_tls12: bool,
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the PostQuantumConfig path.
+#[serde(deny_unknown_fields)]
+/// ML-DSA application identity and peer trust map.
 struct PostQuantumConfig {
     #[serde(default = "pq_required")]
     required: bool,
@@ -499,6 +552,15 @@ fn http_client(c: &NodeConfig) -> Result<reqwest::Client> {
         .default_headers(headers)
         .https_only(c.tls.is_some());
     if let Some(t) = &c.tls {
+        b = b
+            .min_tls_version(if t.allow_tls12 {
+                reqwest::tls::Version::TLS_1_2
+            } else {
+                reqwest::tls::Version::TLS_1_3
+            })
+            .max_tls_version(reqwest::tls::Version::TLS_1_3);
+    }
+    if let Some(t) = &c.tls {
         let ca = reqwest::Certificate::from_pem(&fs::read(&t.ca)?)?;
         let mut pem = fs::read(&t.cert)?;
         pem.extend_from_slice(&fs::read(&t.key)?);
@@ -513,8 +575,27 @@ fn state(
     client: reqwest::Client,
     pq_identity: LocalPqIdentity,
     pq_keys: RuntimeKeyring,
-) -> ClusterState {
-    ClusterState {
+) -> Result<ClusterState> {
+    #[cfg(feature = "quic")]
+    let quic = if c.cluster.transport.prefer_quic
+        && c.cluster
+            .hosts
+            .iter()
+            .any(|host| host.quic_endpoint.is_some())
+    {
+        let tls = c
+            .tls
+            .as_ref()
+            .context("QUIC is configured but node TLS/CA configuration is missing")?;
+        Some(Arc::new(quic_transport::Client::new(
+            &tls.ca,
+            c.cluster.transport.max_frame_bytes,
+        )?))
+    } else {
+        None
+    };
+
+    Ok(ClusterState {
         cfg: Arc::new(c.cluster.clone()),
         local_host: c.local_host.clone(),
         root: c.data_root.clone(),
@@ -525,7 +606,10 @@ fn state(
         )),
         pq_identity: Some(pq_identity),
         pq_keys,
-    }
+        join_key_b64: Some(c.join_key_b64.clone()),
+        #[cfg(feature = "quic")]
+        quic,
+    })
 }
 // ---- Legacy/public object handlers (superseded paths retained for compatibility) ----
 async fn api_get(State(st): State<ClusterState>, Path(key): Path<String>) -> impl IntoResponse {
@@ -550,6 +634,7 @@ struct V6State {
     fs_index: FsIndex,
     namespace_lock: Arc<tokio::sync::Mutex<()>>,
     web_console: WebConsoleConfig,
+    telemetry: telemetry::TelemetryStore,
 }
 /// Implements the effective cluster config step and keeps its validation and state transitions visible at the call site.
 async fn effective_cluster_config(st: &V6State) -> ClusterConfig {
@@ -2728,7 +2813,7 @@ async fn local_console_summary(st: &V6State) -> serde_json::Value {
         .sum::<u64>();
     let (site, rack) = host_site_rack(st);
     serde_json::json!( {
-        "node_id":st.data.local_host,"site":site,"rack":rack,"role":format!("{:?}",raft.role).to_lowercase(),"term":raft.term,"leader":raft.leader,"objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"fragments":fragments,"healthy_resources":healthy,"capacity_bytes":capacity,"placement_epoch":ms.placement_epoch,"pending_gc":ms.garbage.len(),"snapshots":ms.snapshots.len(),"buckets":ms.buckets.len(),"system":webui::system_stats()
+        "node_id":st.data.local_host,"site":site,"rack":rack,"role":format!("{:?}",raft.role).to_lowercase(),"term":raft.term,"leader":raft.leader,"objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"fragments":fragments,"healthy_resources":healthy,"capacity_bytes":capacity,"placement_epoch":ms.placement_epoch,"pending_gc":ms.garbage.len(),"snapshots":ms.snapshots.len(),"buckets":ms.buckets.len(),"system":webui::system_stats(),"telemetry":st.telemetry.current(),"maintenance":st.maintenance.status()
     }
     )
 }
@@ -2816,6 +2901,147 @@ async fn ui_summary(State(st): State<V6State>, headers: axum::http::HeaderMap) -
     }
     )).into_response()
 }
+
+#[derive(Debug, Deserialize, Default)]
+struct TelemetryQuery {
+    #[serde(default)]
+    after_ms: u128,
+}
+
+/// Periodically sample kernel/device/network state. Sampling stays off the request path so
+/// a slow SMART/sysfs device never delays the browser or object I/O.
+async fn run_telemetry_sampler(st: V6State) {
+    let interval = std::time::Duration::from_millis(st.telemetry.config().sample_interval_ms);
+    loop {
+        let cfg = effective_cluster_config(&st).await;
+        st.telemetry.sample(&cfg, &st.data.local_host);
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Internal history endpoint used for authenticated cluster-wide dashboard aggregation.
+async fn internal_ui_telemetry(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    let path = "/internal/v1/ui/telemetry";
+    if pq::verify_request(&headers, "GET", path, &[], &st.data.pq_keys)
+        .await
+        .is_err()
+        || !request_authorized(&st.data.cfg, &headers)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(serde_json::json!({
+        "node": st.data.local_host,
+        "samples": st.telemetry.history(query.after_ms)
+    }))
+    .into_response()
+}
+
+/// Return local and peer telemetry histories.  The hierarchy is explicit in every sample
+/// (site/rack/node/disk) so clients can aggregate without guessing topology names.
+async fn ui_telemetry(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    if console_auth(&st, &headers, false).is_none() {
+        return webui::unauthorized();
+    }
+
+    let mut nodes = vec![serde_json::json!({
+        "node": st.data.local_host,
+        "samples": st.telemetry.history(query.after_ms)
+    })];
+
+    if let Some(identity) = st.data.pq_identity.as_ref() {
+        for peer in &st.data.cfg.hosts {
+            if peer.id == st.data.local_host {
+                continue;
+            }
+            let path = "/internal/v1/ui/telemetry";
+            let Ok(auth) = pq::signed_headers(identity, "GET", path, &[]) else {
+                continue;
+            };
+            let url = format!(
+                "{}{}?after_ms={}",
+                peer.endpoint.trim_end_matches('/'),
+                path,
+                query.after_ms
+            );
+            let request = st.data.client.get(url);
+            if let Ok(response) = pq::apply_headers(request, auth).send().await {
+                if response.status().is_success() {
+                    if let Ok(value) = response.json::<serde_json::Value>().await {
+                        nodes.push(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "after_ms": query.after_ms,
+        "nodes": nodes
+    }))
+    .into_response()
+}
+
+/// Change scheduler/cache policy only for a disk configured on this node.  The operation
+/// requires an administrator identity and emits a security/operations event for auditability.
+async fn ui_disk_tune(
+    State(st): State<V6State>,
+    Path(disk): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(tuning): Json<storage::QueueTuning>,
+) -> Response {
+    let Some(identity) = console_auth(&st, &headers, true) else {
+        return webui::unauthorized();
+    };
+    let Some(host) = st
+        .data
+        .cfg
+        .hosts
+        .iter()
+        .find(|host| host.id == st.data.local_host)
+    else {
+        return (StatusCode::NOT_FOUND, "local host is not in topology").into_response();
+    };
+    let Some(configured) = host.disks.iter().find(|candidate| candidate.id == disk) else {
+        return (StatusCode::NOT_FOUND, "disk is not configured on this node").into_response();
+    };
+    let Some(device) = configured.device_path.as_deref() else {
+        return (StatusCode::BAD_REQUEST, "disk has no block device path").into_response();
+    };
+
+    match storage::apply_queue_tuning(device, &tuning) {
+        Ok(settings) => {
+            st.monitor.emit(
+                "info",
+                "storage",
+                &format!("disk/{disk}"),
+                &format!(
+                    "administrator {} changed block queue/cache settings",
+                    identity.username
+                ),
+            );
+            Json(serde_json::json!({
+                "disk": disk,
+                "device": device,
+                "settings": settings
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("unable to change disk settings: {error}"),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct PrefixQuery {
     #[serde(default)]
@@ -3099,7 +3325,7 @@ async fn main() -> Result<()> {
     validate_pq(&cfg)?;
     let client = http_client(&cfg)?;
     let (pq_identity, pq_keys) = bootstrap_pq(&cfg).await?;
-    let st = state(&cfg, client.clone(), pq_identity.clone(), pq_keys.clone());
+    let st = state(&cfg, client.clone(), pq_identity.clone(), pq_keys.clone())?;
     let mstore = MetadataStore::open(cfg.data_root.join("metadata")).await?;
     let meta = RaftNode::open(
         cfg.metadata.node_id.clone(),
@@ -3119,6 +3345,7 @@ async fn main() -> Result<()> {
     let fs_index = FsIndex::open(cfg.data_root.join("index"), cfg.local_host.clone()).await?;
     let monitor = monitoring::Monitor::new(4096);
     let security = security::Security::new(cfg.security.clone(), monitor.clone())?;
+    let telemetry = telemetry::TelemetryStore::new(cfg.telemetry.clone());
     let v6 = V6State {
         security,
         monitor,
@@ -3133,6 +3360,7 @@ async fn main() -> Result<()> {
         fs_index,
         namespace_lock: Arc::new(tokio::sync::Mutex::new(())),
         web_console: cfg.web_console.clone(),
+        telemetry,
     };
     // Local administrative CLI object operations use the same configured rules.
     let cli_access = match &cli.command {
@@ -3181,6 +3409,48 @@ async fn main() -> Result<()> {
             tokio::spawn(run_rebalancer(v6.clone()));
             tokio::spawn(gossip_fs_index(v6.clone()));
             tokio::spawn(sync_pq_keyring(v6.clone()));
+            if v6.telemetry.config().enabled {
+                tokio::spawn(run_telemetry_sampler(v6.clone()));
+            }
+            #[cfg(feature = "quic")]
+            if cfg.cluster.transport.prefer_quic {
+                if let Some(endpoint) = cfg
+                    .cluster
+                    .hosts
+                    .iter()
+                    .find(|host| host.id == cfg.local_host)
+                    .and_then(|host| host.quic_endpoint.as_deref())
+                {
+                    let address: std::net::SocketAddr = endpoint
+                        .parse()
+                        .with_context(|| format!("invalid local QUIC endpoint {endpoint}"))?;
+                    let tls_config = cfg
+                        .tls
+                        .as_ref()
+                        .context("QUIC listener requires node TLS configuration")?;
+                    // QUIC v1 is TLS 1.3 only, regardless of the HTTPS compatibility policy.
+                    let server_tls = tls::server_config(&tls_config.cert, &tls_config.key, false)?;
+                    let quic_state = v6.data.clone();
+                    let log_path = cfg.web_console.log_path.clone();
+                    let node = cfg.local_host.clone();
+                    tokio::spawn(async move {
+                        webui::append_log(
+                            &log_path,
+                            &node,
+                            &format!("Kagi QUIC data plane listening on {address}"),
+                        );
+                        if let Err(error) =
+                            cluster::serve_quic(quic_state, address, server_tls).await
+                        {
+                            webui::append_log(
+                                &log_path,
+                                &node,
+                                &format!("Kagi QUIC data plane stopped: {error}"),
+                            );
+                        }
+                    });
+                }
+            }
             let public = Router::new()
                 .route("/v1/monitor/events", get(runtime_security::history))
                 .route("/v1/monitor/stream", get(runtime_security::stream))
@@ -3245,11 +3515,14 @@ async fn main() -> Result<()> {
                 .route("/", get(kagi_root))
                 .route("/ui", get(kagi_ui))
                 .route("/ui/api/summary", get(ui_summary))
+                .route("/ui/api/telemetry", get(ui_telemetry))
+                .route("/ui/api/disk/:disk/tune", axum::routing::post(ui_disk_tune))
                 .route("/ui/api/objects", get(ui_objects))
                 .route("/ui/api/object/*key", get(ui_object))
                 .route("/ui/api/logs", get(ui_logs))
                 .route("/ui/api/buckets", get(ui_buckets).post(ui_bucket_put))
                 .route("/internal/v1/ui/node", get(internal_ui_node))
+                .route("/internal/v1/ui/telemetry", get(internal_ui_telemetry))
                 .route("/internal/v1/ui/logs", get(internal_ui_logs))
                 .with_state(v6.clone());
             let maintenance = Router::new()
@@ -3259,17 +3532,37 @@ async fn main() -> Result<()> {
             let app = public.merge(maintenance).merge(internal_router(st)).layer(
                 axum::middleware::from_fn_with_state(v6.clone(), runtime_security::gate),
             );
-            let l = TcpListener::bind(&cfg.listen).await?;
             webui::append_log(
                 &cfg.web_console.log_path,
                 &cfg.local_host,
-                &format!("Kagi node listening on {}", cfg.listen),
+                &format!(
+                    "Kagi node listening on {}{}",
+                    cfg.listen,
+                    if cfg.tls.is_some() {
+                        " with native TLS"
+                    } else {
+                        ""
+                    }
+                ),
             );
             println!(
-                "Kagi node {} listening {} (console: /ui)",
-                cfg.local_host, cfg.listen
+                "Kagi node {} listening {}{} (console: /ui)",
+                cfg.local_host,
+                cfg.listen,
+                if cfg.tls.is_some() { " TLS" } else { "" }
             );
-            axum::serve(l, app).await?;
+            if let Some(tls_config) = &cfg.tls {
+                let address: std::net::SocketAddr = cfg.listen.parse()?;
+                let rustls =
+                    tls::server_config(&tls_config.cert, &tls_config.key, tls_config.allow_tls12)?;
+                let rustls = axum_server::tls_rustls::RustlsConfig::from_config(rustls);
+                axum_server::bind_rustls(address, rustls)
+                    .serve(app.into_make_service())
+                    .await?;
+            } else {
+                let listener = TcpListener::bind(&cfg.listen).await?;
+                axum::serve(listener, app).await?;
+            }
         }
         Cmd::Membership {
             action,
@@ -3329,7 +3622,20 @@ async fn main() -> Result<()> {
                 "joint consensus committed at {joint}; stable membership committed at {final_i}"
             );
         }
-        Cmd::Status => println!("{}", serde_json::to_string_pretty(&cfg.cluster.hosts)?),
+        Cmd::Status => {
+            let erasure = AdaptiveBackend::new(cfg.cluster.erasure.clone().unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hosts": &cfg.cluster.hosts,
+                    "transport": &cfg.cluster.transport,
+                    "join_key_configured": st.join_key_b64.is_some(),
+                    "erasure_acceleration": erasure.acceleration_status(),
+                    "erasure_metrics": erasure.metrics_snapshot(),
+                    "tls": cfg.tls.as_ref().map(|tls_config| tls::policy_summary(tls_config.allow_tls12)),
+                }))?
+            )
+        }
         Cmd::Put { key, file } => {
             let previous = v6.meta.store.get(&key).await;
             if let Some(previous) = &previous {
@@ -3413,3 +3719,29 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 #[path = "../security_integration_tests.rs"]
 mod security_integration_tests;
+
+#[cfg(test)]
+mod documented_config_tests {
+    use super::*;
+
+    /// The canonical example is executable documentation: every key must remain
+    /// accepted by the same deserializer used in production.
+    #[test]
+    fn canonical_node_example_deserializes() {
+        let input = include_str!("../../examples/node-v6.example.yaml");
+        let config: NodeConfig =
+            serde_yaml::from_str(input).expect("examples/node-v6.example.yaml must stay valid");
+        assert_eq!(config.local_host, "host-a1");
+        assert_eq!(config.cluster.transport.quic_min_bytes, 65_536);
+        assert_eq!(config.telemetry.sample_interval_ms, 1_000);
+    }
+
+    /// Unknown top-level keys are rejected rather than silently turning a typo
+    /// into an unexpected default.
+    #[test]
+    fn unknown_node_option_is_rejected() {
+        let input = include_str!("../../examples/node-v6.example.yaml");
+        let mutated = format!("{input}\nnot_a_kagi_option: true\n");
+        assert!(serde_yaml::from_str::<NodeConfig>(&mutated).is_err());
+    }
+}

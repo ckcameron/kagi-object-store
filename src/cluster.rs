@@ -43,24 +43,92 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     sync::RwLock,
 };
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+/// Ordered high-throughput transport policy. HTTPS remains the universal fallback.
+/// Data-plane transport policy for fragment movement between Kagi peers.
+///
+/// The control plane remains authenticated independently of the selected data transport.
+/// QUIC is optional at compile time and falls back to HTTPS when unavailable. RDMA fields
+/// reserve the 0.39 policy surface; an advertised RDMA endpoint is not an availability claim.
+pub struct DataTransportConfig {
+    /// Prefer QUIC for eligible fragment traffic. Default: true.
+    #[serde(default = "default_true")]
+    pub prefer_quic: bool,
+    /// Minimum payload size, in bytes, for QUIC preference. Default: 65,536.
+    #[serde(default = "default_quic_min_bytes")]
+    pub quic_min_bytes: usize,
+    /// Maximum request/response body accepted by the framed transport. Default: 256 MiB.
+    #[serde(default = "default_transport_frame_bytes")]
+    pub max_frame_bytes: usize,
+    /// Prefer RDMA when a functional backend is available. Default: true.
+    #[serde(default = "default_true")]
+    pub prefer_rdma: bool,
+    /// Minimum payload size, in bytes, intended for RDMA selection. Default: 256 KiB.
+    #[serde(default = "default_rdma_min_bytes")]
+    pub rdma_min_bytes: usize,
+}
+
+impl Default for DataTransportConfig {
+    fn default() -> Self {
+        Self {
+            prefer_quic: true,
+            quic_min_bytes: default_quic_min_bytes(),
+            max_frame_bytes: default_transport_frame_bytes(),
+            prefer_rdma: true,
+            rdma_min_bytes: default_rdma_min_bytes(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_quic_min_bytes() -> usize {
+    64 * 1024
+}
+
+fn default_rdma_min_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_transport_frame_bytes() -> usize {
+    256 * 1024 * 1024
+}
+
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 // ---- Cluster topology and immutable object metadata ----------------------------
+/// Runtime cluster topology, protection policy and transport configuration.
 pub struct ClusterConfig {
+    /// Stable cluster identifier shared by every member.
     pub id: String,
+    /// Stable salt used by deterministic fragment placement.
     pub placement_salt: u64,
+    /// Storage hosts eligible for placement.
     pub hosts: Vec<PeerHost>,
+    /// Replica count for replication protection. Default: 3.
     #[serde(default = "default_replication")]
     pub replication: usize,
+    /// Successful replica acknowledgements required for a write. Default: 2.
     #[serde(default = "default_quorum")]
     pub write_quorum: usize,
+    /// Copies retained for each encoded fragment. Default: 1.
     #[serde(default = "one_usize")]
     pub chunk_replicas: usize,
+    /// Optional erasure-coding policy; None retains replication-only protection.
     #[serde(default)]
     pub erasure: Option<ErasureConfig>,
+    /// Optional base64 32-byte key used for protected metadata.
     #[serde(default)]
     pub metadata_key_b64: Option<String>,
+    /// Optional stored verifier/hash representation of the cluster join key.
     #[serde(default)]
     pub join_key_hash_hex: Option<String>,
+    /// Fragment data-plane selection and size thresholds.
+    #[serde(default)]
+    pub transport: DataTransportConfig,
 }
 /// Implements the default replication step and keeps its validation and state transitions visible at the call site.
 fn default_replication() -> usize {
@@ -75,27 +143,52 @@ fn one_usize() -> usize {
     1
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+/// One storage host and its advertised control/data-plane endpoints.
 pub struct PeerHost {
+    /// Stable host identifier used by placement and metadata.
     pub id: String,
+    /// HTTPS control-plane and fallback data endpoint.
     pub endpoint: String,
+    /// UDP QUIC socket advertised for bulk fragment traffic.
+    #[serde(default)]
+    pub quic_endpoint: Option<String>,
+    /// Certificate name used when authenticating this peer's QUIC listener.
+    #[serde(default)]
+    pub quic_server_name: Option<String>,
+    /// RDMA-CM address advertised when the optional direct-RDMA backend is enabled.
+    #[serde(default)]
+    pub rdma_endpoint: Option<String>,
+    /// Optional site failure-domain label.
     #[serde(default)]
     pub site: Option<String>,
+    /// Optional rack failure-domain label.
     #[serde(default)]
     pub rack: Option<String>,
+    /// Physical/logical storage devices exposed by this host.
     pub disks: Vec<PeerDisk>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+/// Placement and identity information for one host storage device.
 pub struct PeerDisk {
+    /// Stable disk identifier.
     pub id: String,
+    /// Usable placement capacity in bytes.
     pub capacity_bytes: u64,
+    /// Relative placement weight. Default: 1.0.
     #[serde(default = "one")]
     pub weight: f64,
+    /// Optional Linux block-device path used for health, identity and queue controls.
     #[serde(default)]
     pub device_path: Option<String>,
+    /// Optional expected serial number; a mismatch prevents safe admission.
     #[serde(default)]
     pub serial_number: Option<String>,
+    /// Optional expected WWN; a mismatch prevents safe admission.
     #[serde(default)]
     pub wwn: Option<String>,
+    /// Expected storage media/transport class. Default: auto.
     #[serde(default)]
     pub storage_kind: StorageKind,
 }
@@ -230,6 +323,11 @@ pub struct ClusterState {
     pub erasure: Arc<dyn ErasureBackend>,
     pub pq_identity: Option<LocalPqIdentity>,
     pub pq_keys: RuntimeKeyring,
+    /// Raw admission material is retained in-memory only so non-HTTP transports can
+    /// carry the same admission proof as the existing internal HTTP client.
+    pub join_key_b64: Option<String>,
+    #[cfg(feature = "quic")]
+    pub quic: Option<Arc<crate::quic_transport::Client>>,
 }
 /// Implements the hash64 step and keeps its validation and state transitions visible at the call site.
 fn hash64(parts: &[&[u8]]) -> u64 {
@@ -489,6 +587,60 @@ pub fn unprotect_metadata(
     Ok(serde_json::from_slice(&pt)?)
 }
 // ---- Authenticated fragment transport ------------------------------------------
+#[cfg(feature = "quic")]
+async fn quic_request(
+    st: &ClusterState,
+    peer: &PeerHost,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    extra_headers: &[(&str, String)],
+) -> Result<Option<Vec<u8>>> {
+    if !st.cfg.transport.prefer_quic {
+        return Ok(None);
+    }
+    let (Some(client), Some(endpoint)) = (st.quic.as_ref(), peer.quic_endpoint.as_deref()) else {
+        return Ok(None);
+    };
+    let Ok(address) = endpoint.parse::<std::net::SocketAddr>() else {
+        return Ok(None);
+    };
+    let id = st.pq_identity.as_ref().context("PQ identity required")?;
+    let auth = crate::pq::signed_headers(id, method, path, body)?;
+    let mut headers = BTreeMap::new();
+    for (name, value) in auth {
+        headers.insert(name.to_string(), value);
+    }
+    if let Some(join_key) = st.join_key_b64.as_ref() {
+        headers.insert("x-kagi-join-key".into(), join_key.clone());
+    }
+    for (name, value) in extra_headers {
+        headers.insert((*name).to_string(), value.clone());
+    }
+
+    let meta = crate::quic_transport::RequestMeta {
+        method: method.into(),
+        path: path.into(),
+        headers,
+    };
+    let server_name = peer.quic_server_name.as_deref().unwrap_or(&peer.id);
+    match client.request(address, server_name, meta, body).await {
+        Ok(response) => Ok(Some(response.ensure_success()?)),
+        // QUIC is an acceleration path. A transport/connectivity failure falls back to
+        // HTTPS; an authenticated peer application error above does not.
+        Err(_) => Ok(None),
+    }
+}
+
+#[cfg(feature = "quic")]
+fn manifest_fragment_bytes(manifest: &ObjectManifest, fragment: u32) -> u64 {
+    normalize_chunks(manifest)
+        .iter()
+        .find(|chunk| chunk.chunk == fragment)
+        .map(|chunk| chunk.bytes)
+        .unwrap_or(0)
+}
+
 async fn rpc_store(
     st: &ClusterState,
     loc: &FragmentLocation,
@@ -511,6 +663,24 @@ async fn rpc_store(
         .iter()
         .find(|x| x.id == loc.host)
         .context("peer missing")?;
+    let path = format!(
+        "/internal/v1/fragment/{}/{}/{}/{}",
+        h.object_id, h.version, h.fragment, loc.disk
+    );
+    #[cfg(feature = "quic")]
+    if data.len() >= st.cfg.transport.quic_min_bytes {
+        let extra = [
+            ("x-kagi-cluster", h.cluster.clone()),
+            ("x-kagi-checksum", h.checksum.clone()),
+            ("x-kagi-position", h.key_position.to_string()),
+        ];
+        if quic_request(st, peer, "PUT", &path, data, &extra)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
     let url = format!(
         "{}/internal/v1/fragment/{}/{}/{}/{}",
         peer.endpoint.trim_end_matches('/'),
@@ -518,10 +688,6 @@ async fn rpc_store(
         h.version,
         h.fragment,
         loc.disk
-    );
-    let path = format!(
-        "/internal/v1/fragment/{}/{}/{}/{}",
-        h.object_id, h.version, h.fragment, loc.disk
     );
     let id = st.pq_identity.as_ref().context("PQ identity required")?;
     let auth = crate::pq::signed_headers(id, "PUT", &path, data)?;
@@ -556,6 +722,16 @@ async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) 
         .iter()
         .find(|x| x.id == loc.host)
         .context("peer missing")?;
+    let path = format!(
+        "/internal/v1/fragment/{}/{}/{}/{}",
+        m.object_id, m.version, loc.fragment, loc.disk
+    );
+    #[cfg(feature = "quic")]
+    if manifest_fragment_bytes(m, loc.fragment) as usize >= st.cfg.transport.quic_min_bytes {
+        if let Some(body) = quic_request(st, peer, "GET", &path, &[], &[]).await? {
+            return Ok(body);
+        }
+    }
     let url = format!(
         "{}/internal/v1/fragment/{}/{}/{}/{}",
         peer.endpoint.trim_end_matches('/'),
@@ -563,10 +739,6 @@ async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) 
         m.version,
         loc.fragment,
         loc.disk
-    );
-    let path = format!(
-        "/internal/v1/fragment/{}/{}/{}/{}",
-        m.object_id, m.version, loc.fragment, loc.disk
     );
     let id = st.pq_identity.as_ref().context("PQ identity required")?;
     let auth = crate::pq::signed_headers(id, "GET", &path, &[])?;
@@ -647,6 +819,10 @@ async fn rpc_get_subchunks(
         alpha,
         indices: indices.to_vec(),
     })?;
+    #[cfg(feature = "quic")]
+    if let Some(output) = quic_request(st, peer, "POST", &path, &body, &[]).await? {
+        return Ok(output);
+    }
     let id = st.pq_identity.as_ref().context("PQ identity required")?;
     let auth = crate::pq::signed_headers(id, "POST", &path, &body)?;
     let req = st
@@ -705,6 +881,10 @@ async fn rpc_project(
         rows,
         coeff_b64: B64.encode(coeff),
     })?;
+    #[cfg(feature = "quic")]
+    if let Some(output) = quic_request(st, peer, "POST", &path, &body, &[]).await? {
+        return Ok(output);
+    }
     let id = st.pq_identity.as_ref().context("PQ identity required")?;
     let auth = crate::pq::signed_headers(id, "POST", &path, &body)?;
     let req = st
@@ -1316,12 +1496,15 @@ pub async fn scrub_object(st: &ClusterState, key: &str) -> Result<BTreeMap<Strin
     }
     Ok(out)
 }
-// ---- Internal fragment HTTP service and authorization --------------------------
+// ---- Internal fragment service and authorization -------------------------------
 fn join_authorized(cfg: &ClusterConfig, headers: &axum::http::HeaderMap) -> bool {
     let Some(want) = cfg.join_key_hash_hex.as_deref() else {
         return false;
     };
-    let Some(raw) = headers.get("x-kagi-join-key").and_then(|v| v.to_str().ok()) else {
+    let Some(raw) = headers
+        .get("x-kagi-join-key")
+        .and_then(|value| value.to_str().ok())
+    else {
         return false;
     };
     let Ok(bytes) = B64.decode(raw) else {
@@ -1329,50 +1512,65 @@ fn join_authorized(cfg: &ClusterConfig, headers: &axum::http::HeaderMap) -> bool
     };
     blake3::hash(&bytes).to_hex().to_string() == want
 }
-/// Implements the rpc delete replica step and keeps its validation and state transitions visible at the call site.
+
+/// Delete one replica after a successful rebalance. Local deletion tolerates
+/// already-removed files; remote deletion retains the same ML-DSA/join-key
+/// authorization as every other internal fragment operation.
 async fn rpc_delete_replica(
     st: &ClusterState,
     loc: &FragmentLocation,
-    m: &ObjectManifest,
+    manifest: &ObjectManifest,
 ) -> Result<()> {
     if loc.host == st.local_host {
-        let p = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
-        match tokio::fs::remove_file(p).await {
+        let path = fragment_path(
+            &st.root,
+            &loc.disk,
+            &manifest.object_id,
+            manifest.version,
+            loc.fragment,
+        );
+        match tokio::fs::remove_file(path).await {
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         return Ok(());
     }
+
     let peer = st
         .cfg
         .hosts
         .iter()
-        .find(|x| x.id == loc.host)
+        .find(|host| host.id == loc.host)
         .context("peer missing")?;
-    let url = format!(
-        "{}/internal/v1/fragment/{}/{}/{}/{}",
-        peer.endpoint.trim_end_matches('/'),
-        m.object_id,
-        m.version,
-        loc.fragment,
-        loc.disk
-    );
     let path = format!(
         "/internal/v1/fragment/{}/{}/{}/{}",
-        m.object_id, m.version, loc.fragment, loc.disk
+        manifest.object_id, manifest.version, loc.fragment, loc.disk
     );
-    let id = st.pq_identity.as_ref().context("PQ identity required")?;
-    let auth = crate::pq::signed_headers(id, "DELETE", &path, &[])?;
-    let r = crate::pq::apply_headers(st.client.delete(url), auth)
+
+    #[cfg(feature = "quic")]
+    if quic_request(st, peer, "DELETE", &path, &[], &[])
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let url = format!("{}{}", peer.endpoint.trim_end_matches('/'), path);
+    let identity = st.pq_identity.as_ref().context("PQ identity required")?;
+    let auth = crate::pq::signed_headers(identity, "DELETE", &path, &[])?;
+    let response = crate::pq::apply_headers(st.client.delete(url), auth)
         .send()
         .await?;
-    if !r.status().is_success() && r.status() != reqwest::StatusCode::NOT_FOUND {
-        bail!("peer delete {}", r.status())
+    if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+        bail!("peer delete {}", response.status());
     }
     Ok(())
 }
-/// Implements the cleanup rebalanced replicas step and keeps its validation and state transitions visible at the call site.
+
+/// Remove obsolete physical replicas only after the replacement manifest has
+/// been committed. This preserves rebalance safety while allowing retries to be
+/// idempotent.
 pub async fn cleanup_rebalanced_replicas(
     st: &ClusterState,
     old: &ObjectManifest,
@@ -1381,190 +1579,370 @@ pub async fn cleanup_rebalanced_replicas(
     let keep: BTreeSet<_> = new
         .fragments
         .iter()
-        .map(|x| (x.fragment, x.host.clone(), x.disk.clone()))
+        .map(|location| {
+            (
+                location.fragment,
+                location.host.clone(),
+                location.disk.clone(),
+            )
+        })
         .collect();
-    for loc in &old.fragments {
-        if !keep.contains(&(loc.fragment, loc.host.clone(), loc.disk.clone())) {
-            rpc_delete_replica(st, loc, old).await?;
+    for location in &old.fragments {
+        if !keep.contains(&(
+            location.fragment,
+            location.host.clone(),
+            location.disk.clone(),
+        )) {
+            rpc_delete_replica(st, location, old).await?;
         }
     }
     Ok(())
 }
-/// Implements the internal put step and keeps its validation and state transitions visible at the call site.
+
+#[derive(Debug)]
+struct InternalFragmentResult {
+    status: StatusCode,
+    body: Vec<u8>,
+}
+
+impl InternalFragmentResult {
+    fn new(status: StatusCode, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            status,
+            body: body.into(),
+        }
+    }
+
+    fn empty(status: StatusCode) -> Self {
+        Self {
+            status,
+            body: Vec::new(),
+        }
+    }
+
+    fn into_response(self) -> axum::response::Response {
+        (self.status, self.body).into_response()
+    }
+}
+
+fn fragment_route(path: &str) -> Option<(String, u64, u32, String, Option<String>)> {
+    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    if parts.len() < 7 || parts[0] != "internal" || parts[1] != "v1" || parts[2] != "fragment" {
+        return None;
+    }
+    let version = parts[4].parse().ok()?;
+    let fragment = parts[5].parse().ok()?;
+    let operation = parts.get(7).map(|value| (*value).to_string());
+    if parts.len() > 8 {
+        return None;
+    }
+    Some((
+        parts[3].to_string(),
+        version,
+        fragment,
+        parts[6].to_string(),
+        operation,
+    ))
+}
+
+/// Shared fragment operation implementation used by HTTPS and QUIC.
+///
+/// Authorization happens before any filesystem or erasure-code operation, so adding a
+/// faster transport cannot create a path around ML-DSA replay protection or the join key.
+async fn dispatch_internal_fragment(
+    st: &ClusterState,
+    method: &str,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> InternalFragmentResult {
+    if crate::pq::verify_request(headers, method, path, body, &st.pq_keys)
+        .await
+        .is_err()
+    {
+        return InternalFragmentResult::new(
+            StatusCode::UNAUTHORIZED,
+            b"invalid ML-DSA envelope".to_vec(),
+        );
+    }
+    if !join_authorized(&st.cfg, headers) {
+        return InternalFragmentResult::new(
+            StatusCode::UNAUTHORIZED,
+            b"invalid cluster join key".to_vec(),
+        );
+    }
+
+    let Some((object, version, fragment, disk, operation)) = fragment_route(path) else {
+        return InternalFragmentResult::new(
+            StatusCode::NOT_FOUND,
+            b"unknown fragment route".to_vec(),
+        );
+    };
+    let fragment_file = fragment_path(&st.root, &disk, &object, version, fragment);
+
+    match (method, operation.as_deref()) {
+        ("PUT", None) => {
+            if headers
+                .get("x-kagi-cluster")
+                .and_then(|value| value.to_str().ok())
+                != Some(st.cfg.id.as_str())
+            {
+                return InternalFragmentResult::new(
+                    StatusCode::FORBIDDEN,
+                    b"cluster mismatch".to_vec(),
+                );
+            }
+            let checksum = headers
+                .get("x-kagi-checksum")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if blake3::hash(body).to_hex().to_string() != checksum {
+                return InternalFragmentResult::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    b"checksum mismatch".to_vec(),
+                );
+            }
+            if let Some(parent) = fragment_file.parent() {
+                if tokio::fs::create_dir_all(parent).await.is_err() {
+                    return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+            let temporary = fragment_file.with_extension("tmp");
+            if tokio::fs::write(&temporary, body).await.is_err() {
+                return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            if let Ok(file) = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&temporary)
+                .await
+            {
+                if file.sync_all().await.is_err() {
+                    let _ = tokio::fs::remove_file(&temporary).await;
+                    return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
+            match tokio::fs::rename(temporary, fragment_file).await {
+                Ok(_) => InternalFragmentResult::empty(StatusCode::CREATED),
+                Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+        ("GET", None) => match tokio::fs::read(fragment_file).await {
+            Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+            }
+            Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        ("DELETE", None) => match tokio::fs::remove_file(fragment_file).await {
+            Ok(_) => InternalFragmentResult::empty(StatusCode::NO_CONTENT),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+            }
+            Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        ("POST", Some("subchunks")) => {
+            let request: SubchunkRequest = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return InternalFragmentResult::new(
+                        StatusCode::BAD_REQUEST,
+                        b"invalid subchunk request".to_vec(),
+                    )
+                }
+            };
+            match read_subchunks(fragment_file, request.alpha, &request.indices).await {
+                Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
+                Err(error) => InternalFragmentResult::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    error.to_string().into_bytes(),
+                ),
+            }
+        }
+        ("POST", Some("project")) => {
+            let request: ProjectionRequest = match serde_json::from_slice(body) {
+                Ok(value) => value,
+                Err(_) => {
+                    return InternalFragmentResult::new(
+                        StatusCode::BAD_REQUEST,
+                        b"invalid projection request".to_vec(),
+                    )
+                }
+            };
+            let coefficient = match B64.decode(&request.coeff_b64) {
+                Ok(value) => value,
+                Err(_) => {
+                    return InternalFragmentResult::new(
+                        StatusCode::BAD_REQUEST,
+                        b"invalid projection coefficients".to_vec(),
+                    )
+                }
+            };
+            if request.rows == 0
+                || coefficient.is_empty()
+                || !coefficient.len().is_multiple_of(request.rows)
+            {
+                return InternalFragmentResult::new(
+                    StatusCode::BAD_REQUEST,
+                    b"invalid projection matrix shape".to_vec(),
+                );
+            }
+            let bytes = match tokio::fs::read(fragment_file).await {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+                }
+                Err(_) => return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
+            };
+            if !bytes.len().is_multiple_of(request.rows) {
+                return InternalFragmentResult::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    b"fragment/projection row mismatch".to_vec(),
+                );
+            }
+            match st
+                .erasure
+                .linear_transform(
+                    &bytes,
+                    request.rows,
+                    &coefficient,
+                    coefficient.len() / request.rows,
+                    bytes.len() / request.rows,
+                )
+                .await
+            {
+                Ok(output) => InternalFragmentResult::new(StatusCode::OK, output),
+                Err(error) => InternalFragmentResult::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    error.to_string().into_bytes(),
+                ),
+            }
+        }
+        _ => InternalFragmentResult::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            b"method not allowed".to_vec(),
+        ),
+    }
+}
+
 async fn internal_put(
     State(st): State<ClusterState>,
-    Path((obj, ver, frag, disk)): Path<(String, u64, u32, String)>,
+    Path((object, version, fragment, disk)): Path<(String, u64, u32, String)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    let path = format!("/internal/v1/fragment/{obj}/{ver}/{frag}/{disk}");
-    if crate::pq::verify_request(&headers, "PUT", &path, &body, &st.pq_keys)
+) -> axum::response::Response {
+    let path = format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}");
+    dispatch_internal_fragment(&st, "PUT", &path, &headers, &body)
         .await
-        .is_err()
-    {
-        return (StatusCode::UNAUTHORIZED, "invalid ML-DSA envelope").into_response();
-    }
-    if !join_authorized(&st.cfg, &headers) {
-        return (StatusCode::UNAUTHORIZED, "invalid cluster join key").into_response();
-    }
-    if headers.get("x-kagi-cluster").and_then(|x| x.to_str().ok()) != Some(st.cfg.id.as_str()) {
-        return (StatusCode::FORBIDDEN, "cluster mismatch").into_response();
-    }
-    let want = headers
-        .get("x-kagi-checksum")
-        .and_then(|x| x.to_str().ok())
-        .unwrap_or("");
-    if blake3::hash(&body).to_hex().to_string() != want {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "checksum mismatch").into_response();
-    }
-    let p = fragment_path(&st.root, &disk, &obj, ver, frag);
-    if let Some(parent) = p.parent() {
-        if tokio::fs::create_dir_all(parent).await.is_err() {
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    }
-    let tmp = p.with_extension("tmp");
-    if tokio::fs::write(&tmp, &body).await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    match tokio::fs::rename(tmp, p).await {
-        Ok(_) => StatusCode::CREATED.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
+        .into_response()
 }
-/// Implements the internal get step and keeps its validation and state transitions visible at the call site.
+
 async fn internal_get(
     State(st): State<ClusterState>,
-    Path((obj, ver, frag, disk)): Path<(String, u64, u32, String)>,
+    Path((object, version, fragment, disk)): Path<(String, u64, u32, String)>,
     headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    let path = format!("/internal/v1/fragment/{obj}/{ver}/{frag}/{disk}");
-    if crate::pq::verify_request(&headers, "GET", &path, &[], &st.pq_keys)
+) -> axum::response::Response {
+    let path = format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}");
+    dispatch_internal_fragment(&st, "GET", &path, &headers, &[])
         .await
-        .is_err()
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !join_authorized(&st.cfg, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    match tokio::fs::read(fragment_path(&st.root, &disk, &obj, ver, frag)).await {
-        Ok(v) => (StatusCode::OK, v).into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
+        .into_response()
 }
-/// Implements the internal subchunks step and keeps its validation and state transitions visible at the call site.
+
 async fn internal_subchunks(
     State(st): State<ClusterState>,
-    Path((obj, ver, frag, disk)): Path<(String, u64, u32, String)>,
+    Path((object, version, fragment, disk)): Path<(String, u64, u32, String)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    let path = format!("/internal/v1/fragment/{obj}/{ver}/{frag}/{disk}/subchunks");
-    if crate::pq::verify_request(&headers, "POST", &path, &body, &st.pq_keys)
+) -> axum::response::Response {
+    let path = format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}/subchunks");
+    dispatch_internal_fragment(&st, "POST", &path, &headers, &body)
         .await
-        .is_err()
-    {
-        return (StatusCode::UNAUTHORIZED, "invalid ML-DSA envelope").into_response();
-    }
-    if !join_authorized(&st.cfg, &headers) {
-        return (StatusCode::UNAUTHORIZED, "invalid cluster join key").into_response();
-    }
-    let req: SubchunkRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid subchunk request").into_response(),
-    };
-    match read_subchunks(
-        fragment_path(&st.root, &disk, &obj, ver, frag),
-        req.alpha,
-        &req.indices,
-    )
-    .await
-    {
-        Ok(v) => (StatusCode::OK, v).into_response(),
-        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
-    }
+        .into_response()
 }
-/// Implements the internal project step and keeps its validation and state transitions visible at the call site.
+
 async fn internal_project(
     State(st): State<ClusterState>,
-    Path((obj, ver, frag, disk)): Path<(String, u64, u32, String)>,
+    Path((object, version, fragment, disk)): Path<(String, u64, u32, String)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> impl IntoResponse {
-    let path = format!("/internal/v1/fragment/{obj}/{ver}/{frag}/{disk}/project");
-    if crate::pq::verify_request(&headers, "POST", &path, &body, &st.pq_keys)
+) -> axum::response::Response {
+    let path = format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}/project");
+    dispatch_internal_fragment(&st, "POST", &path, &headers, &body)
         .await
-        .is_err()
-    {
-        return (StatusCode::UNAUTHORIZED, "invalid ML-DSA envelope").into_response();
-    }
-    if !join_authorized(&st.cfg, &headers) {
-        return (StatusCode::UNAUTHORIZED, "invalid cluster join key").into_response();
-    }
-    let req: ProjectionRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid projection request").into_response(),
-    };
-    let coeff = match B64.decode(&req.coeff_b64) {
-        Ok(v) => v,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "invalid projection coefficients").into_response()
-        }
-    };
-    if req.rows == 0 || coeff.is_empty() || !coeff.len().is_multiple_of(req.rows) {
-        return (StatusCode::BAD_REQUEST, "invalid projection matrix shape").into_response();
-    }
-    let v = match tokio::fs::read(fragment_path(&st.root, &disk, &obj, ver, frag)).await {
-        Ok(v) => v,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
-    };
-    if !v.len().is_multiple_of(req.rows) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "fragment/projection row mismatch",
-        )
-            .into_response();
-    }
-    match st
-        .erasure
-        .linear_transform(
-            &v,
-            req.rows,
-            &coeff,
-            coeff.len() / req.rows,
-            v.len() / req.rows,
-        )
-        .await
-    {
-        Ok(out) => (StatusCode::OK, out).into_response(),
-        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
-    }
+        .into_response()
 }
-/// Implements the internal delete step and keeps its validation and state transitions visible at the call site.
+
 async fn internal_delete(
     State(st): State<ClusterState>,
-    Path((obj, ver, frag, disk)): Path<(String, u64, u32, String)>,
+    Path((object, version, fragment, disk)): Path<(String, u64, u32, String)>,
     headers: axum::http::HeaderMap,
-) -> impl IntoResponse {
-    let path = format!("/internal/v1/fragment/{obj}/{ver}/{frag}/{disk}");
-    if crate::pq::verify_request(&headers, "DELETE", &path, &[], &st.pq_keys)
+) -> axum::response::Response {
+    let path = format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}");
+    dispatch_internal_fragment(&st, "DELETE", &path, &headers, &[])
         .await
-        .is_err()
-    {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    if !join_authorized(&st.cfg, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let p = fragment_path(&st.root, &disk, &obj, ver, frag);
-    match tokio::fs::remove_file(p).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        .into_response()
+}
+
+#[cfg(feature = "quic")]
+#[derive(Clone)]
+struct QuicFragmentHandler {
+    state: ClusterState,
+}
+
+#[cfg(feature = "quic")]
+#[async_trait::async_trait]
+impl crate::quic_transport::Handler for QuicFragmentHandler {
+    async fn handle(
+        &self,
+        request: crate::quic_transport::Request,
+    ) -> crate::quic_transport::Response {
+        let mut headers = axum::http::HeaderMap::new();
+        for (name, value) in request.meta.headers {
+            let Ok(name) = axum::http::HeaderName::from_bytes(name.as_bytes()) else {
+                return crate::quic_transport::Response::error(400, "invalid header name");
+            };
+            let Ok(value) = axum::http::HeaderValue::from_str(&value) else {
+                return crate::quic_transport::Response::error(400, "invalid header value");
+            };
+            headers.insert(name, value);
+        }
+
+        let result = dispatch_internal_fragment(
+            &self.state,
+            &request.meta.method,
+            &request.meta.path,
+            &headers,
+            &request.body,
+        )
+        .await;
+        crate::quic_transport::Response {
+            status: result.status.as_u16(),
+            message: result
+                .status
+                .canonical_reason()
+                .unwrap_or("Kagi fragment response")
+                .to_string(),
+            body: result.body,
+        }
     }
 }
-/// Implements the internal router step and keeps its validation and state transitions visible at the call site.
+
+#[cfg(feature = "quic")]
+pub async fn serve_quic(
+    st: ClusterState,
+    address: std::net::SocketAddr,
+    tls: Arc<rustls::ServerConfig>,
+) -> Result<()> {
+    let (endpoint, max_body_bytes) =
+        crate::quic_transport::server_endpoint(address, tls, st.cfg.transport.max_frame_bytes)?;
+    crate::quic_transport::serve(
+        endpoint,
+        max_body_bytes,
+        Arc::new(QuicFragmentHandler { state: st }),
+    )
+    .await
+}
+
+/// Direct HTTP/HTTPS internal router. QUIC uses the same dispatcher above.
 pub fn internal_router(st: ClusterState) -> Router {
     Router::new()
         .route(

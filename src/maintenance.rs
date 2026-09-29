@@ -22,18 +22,25 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify, Semaphore};
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the MaintenanceWindow path.
 pub struct MaintenanceWindow {
+    /// Lowercase weekday names. Empty means every day.
     #[serde(default)]
     pub days: Vec<String>,
+    /// Inclusive local start time in HH:MM form.
     pub start: String,
+    /// Local end time in HH:MM form.
     pub end: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the OperationPolicy path.
 pub struct OperationPolicy {
+    /// Enable this maintenance operation. Default: true.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Allowed execution windows. Default: empty, meaning unrestricted by time.
     #[serde(default)]
     pub windows: Vec<MaintenanceWindow>,
 }
@@ -50,14 +57,19 @@ fn yes() -> bool {
     true
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the ResourceQuotas path.
 pub struct ResourceQuotas {
+    /// Maintenance network budget in megabits/second. Default: 100.
     #[serde(default = "net_default")]
     pub network_mbps: f64,
+    /// Maintenance CPU budget as a percentage. Default: 20.
     #[serde(default = "cpu_default")]
     pub cpu_percent: f64,
+    /// Maintenance memory budget in MiB. Default: 512.
     #[serde(default = "mem_default")]
     pub memory_mib: u64,
+    /// Maximum simultaneous maintenance operations. Default: 2.
     #[serde(default = "conc_default")]
     pub max_concurrency: usize,
 }
@@ -88,12 +100,17 @@ impl Default for ResourceQuotas {
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 // ---- User-configurable schedules and resource ceilings -------------------------
+/// Background maintenance schedules and resource ceilings.
 pub struct MaintenanceConfig {
+    /// Master maintenance switch. Default: true.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// IANA timezone used to interpret maintenance windows. Default: UTC.
     #[serde(default = "tz_default")]
     pub timezone: String,
+    /// Resource ceilings shared by maintenance operations.
     #[serde(default)]
     pub quotas: ResourceQuotas,
     #[serde(default)]
@@ -106,6 +123,7 @@ pub struct MaintenanceConfig {
     pub snapshot_archive: OperationPolicy,
     #[serde(default)]
     pub rebalance: OperationPolicy,
+    /// Scrub scheduler evaluation interval in milliseconds. Default: 300,000.
     #[serde(default = "scrub_interval")]
     pub scrub_interval_ms: u64,
 }
