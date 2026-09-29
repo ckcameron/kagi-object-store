@@ -1,158 +1,186 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
+# Kagi 0.39 runtime node configuration reference.
+#
+# Every currently deserialized node/cluster parameter is represented or explained
+# here. "Required" means there is no configuration default. Defaults shown below
+# are the values used when a field or defaultable section is omitted.
+# Secrets and key material are placeholders; never commit production values.
+
+# Required. Shared cluster join secret, base64 encoded.
 join_key_b64: "REPLACE_WITH_KAGI_JOIN_KEY"
+
 cluster:
-  join_key_hash_hex: "REPLACE_WITH_HASH_FROM_KAGI_GENERATED_YAML"
+  # Required. Stable logical cluster identifier; peers must agree.
   id: prod-a
+  # Required. Stable 64-bit deterministic-placement salt.
   placement_salt: 1161981756646125696
+  # Default: 3. Replica count when replication protection is active.
   replication: 3
+  # Default: 2. Replica acknowledgements required for a successful write.
   write_quorum: 2
+  # Default: 1. Copies retained for each encoded fragment.
   chunk_replicas: 1
-  # Generate with: openssl rand -base64 32
+  # Optional, default: null. Stored verifier/hash representation of the join key.
+  join_key_hash_hex: "REPLACE_WITH_HASH_FROM_KAGI_GENERATED_YAML"
+  # Optional, default: null. Independent 32-byte metadata-encryption key, base64.
   metadata_key_b64: "REPLACE_WITH_BASE64_32_BYTE_KEY"
-  # Omit erasure to retain replication. New EC objects default to CLAY.
+
+  # Omitting transport uses all defaults shown here.
+  transport:
+    # Default: true. Prefer QUIC when compiled with the quic feature and the peer advertises it.
+    prefer_quic: true
+    # Default: 65536 (64 KiB). Minimum payload for QUIC preference.
+    quic_min_bytes: 65536
+    # Default: 268435456 (256 MiB). Maximum accepted QUIC request/response body.
+    max_frame_bytes: 268435456
+    # Default: true. RDMA preference flag. In 0.39 RDMA fields are groundwork;
+    # an rdma_endpoint does not by itself mean a functional RDMA backend is active.
+    prefer_rdma: true
+    # Default: 262144 (256 KiB). Intended minimum payload for RDMA selection.
+    rdma_min_bytes: 262144
+
+  # Optional, default: null. Omit to retain replication-only protection.
   erasure:
-    backend: auto        # auto | cpu | cuda | hip | opencl (GPU backends require their Cargo feature)
-    scheme: clay         # clay (default) | msr | reed_solomon
+    # Default: auto. auto | cpu | cuda | hip | opencl.
+    backend: auto
+    # Default for new runtime EC configuration: clay. clay | msr | reed_solomon.
+    scheme: clay
+    # Default: 6. Data shards (k).
     data_shards: 6
+    # Default: 3. Parity shards (m).
     parity_shards: 3
-    repair_helpers: 8    # CLAY: k+1..k+m-1; larger d reduces repair bandwidth
+    # Default: null. CLAY omission selects d=k+m-1; explicit CLAY d must satisfy
+    # k+1 <= d <= k+m-1. Product-matrix MSR currently requires d=2k-2.
+    repair_helpers: 8
+    # Default: 1048576 (1 MiB). Payload threshold for attempting GPU dispatch.
     gpu_threshold_bytes: 1048576
+    # Default: 32. Maximum concurrent GPU operations.
     max_gpu_inflight: 32
+    # Default: 268435456 (256 MiB). Cached linear-transform memory ceiling.
     max_matrix_cache_bytes: 268435456
+
+  # Required. Hosts participating in placement. Fields are documented on host-a1;
+  # additional entries use the identical schema.
   hosts:
-    - id: host-a1
-      endpoint: https://10.0.1.11:7400
-      site: site-a
-      rack: rack-a1
+    - id: host-a1                       # Required stable host ID.
+      endpoint: https://10.0.1.11:7400 # Required HTTPS control/fallback endpoint.
+      quic_endpoint: 10.0.1.11:7400    # Optional, default null; UDP host:port.
+      quic_server_name: host-a1.example.internal # Optional TLS certificate name for QUIC.
+      rdma_endpoint: null               # Optional, default null; reserved 0.39 RDMA-CM address.
+      site: site-a                      # Optional, default null; site failure domain.
+      rack: rack-a1                     # Optional, default null; rack failure domain.
       disks:
-        - { id: a1d0, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme0n1, serial_number: REPLACE_HOST_A1_NVME0_SERIAL }
-        - { id: a1d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme1n1, serial_number: REPLACE_HOST_A1_NVME1_SERIAL }
-        - { id: a1d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme2n1, serial_number: REPLACE_HOST_A1_NVME2_SERIAL }
-        - { id: a1d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme3n1, serial_number: REPLACE_HOST_A1_NVME3_SERIAL }
-        - { id: a1d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme4n1, serial_number: REPLACE_HOST_A1_NVME4_SERIAL }
-        - { id: a1d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme, device_path: /dev/nvme5n1, serial_number: REPLACE_HOST_A1_NVME5_SERIAL }
+        - id: a1d0                      # Required stable disk ID.
+          capacity_bytes: 8000000000000 # Required usable capacity in bytes.
+          weight: 1.0                   # Default: 1.0; relative placement weight.
+          storage_kind: nvme            # Default: auto; see storage-kind values below.
+          device_path: /dev/nvme0n1     # Optional; enables health/identity/queue controls.
+          serial_number: REPLACE_HOST_A1_NVME0_SERIAL # Optional identity assertion.
+          wwn: null                     # Optional, default null; WWN identity assertion.
+        - { id: a1d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: a1d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: a1d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: a1d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: a1d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+    # storage_kind values: auto | nvme | sata_hdd | sas_hdd | fibre_channel_hdd | directory.
+    # The current planner minimum is six hosts with six disks per host.
     - id: host-a2
       endpoint: https://10.0.1.12:7400
+      quic_endpoint: 10.0.1.12:7400
+      quic_server_name: host-a2.example.internal
       site: site-a
       rack: rack-a2
-      disks:
-        - { id: a2d0, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a2d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a2d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a2d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a2d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a2d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+      disks: &six_disks_a2
+        - { id: a2d0, capacity_bytes: 8000000000000 }
+        - { id: a2d1, capacity_bytes: 8000000000000 }
+        - { id: a2d2, capacity_bytes: 8000000000000 }
+        - { id: a2d3, capacity_bytes: 8000000000000 }
+        - { id: a2d4, capacity_bytes: 8000000000000 }
+        - { id: a2d5, capacity_bytes: 8000000000000 }
     - id: host-a3
       endpoint: https://10.0.1.13:7400
       site: site-a
       rack: rack-a3
       disks:
-        - { id: a3d0, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a3d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a3d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a3d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a3d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: a3d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: a3d0, capacity_bytes: 8000000000000 }
+        - { id: a3d1, capacity_bytes: 8000000000000 }
+        - { id: a3d2, capacity_bytes: 8000000000000 }
+        - { id: a3d3, capacity_bytes: 8000000000000 }
+        - { id: a3d4, capacity_bytes: 8000000000000 }
+        - { id: a3d5, capacity_bytes: 8000000000000 }
     - id: host-b1
       endpoint: https://10.1.1.11:7400
       site: site-b
       rack: rack-b1
       disks:
-        - { id: b1d0, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b1d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b1d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b1d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b1d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b1d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: b1d0, capacity_bytes: 8000000000000 }
+        - { id: b1d1, capacity_bytes: 8000000000000 }
+        - { id: b1d2, capacity_bytes: 8000000000000 }
+        - { id: b1d3, capacity_bytes: 8000000000000 }
+        - { id: b1d4, capacity_bytes: 8000000000000 }
+        - { id: b1d5, capacity_bytes: 8000000000000 }
     - id: host-b2
       endpoint: https://10.1.1.12:7400
       site: site-b
       rack: rack-b2
       disks:
-        - { id: b2d0, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b2d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b2d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b2d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b2d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b2d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: b2d0, capacity_bytes: 8000000000000 }
+        - { id: b2d1, capacity_bytes: 8000000000000 }
+        - { id: b2d2, capacity_bytes: 8000000000000 }
+        - { id: b2d3, capacity_bytes: 8000000000000 }
+        - { id: b2d4, capacity_bytes: 8000000000000 }
+        - { id: b2d5, capacity_bytes: 8000000000000 }
     - id: host-b3
       endpoint: https://10.1.1.13:7400
       site: site-b
       rack: rack-b3
       disks:
-        - { id: b3d0, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b3d1, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b3d2, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b3d3, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b3d4, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
-        - { id: b3d5, capacity_bytes: 8000000000000, weight: 1.0, storage_kind: nvme }
+        - { id: b3d0, capacity_bytes: 8000000000000 }
+        - { id: b3d1, capacity_bytes: 8000000000000 }
+        - { id: b3d2, capacity_bytes: 8000000000000 }
+        - { id: b3d3, capacity_bytes: 8000000000000 }
+        - { id: b3d4, capacity_bytes: 8000000000000 }
+        - { id: b3d5, capacity_bytes: 8000000000000 }
 
+# Required. Must match this node's cluster.hosts[].id.
 local_host: host-a1
+# Required. Root for local Kagi state, fragments, metadata and runtime files.
 data_root: /var/lib/kagi
+# Default: 0.0.0.0:7400. Native API/web listener.
 listen: 0.0.0.0:7400
 
-
 metadata:
+  # Required. Stable local Raft node ID; normally identical to local_host.
   node_id: host-a1
-  election_min_ms: 1500
-  election_max_ms: 3000
-  heartbeat_ms: 400
-  # List OTHER voting members. Each node uses the same IDs/endpoints, excluding itself.
+  # Required list. List OTHER voters; do not duplicate the local node.
   peers:
-    - { id: host-a2, endpoint: https://10.0.1.12:7400, site: site-a, rack: rack-a2 }
-    - { id: host-a3, endpoint: https://10.0.1.13:7400, site: site-a, rack: rack-a3 }
-    - { id: host-b1, endpoint: https://10.1.1.11:7400, site: site-b, rack: rack-b1 }
-    - { id: host-b2, endpoint: https://10.1.1.12:7400, site: site-b, rack: rack-b2 }
-    - { id: host-b3, endpoint: https://10.1.1.13:7400, site: site-b, rack: rack-b3 }
+    - id: host-a2                       # Required peer ID.
+      endpoint: https://10.0.1.12:7400 # Required peer control endpoint.
+      site: site-a                      # Optional, default null.
+      rack: rack-a2                     # Optional, default null.
+      pq_public_key_b64: null           # Optional, default null; inline peer PQ public key.
+    - { id: host-a3, endpoint: "https://10.0.1.13:7400", site: site-a, rack: rack-a3 }
+    - { id: host-b1, endpoint: "https://10.1.1.11:7400", site: site-b, rack: rack-b1 }
+    - { id: host-b2, endpoint: "https://10.1.1.12:7400", site: site-b, rack: rack-b2 }
+    - { id: host-b3, endpoint: "https://10.1.1.13:7400", site: site-b, rack: rack-b3 }
+  election_min_ms: 1500 # Default: 1500; randomized election timeout lower bound.
+  election_max_ms: 3000 # Default: 3000; randomized election timeout upper bound.
+  heartbeat_ms: 400     # Default: 400; Raft leader heartbeat cadence.
 
-# Enable after issuing a cluster CA and per-host certificates.
-# All peer certificates should contain the hostname/IP used in cluster.hosts[].endpoint.
+# Optional. Omitting TLS leaves the TCP listener cleartext; production nodes should
+# configure native TLS. QUIC also requires this certificate/key material.
 tls:
-  ca: /etc/kagi/pki/ca.pem
-  cert: /etc/kagi/pki/host-a1.pem
-  key: /etc/kagi/pki/host-a1-key.pem
+  ca: /etc/kagi/pki/ca.pem             # Required when tls exists; peer trust CA bundle.
+  cert: /etc/kagi/pki/host-a1.pem      # Required when tls exists; local PEM chain.
+  key: /etc/kagi/pki/host-a1-key.pem   # Required when tls exists; local PEM private key.
+  allow_tls12: false                    # Default: false; TLS 1.3 only. true permits TLS 1.2.
 
-recovery:
-  heartbeat_ms: 2000
-  suspect_after_ms: 6000
-  down_after_ms: 15000
-  out_after_ms: 120000
-  repair_interval_ms: 10000
-  max_parallel_repairs: 4
-  return_probe_successes: 3
-  # Flap detection applies independently to site, rack, server, and disk.
-  # Two complete down/up cycles = four availability transitions.
-  flap_window_ms: 300000
-  flap_transition_threshold: 4
-  # A quarantined resource stays excluded until continuously healthy for this
-  # period, unless an operator explicitly clears its flap quarantine.
-  minimum_reinclude_uptime_ms: 600000
-
-garbage_collection:
-  enabled: true
-  # Deleted versions remain physically recoverable for this period before GC.
-  grace_period_ms: 86400000
-  interval_ms: 30000
-  max_versions_per_cycle: 32
-
-# v14 identity integration boundary. Resolve Unix identities with NSS/PAM and
-# Active Directory identities with Kerberos/SSPI/LDAP in the trusted filesystem gateway.
-# ACLs persist numeric UID/GID and AD SID principals, so renames do not change identity.
-filesystem:
-  overlay_index: decentralized-gossip
-  identity_principals:
-    - unix_uid_gid
-    - active_directory_sid
-  acl_model: nfsv4
-
-# v16 post-quantum node identity. Generate on each host with:
-# kagi-cluster-host --config /etc/kagi/node.yaml generate-pq-identity \
-#   --public /etc/kagi/pki/host-a1.mldsa87.pub \
-#   --secret /etc/kagi/pki/host-a1.mldsa87.key
+# The current node loader requires this section.
 post_quantum:
-  required: true
-  identity_secret: /etc/kagi/pki/host-a1.mldsa87.key
-  identity_public: /etc/kagi/pki/host-a1.mldsa87.pub
+  required: true # Default: true; require ML-DSA-87 identities and all peer keys.
+  identity_secret: /etc/kagi/pki/host-a1.mldsa87.key # Required local secret key path.
+  identity_public: /etc/kagi/pki/host-a1.mldsa87.pub # Required local public key path.
+  # Default: {}. Required entries for every metadata peer when required=true.
   peer_public_keys:
     host-a2: /etc/kagi/pki/host-a2.mldsa87.pub
     host-a3: /etc/kagi/pki/host-a3.mldsa87.pub
@@ -160,50 +188,95 @@ post_quantum:
     host-b2: /etc/kagi/pki/host-b2.mldsa87.pub
     host-b3: /etc/kagi/pki/host-b3.mldsa87.pub
 
-# Point-in-time snapshots initially reference immutable object versions. As overwritten/deleted
-# source versions accumulate retained delta, the leader materializes the snapshot into full copies.
-snapshots:
-  enabled: true
-  check_interval_ms: 30000
-  archive_after_delta_bytes: 10737418240
-  archive_after_delta_ratio: 0.50
+# Omitting recovery uses all defaults below.
+recovery:
+  heartbeat_ms: 2000                    # Default: 2000; health-probe cadence.
+  suspect_after_ms: 6000                # Default: 6000; age before SUSPECT.
+  down_after_ms: 15000                  # Default: 15000; age before DOWN.
+  out_after_ms: 120000                  # Default: 120000; age before OUT.
+  repair_interval_ms: 10000             # Default: 10000; repair-controller cadence.
+  max_parallel_repairs: 4               # Default: 4; repair concurrency ceiling.
+  return_probe_successes: 3             # Default: 3; healthy probes required for return.
+  flap_window_ms: 300000                # Default: 300000; transition-counting window.
+  flap_transition_threshold: 4          # Default: 4; transitions causing quarantine.
+  minimum_reinclude_uptime_ms: 600000   # Default: 600000; healthy time before auto re-entry.
 
-# v22 background maintenance policy. Empty windows mean any time.
+# Fenced physical garbage collection. Omitting uses all defaults below.
+garbage_collection:
+  enabled: true                         # Default: true.
+  grace_period_ms: 86400000             # Default: 24 h before physical deletion.
+  interval_ms: 30000                    # Default: 30000; scan cadence.
+  max_versions_per_cycle: 32            # Default: 32; work cap per cycle.
+
+# Point-in-time snapshot materialization. Omitting uses all defaults below.
+snapshots:
+  enabled: true                         # Default: true.
+  check_interval_ms: 30000              # Default: 30000.
+  archive_after_delta_bytes: 10737418240 # Default: 10 GiB retained delta.
+  archive_after_delta_ratio: 0.50       # Default: 0.50.
+
+# Background maintenance. Empty windows mean an operation may run at any time.
 maintenance:
-  enabled: true
-  timezone: America/Los_Angeles
+  enabled: true                         # Default: true; master switch.
+  timezone: America/Los_Angeles         # Default: UTC; IANA timezone.
+  scrub_interval_ms: 300000             # Default: 300000.
   quotas:
-    network_mbps: 100
-    cpu_percent: 20
-    memory_mib: 512
-    max_concurrency: 2
-  scrub_interval_ms: 300000
+    network_mbps: 100                   # Default: 100.0.
+    cpu_percent: 20                     # Default: 20.0.
+    memory_mib: 512                     # Default: 512.
+    max_concurrency: 2                  # Default: 2.
+  # Each operation policy defaults to enabled=true and windows=[].
   scrub:
     enabled: true
     windows:
-      - days: [mon, tue, wed, thu, fri, sat, sun]
-        start: "01:00"
-        end: "06:00"
-  proactive_repair:
-    enabled: true
-    windows: []
-  garbage_collection:
-    enabled: true
-    windows: []
-  snapshot_archive:
-    enabled: true
-    windows:
-      - days: [sat, sun]
-        start: "00:00"
-        end: "23:59"
+      - days: [mon, tue, wed, thu, fri, sat, sun] # Default: []; empty means every day.
+        start: "01:00"                  # Required per window, local HH:MM.
+        end: "06:00"                    # Required per window, local HH:MM.
+  proactive_repair: { enabled: true, windows: [] }
+  garbage_collection: { enabled: true, windows: [] }
+  snapshot_archive: { enabled: true, windows: [] }
+  rebalance: { enabled: true, windows: [] }
 
-  rebalance:
-    enabled: true
-    windows: []
+# Operations telemetry. Omitting uses all defaults below.
+telemetry:
+  enabled: true                         # Default: true.
+  sample_interval_ms: 1000              # Default: 1000; clamped to 250..60000.
+  retention_samples: 3600               # Default: 3600; clamped to 60..86400.
 
-# Kagi web operations console. Use TLS or a trusted TLS reverse proxy.
+# Browser operations console. Omitting uses all defaults below.
 web_console:
-  enabled: true
-  userdb: /etc/kagi/users.yaml
-  log_path: /var/log/kagi/kagi.log
-  max_log_lines: 500
+  enabled: true                         # Default: true.
+  userdb: /etc/kagi/users.yaml          # Default shown; local Argon2 user database.
+  log_path: /var/log/kagi/kagi.log      # Default shown.
+  max_log_lines: 500                    # Default: 500.
+
+# Additional file/object enforcement. Omitting means no configured extra rules;
+# ACL, WORM and ordinary authorization remain independent.
+security:
+  kernel:
+    enabled: false                      # Default: false; attach eBPF/LSM when true.
+    object: /usr/lib/kagi/kagi-guard-ebpf # Optional, default null; eBPF object path.
+    audit_only: false                   # Default: false; true observes rather than denies.
+    rules:                              # Default: [].
+      - path: /var/lib/kagi/pq          # Required per rule.
+        recursive: true                 # Default: false.
+        operations: [read, write, delete, rename] # Required operation names.
+        decision: deny                  # Required: allow | deny.
+        action: audit                   # Optional, default null; action-map key.
+  objects:                              # Default: [] logical namespace rules.
+    - key: confidential                 # Required exact key/subtree prefix.
+      recursive: true                   # Default: false.
+      privileged_only: false            # Default: false.
+      operations: [delete]              # Required operation names.
+      decision: deny                    # Required: allow | deny.
+      action: audit                     # Optional, default null.
+  actions:                              # Default: {} asynchronous side actions.
+    audit:
+      type: log
+    # alert:
+    #   type: exec
+    #   program: /usr/local/libexec/kagi-alert
+    #   args: ["--resource", "{path}", "--operation", "{operation}", "--decision", "{decision}"]
+    # stop_subject:
+    #   type: signal
+    #   signal: 15
