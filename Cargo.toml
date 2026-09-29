@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 [package]
 name = "kagi-object-store"
-version = "0.38.0"
+version = "0.39.0"
 edition = "2021"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -39,12 +39,17 @@ aocl = []
 rocm = ["hip"]
 scsi-target = []
 ebpf = ["dep:aya"]
+quic = ["dep:quinn"]
+rdma = []
+fhe-cat = []
+fhe-cheddar = []
 
 [dependencies]
 libc = "0.2"
 futures-util = "0.3"
 percent-encoding = "2"
 aya = { version = "0.14.0", default-features = false, optional = true }
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
 anyhow = "1"
 argon2 = "0.5"
 axum = "0.7"
