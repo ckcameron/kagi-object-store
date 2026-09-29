@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+# Kagi security/robustness checks. Quick mode uses the installed Rust toolchain;
+# deep mode additionally runs dependency advisories, unsafe inventory, Miri,
+# sanitizers and short libFuzzer campaigns.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+mode=${1:-quick}
+case "$mode" in
+  quick|deep) ;;
+  *) echo "usage: scripts/kagi-security-check [quick|deep]" >&2; exit 2 ;;
+esac
+
+install_tool() {
+  local crate=$1
+  local command=$2
+  if command -v "$command" >/dev/null 2>&1; then
+    return
+  fi
+  if [[ "${KAGI_INSTALL_TOOLS:-0}" != 1 ]]; then
+    echo "missing $command; rerun with KAGI_INSTALL_TOOLS=1 or install $crate" >&2
+    return 2
+  fi
+  cargo install "$crate" --locked
+}
+
+echo "== formatting =="
+cargo fmt --all -- --check
+cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+
+echo "== strict static checks =="
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets
+
+echo "== QUIC feature =="
+cargo check --all-targets --features quic
+cargo test --all-targets --features quic
+cargo clippy --all-targets --features quic -- -D warnings
+
+echo "== eBPF userspace feature =="
+cargo check --all-targets --features ebpf
+cargo test --all-targets --features ebpf
+cargo clippy --all-targets --features ebpf -- -D warnings
+
+if [[ "$mode" == quick ]]; then
+  exit 0
+fi
+
+echo "== RustSec dependency advisories =="
+install_tool cargo-audit cargo-audit
+cargo audit
+
+echo "== dependency source/advisory policy =="
+install_tool cargo-deny cargo-deny
+cargo deny check advisories sources
+
+echo "== unsafe inventory =="
+install_tool cargo-geiger cargo-geiger
+mkdir -p target/kagi-security
+cargo geiger --all-features | tee target/kagi-security/geiger.txt
+
+if rustup toolchain list | grep -q '^nightly'; then
+  :
+elif [[ "${KAGI_INSTALL_TOOLS:-0}" == 1 ]]; then
+  rustup toolchain install nightly --component miri,rust-src
+else
+  echo "nightly toolchain missing; set KAGI_INSTALL_TOOLS=1 to install it" >&2
+  exit 2
+fi
+rustup component add miri rust-src --toolchain nightly >/dev/null
+
+echo "== Miri undefined-behavior interpreter =="
+RUSTFLAGS="-C target-feature=-avx2,-avx512f,-avx512bw"   cargo +nightly miri test --lib
+
+echo "== AddressSanitizer =="
+scripts/kagi-sanitize address
+
+echo "== ThreadSanitizer =="
+scripts/kagi-sanitize thread
+
+echo "== fuzz smoke =="
+install_tool cargo-fuzz cargo-fuzz
+cargo +nightly fuzz run wire_frame -- -max_total_time=30
+cargo +nightly fuzz run erasure_roundtrip -- -max_total_time=60
