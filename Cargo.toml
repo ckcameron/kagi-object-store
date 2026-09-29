@@ -53,6 +53,7 @@ quinn = { version = "0.11.12", default-features = false, features = ["runtime-to
 anyhow = "1"
 argon2 = "0.5"
 axum = "0.7"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
@@ -67,7 +68,7 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 base64 = "0.22"
 bytes = "1"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 tower-http = { version = "0.6", features = ["trace"] }
