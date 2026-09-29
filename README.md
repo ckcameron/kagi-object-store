@@ -311,6 +311,19 @@ kagi-cluster-host \
 - `scripts/test-all`
 - `scripts/coverage`
 
+## Configuration and command documentation
+
+The canonical runtime configuration is [`examples/node-v6.example.yaml`](examples/node-v6.example.yaml).
+It is intentionally verbose: every currently supported node/cluster parameter is shown or
+explained in-place with units, accepted values, security notes, and applicable defaults.
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) contains the corresponding reference tables,
+planner configuration, runtime caveats, and queue-control semantics.
+
+Command-line option descriptions are maintained in the Clap declarations themselves so
+`--help` and the source documentation stay synchronized. Public runtime configuration types
+carry Rustdoc explaining field semantics and defaults; new externally visible options should
+not be added without updating both the canonical example and configuration reference.
+
 ## Build
 
 Rust stable is expected. CUDA is optional.
