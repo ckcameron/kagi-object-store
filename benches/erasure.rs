@@ -83,9 +83,13 @@ fn blake3_baseline(c: &mut Criterion) {
     for bytes in [1 << 20, 8 << 20, 64 << 20] {
         let input = data(bytes);
         group.throughput(Throughput::Bytes(bytes as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(bytes), &input, |bench, input| {
-            bench.iter(|| blake3::hash(black_box(input)));
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(bytes),
+            &input,
+            |bench, input| {
+                bench.iter(|| blake3::hash(black_box(input)));
+            },
+        );
     }
     group.finish();
 }
