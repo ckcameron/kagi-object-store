@@ -537,7 +537,10 @@ fn state(
 ) -> Result<ClusterState> {
     #[cfg(feature = "quic")]
     let quic = if c.cluster.transport.prefer_quic
-        && c.cluster.hosts.iter().any(|host| host.quic_endpoint.is_some())
+        && c.cluster
+            .hosts
+            .iter()
+            .any(|host| host.quic_endpoint.is_some())
     {
         let tls = c
             .tls
@@ -2956,7 +2959,13 @@ async fn ui_disk_tune(
     let Some(identity) = console_auth(&st, &headers, true) else {
         return webui::unauthorized();
     };
-    let Some(host) = st.data.cfg.hosts.iter().find(|host| host.id == st.data.local_host) else {
+    let Some(host) = st
+        .data
+        .cfg
+        .hosts
+        .iter()
+        .find(|host| host.id == st.data.local_host)
+    else {
         return (StatusCode::NOT_FOUND, "local host is not in topology").into_response();
     };
     let Some(configured) = host.disks.iter().find(|candidate| candidate.id == disk) else {
@@ -3379,8 +3388,7 @@ async fn main() -> Result<()> {
                         .as_ref()
                         .context("QUIC listener requires node TLS configuration")?;
                     // QUIC v1 is TLS 1.3 only, regardless of the HTTPS compatibility policy.
-                    let server_tls =
-                        tls::server_config(&tls_config.cert, &tls_config.key, false)?;
+                    let server_tls = tls::server_config(&tls_config.cert, &tls_config.key, false)?;
                     let quic_state = v6.data.clone();
                     let log_path = cfg.web_console.log_path.clone();
                     let node = cfg.local_host.clone();
@@ -3489,7 +3497,11 @@ async fn main() -> Result<()> {
                 &format!(
                     "Kagi node listening on {}{}",
                     cfg.listen,
-                    if cfg.tls.is_some() { " with native TLS" } else { "" }
+                    if cfg.tls.is_some() {
+                        " with native TLS"
+                    } else {
+                        ""
+                    }
                 ),
             );
             println!(
@@ -3500,11 +3512,8 @@ async fn main() -> Result<()> {
             );
             if let Some(tls_config) = &cfg.tls {
                 let address: std::net::SocketAddr = cfg.listen.parse()?;
-                let rustls = tls::server_config(
-                    &tls_config.cert,
-                    &tls_config.key,
-                    tls_config.allow_tls12,
-                )?;
+                let rustls =
+                    tls::server_config(&tls_config.cert, &tls_config.key, tls_config.allow_tls12)?;
                 let rustls = axum_server::tls_rustls::RustlsConfig::from_config(rustls);
                 axum_server::bind_rustls(address, rustls)
                     .serve(app.into_make_service())
