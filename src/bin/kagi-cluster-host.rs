@@ -3360,6 +3360,46 @@ async fn main() -> Result<()> {
             if v6.telemetry.config().enabled {
                 tokio::spawn(run_telemetry_sampler(v6.clone()));
             }
+            #[cfg(feature = "quic")]
+            if cfg.cluster.transport.prefer_quic {
+                if let Some(endpoint) = cfg
+                    .cluster
+                    .hosts
+                    .iter()
+                    .find(|host| host.id == cfg.local_host)
+                    .and_then(|host| host.quic_endpoint.as_deref())
+                {
+                    let address: std::net::SocketAddr = endpoint
+                        .parse()
+                        .with_context(|| format!("invalid local QUIC endpoint {endpoint}"))?;
+                    let tls_config = cfg
+                        .tls
+                        .as_ref()
+                        .context("QUIC listener requires node TLS configuration")?;
+                    // QUIC v1 is TLS 1.3 only, regardless of the HTTPS compatibility policy.
+                    let server_tls =
+                        tls::server_config(&tls_config.cert, &tls_config.key, false)?;
+                    let quic_state = v6.data.clone();
+                    let log_path = cfg.web_console.log_path.clone();
+                    let node = cfg.local_host.clone();
+                    tokio::spawn(async move {
+                        webui::append_log(
+                            &log_path,
+                            &node,
+                            &format!("Kagi QUIC data plane listening on {address}"),
+                        );
+                        if let Err(error) =
+                            cluster::serve_quic(quic_state, address, server_tls).await
+                        {
+                            webui::append_log(
+                                &log_path,
+                                &node,
+                                &format!("Kagi QUIC data plane stopped: {error}"),
+                            );
+                        }
+                    });
+                }
+            }
             let public = Router::new()
                 .route("/v1/monitor/events", get(runtime_security::history))
                 .route("/v1/monitor/stream", get(runtime_security::stream))
