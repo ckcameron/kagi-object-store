@@ -1558,6 +1558,94 @@ fn join_authorized(cfg: &ClusterConfig, headers: &axum::http::HeaderMap) -> bool
     blake3::hash(&bytes).to_hex().to_string() == want
 }
 
+/// Delete one replica after a successful rebalance. Local deletion tolerates
+/// already-removed files; remote deletion retains the same ML-DSA/join-key
+/// authorization as every other internal fragment operation.
+async fn rpc_delete_replica(
+    st: &ClusterState,
+    loc: &FragmentLocation,
+    manifest: &ObjectManifest,
+) -> Result<()> {
+    if loc.host == st.local_host {
+        let path = fragment_path(
+            &st.root,
+            &loc.disk,
+            &manifest.object_id,
+            manifest.version,
+            loc.fragment,
+        );
+        match tokio::fs::remove_file(path).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        return Ok(());
+    }
+
+    let peer = st
+        .cfg
+        .hosts
+        .iter()
+        .find(|host| host.id == loc.host)
+        .context("peer missing")?;
+    let path = format!(
+        "/internal/v1/fragment/{}/{}/{}/{}",
+        manifest.object_id, manifest.version, loc.fragment, loc.disk
+    );
+
+    #[cfg(feature = "quic")]
+    if quic_request(st, peer, "DELETE", &path, &[], &[])
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let url = format!("{}{}", peer.endpoint.trim_end_matches('/'), path);
+    let identity = st.pq_identity.as_ref().context("PQ identity required")?;
+    let auth = crate::pq::signed_headers(identity, "DELETE", &path, &[])?;
+    let response = crate::pq::apply_headers(st.client.delete(url), auth)
+        .send()
+        .await?;
+    if !response.status().is_success()
+        && response.status() != reqwest::StatusCode::NOT_FOUND
+    {
+        bail!("peer delete {}", response.status());
+    }
+    Ok(())
+}
+
+/// Remove obsolete physical replicas only after the replacement manifest has
+/// been committed. This preserves rebalance safety while allowing retries to be
+/// idempotent.
+pub async fn cleanup_rebalanced_replicas(
+    st: &ClusterState,
+    old: &ObjectManifest,
+    new: &ObjectManifest,
+) -> Result<()> {
+    let keep: BTreeSet<_> = new
+        .fragments
+        .iter()
+        .map(|location| {
+            (
+                location.fragment,
+                location.host.clone(),
+                location.disk.clone(),
+            )
+        })
+        .collect();
+    for location in &old.fragments {
+        if !keep.contains(&(
+            location.fragment,
+            location.host.clone(),
+            location.disk.clone(),
+        )) {
+            rpc_delete_replica(st, location, old).await?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct InternalFragmentResult {
     status: StatusCode,
