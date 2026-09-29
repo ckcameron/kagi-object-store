@@ -32,12 +32,18 @@ use std::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 /// Supported BackendKind states or operations.
+/// Requested execution backend for erasure operations.
 pub enum BackendKind {
+    /// Select the best initialized accelerator and fall back to CPU.
     #[default]
     Auto,
+    /// Force the CPU implementation.
     Cpu,
+    /// Request NVIDIA CUDA; requires the cuda Cargo feature and runtime support.
     Cuda,
+    /// Request AMD HIP/ROCm; requires the hip/rocm Cargo feature and runtime support.
     Hip,
+    /// Request OpenCL; requires the opencl Cargo feature and runtime support.
     Opencl,
 }
 /// Codec family used by a particular immutable object version.
@@ -53,22 +59,28 @@ pub enum ErasureScheme {
     Clay,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ErasureConfig path.
+/// Runtime erasure-coding and accelerator policy for newly protected objects.
 pub struct ErasureConfig {
+    /// Requested execution backend. Default: auto.
     #[serde(default)]
     pub backend: BackendKind,
+    /// Codec for new objects. Runtime default: CLAY.
     #[serde(default = "default_runtime_scheme")]
     pub scheme: ErasureScheme,
+    /// Number of data shards (k). Default: 6.
     #[serde(default = "default_k")]
     pub data_shards: usize,
+    /// Number of parity shards (m). Default: 3.
     #[serde(default = "default_m")]
     pub parity_shards: usize,
     /// Helper count for exact repair.  CLAY accepts k+1..n-1.  Product-matrix
     /// MSR currently implements the canonical d=2k-2 construction.
     #[serde(default)]
     pub repair_helpers: Option<usize>,
+    /// Minimum payload size for attempting GPU dispatch. Default: 1 MiB.
     #[serde(default = "default_gpu_threshold")]
     pub gpu_threshold_bytes: usize,
+    /// Maximum number of GPU operations admitted concurrently. Default: 32.
     #[serde(default = "default_gpu_queue")]
     pub max_gpu_inflight: u64,
     /// Maximum cached linear transform size.  Prevents an unexpectedly large
