@@ -22,6 +22,7 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify, Semaphore};
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the MaintenanceWindow path.
 pub struct MaintenanceWindow {
     /// Lowercase weekday names. Empty means every day.
@@ -33,6 +34,7 @@ pub struct MaintenanceWindow {
     pub end: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the OperationPolicy path.
 pub struct OperationPolicy {
     /// Enable this maintenance operation. Default: true.
@@ -55,6 +57,7 @@ fn yes() -> bool {
     true
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Kagi state or configuration used by the ResourceQuotas path.
 pub struct ResourceQuotas {
     /// Maintenance network budget in megabits/second. Default: 100.
@@ -97,6 +100,7 @@ impl Default for ResourceQuotas {
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 // ---- User-configurable schedules and resource ceilings -------------------------
 /// Background maintenance schedules and resource ceilings.
 pub struct MaintenanceConfig {
