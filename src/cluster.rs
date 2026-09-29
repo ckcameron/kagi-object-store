@@ -45,15 +45,25 @@ use tokio::{
 };
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Ordered high-throughput transport policy. HTTPS remains the universal fallback.
+/// Data-plane transport policy for fragment movement between Kagi peers.
+///
+/// The control plane remains authenticated independently of the selected data transport.
+/// QUIC is optional at compile time and falls back to HTTPS when unavailable. RDMA fields
+/// reserve the 0.39 policy surface; an advertised RDMA endpoint is not an availability claim.
 pub struct DataTransportConfig {
+    /// Prefer QUIC for eligible fragment traffic. Default: true.
     #[serde(default = "default_true")]
     pub prefer_quic: bool,
+    /// Minimum payload size, in bytes, for QUIC preference. Default: 65,536.
     #[serde(default = "default_quic_min_bytes")]
     pub quic_min_bytes: usize,
+    /// Maximum request/response body accepted by the framed transport. Default: 256 MiB.
     #[serde(default = "default_transport_frame_bytes")]
     pub max_frame_bytes: usize,
+    /// Prefer RDMA when a functional backend is available. Default: true.
     #[serde(default = "default_true")]
     pub prefer_rdma: bool,
+    /// Minimum payload size, in bytes, intended for RDMA selection. Default: 256 KiB.
     #[serde(default = "default_rdma_min_bytes")]
     pub rdma_min_bytes: usize,
 }
@@ -88,22 +98,33 @@ fn default_transport_frame_bytes() -> usize {
 
 #[derive(Debug, Clone, Deserialize)]
 // ---- Cluster topology and immutable object metadata ----------------------------
+/// Runtime cluster topology, protection policy and transport configuration.
 pub struct ClusterConfig {
+    /// Stable cluster identifier shared by every member.
     pub id: String,
+    /// Stable salt used by deterministic fragment placement.
     pub placement_salt: u64,
+    /// Storage hosts eligible for placement.
     pub hosts: Vec<PeerHost>,
+    /// Replica count for replication protection. Default: 3.
     #[serde(default = "default_replication")]
     pub replication: usize,
+    /// Successful replica acknowledgements required for a write. Default: 2.
     #[serde(default = "default_quorum")]
     pub write_quorum: usize,
+    /// Copies retained for each encoded fragment. Default: 1.
     #[serde(default = "one_usize")]
     pub chunk_replicas: usize,
+    /// Optional erasure-coding policy; None retains replication-only protection.
     #[serde(default)]
     pub erasure: Option<ErasureConfig>,
+    /// Optional base64 32-byte key used for protected metadata.
     #[serde(default)]
     pub metadata_key_b64: Option<String>,
+    /// Optional stored verifier/hash representation of the cluster join key.
     #[serde(default)]
     pub join_key_hash_hex: Option<String>,
+    /// Fragment data-plane selection and size thresholds.
     #[serde(default)]
     pub transport: DataTransportConfig,
 }
@@ -120,8 +141,11 @@ fn one_usize() -> usize {
     1
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// One storage host and its advertised control/data-plane endpoints.
 pub struct PeerHost {
+    /// Stable host identifier used by placement and metadata.
     pub id: String,
+    /// HTTPS control-plane and fallback data endpoint.
     pub endpoint: String,
     /// UDP QUIC socket advertised for bulk fragment traffic.
     #[serde(default)]
@@ -132,24 +156,35 @@ pub struct PeerHost {
     /// RDMA-CM address advertised when the optional direct-RDMA backend is enabled.
     #[serde(default)]
     pub rdma_endpoint: Option<String>,
+    /// Optional site failure-domain label.
     #[serde(default)]
     pub site: Option<String>,
+    /// Optional rack failure-domain label.
     #[serde(default)]
     pub rack: Option<String>,
+    /// Physical/logical storage devices exposed by this host.
     pub disks: Vec<PeerDisk>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+/// Placement and identity information for one host storage device.
 pub struct PeerDisk {
+    /// Stable disk identifier.
     pub id: String,
+    /// Usable placement capacity in bytes.
     pub capacity_bytes: u64,
+    /// Relative placement weight. Default: 1.0.
     #[serde(default = "one")]
     pub weight: f64,
+    /// Optional Linux block-device path used for health, identity and queue controls.
     #[serde(default)]
     pub device_path: Option<String>,
+    /// Optional expected serial number; a mismatch prevents safe admission.
     #[serde(default)]
     pub serial_number: Option<String>,
+    /// Optional expected WWN; a mismatch prevents safe admission.
     #[serde(default)]
     pub wwn: Option<String>,
+    /// Expected storage media/transport class. Default: auto.
     #[serde(default)]
     pub storage_kind: StorageKind,
 }
