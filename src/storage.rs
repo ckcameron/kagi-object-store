@@ -10,8 +10,13 @@
 // Physical-device discovery and health normalization for NVMe, SATA, SAS and Fibre Channel storage.
 //! Physical backend discovery and health for NVMe and rotational block devices.
 //! Rotational backends support direct-attached SATA/SAS and Fibre Channel SCSI LUNs.
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 /// Supported StorageKind states or operations.
@@ -24,6 +29,138 @@ pub enum StorageKind {
     FibreChannelHdd,
     Directory,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Linux block queue controls surfaced by Kagi's operations API.
+pub struct QueueSettings {
+    pub scheduler: Option<String>,
+    #[serde(default)]
+    pub available_schedulers: Vec<String>,
+    pub write_cache: Option<String>,
+    pub read_ahead_kb: Option<u64>,
+    pub nr_requests: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+/// Requested queue/cache changes. Fields left unset are not modified.
+pub struct QueueTuning {
+    pub scheduler: Option<String>,
+    pub write_cache_enabled: Option<bool>,
+    pub read_cache_enabled: Option<bool>,
+    pub read_ahead_kb: Option<u64>,
+}
+
+fn block_name(device: &str) -> Result<String> {
+    let canonical = fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
+    canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .context("device path has no usable block-device name")
+}
+
+fn queue_path(device: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from("/sys/class/block")
+        .join(block_name(device)?)
+        .join("queue"))
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_scheduler(value: &str) -> (Option<String>, Vec<String>) {
+    let mut selected = None;
+    let mut available = Vec::new();
+    for item in value.split_whitespace() {
+        let active = item.starts_with('[') && item.ends_with(']');
+        let name = item.trim_matches(['[', ']']).to_string();
+        if name.is_empty() {
+            continue;
+        }
+        if active {
+            selected = Some(name.clone());
+        }
+        available.push(name);
+    }
+    (selected, available)
+}
+
+/// Read Linux block-layer scheduling and cache controls for a configured device.
+pub fn queue_settings(device: &str) -> Result<QueueSettings> {
+    let queue = queue_path(device)?;
+    let scheduler_raw = read_trimmed(&queue.join("scheduler")).unwrap_or_default();
+    let (scheduler, available_schedulers) = parse_scheduler(&scheduler_raw);
+    Ok(QueueSettings {
+        scheduler,
+        available_schedulers,
+        write_cache: read_trimmed(&queue.join("write_cache")),
+        read_ahead_kb: read_trimmed(&queue.join("read_ahead_kb"))
+            .and_then(|value| value.parse().ok()),
+        nr_requests: read_trimmed(&queue.join("nr_requests")).and_then(|value| value.parse().ok()),
+    })
+}
+
+/// Apply an administrator-requested block queue policy through sysfs.
+///
+/// Kagi deliberately does not shell out to hdparm or vendor tools here.  The kernel
+/// queue interface is auditable, applies immediately, and lets the device/driver reject
+/// unsupported settings.  A failed write is returned to the administrator instead of
+/// pretending that a cache or scheduler change took effect.
+pub fn apply_queue_tuning(device: &str, tuning: &QueueTuning) -> Result<QueueSettings> {
+    let queue = queue_path(device)?;
+    let current = queue_settings(device)?;
+
+    if let Some(scheduler) = tuning.scheduler.as_deref() {
+        if !current
+            .available_schedulers
+            .iter()
+            .any(|candidate| candidate == scheduler)
+        {
+            bail!(
+                "scheduler {scheduler} is not available for {device}; available={:?}",
+                current.available_schedulers
+            );
+        }
+        fs::write(queue.join("scheduler"), scheduler)
+            .with_context(|| format!("set scheduler for {device}"))?;
+    }
+
+    if let Some(enabled) = tuning.write_cache_enabled {
+        let value = if enabled {
+            "write back"
+        } else {
+            "write through"
+        };
+        fs::write(queue.join("write_cache"), value)
+            .with_context(|| format!("set write-cache policy for {device}"))?;
+    }
+
+    if let Some(read_ahead_kb) = tuning.read_ahead_kb {
+        if read_ahead_kb > 1_048_576 {
+            bail!("read_ahead_kb must not exceed 1048576");
+        }
+        fs::write(queue.join("read_ahead_kb"), read_ahead_kb.to_string())
+            .with_context(|| format!("set read-ahead for {device}"))?;
+    } else if let Some(enabled) = tuning.read_cache_enabled {
+        let value = if enabled {
+            current
+                .read_ahead_kb
+                .filter(|value| *value > 0)
+                .unwrap_or(128)
+        } else {
+            0
+        };
+        fs::write(queue.join("read_ahead_kb"), value.to_string())
+            .with_context(|| format!("set read-cache/read-ahead policy for {device}"))?;
+    }
+
+    queue_settings(device)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 /// Kagi state or configuration used by the DeviceHealth path.
 pub struct DeviceHealth {
@@ -320,6 +457,13 @@ mod tests {
             StorageKind::Nvme
         );
     }
+    #[test]
+    fn scheduler_parser_tracks_selected_and_available() {
+        let (selected, available) = parse_scheduler("none [mq-deadline] kyber bfq");
+        assert_eq!(selected.as_deref(), Some("mq-deadline"));
+        assert_eq!(available, vec!["none", "mq-deadline", "kyber", "bfq"]);
+    }
+
     #[test]
     fn rotational_requirement_is_enforced() {
         assert!(!compatible(
