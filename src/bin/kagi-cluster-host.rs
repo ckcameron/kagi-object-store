@@ -512,12 +512,12 @@ fn http_client(c: &NodeConfig) -> Result<reqwest::Client> {
         .https_only(c.tls.is_some());
     if let Some(t) = &c.tls {
         b = b
-            .tls_version_min(if t.allow_tls12 {
+            .min_tls_version(if t.allow_tls12 {
                 reqwest::tls::Version::TLS_1_2
             } else {
                 reqwest::tls::Version::TLS_1_3
             })
-            .tls_version_max(reqwest::tls::Version::TLS_1_3);
+            .max_tls_version(reqwest::tls::Version::TLS_1_3);
     }
     if let Some(t) = &c.tls {
         let ca = reqwest::Certificate::from_pem(&fs::read(&t.ca)?)?;
