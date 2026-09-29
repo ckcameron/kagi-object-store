@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 [package]
 name = "kagi-object-store"
-version = "0.39.0"
+version = "0.38.0"
 edition = "2021"
 publish = false
 license = "CC-BY-NC-SA-4.0"
@@ -28,14 +28,6 @@ path = "src/bin/kagi-host.rs"
 name = "kagi-volume-nbd"
 path = "src/bin/kagi-volume-nbd.rs"
 
-[[bin]]
-name = "kagi-bench"
-path = "src/bin/kagi-bench.rs"
-
-[[bench]]
-name = "erasure"
-harness = false
-
 [features]
 default = []
 cuda = []
@@ -47,21 +39,15 @@ aocl = []
 rocm = ["hip"]
 scsi-target = []
 ebpf = ["dep:aya"]
-quic = ["dep:quinn"]
-rdma = []
-fhe-cat = []
-fhe-cheddar = []
 
 [dependencies]
 libc = "0.2"
 futures-util = "0.3"
 percent-encoding = "2"
 aya = { version = "0.14.0", default-features = false, optional = true }
-quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
 anyhow = "1"
 argon2 = "0.5"
 axum = "0.7"
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
@@ -76,7 +62,8 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 base64 = "0.22"
 bytes = "1"
-rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
+rustls = "0.23"
+rustls-pemfile = "2"
 tokio-rustls = "0.26"
 tower-http = { version = "0.6", features = ["trace"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -91,6 +78,3 @@ clay-codes = "0.2.2"
 
 [build-dependencies]
 cc = "1"
-
-[dev-dependencies]
-criterion = "0.5"
