@@ -229,15 +229,31 @@ pub struct ExactRepairPlan {
     pub recovery_coeff: Vec<u8>,
 }
 #[async_trait]
+/// Common codec interface used by CPU and adaptive accelerator implementations.
+///
+/// Implementations must produce byte-identical logical data for a given layout regardless
+/// of execution backend; callers may therefore fall back from GPU to CPU without changing
+/// object metadata.
 pub trait ErasureBackend: Send + Sync {
+    /// Validate k/m for this backend and construct its default layout.
     fn default_layout(&self, k: usize, m: usize) -> Result<ErasureLayout>;
+
+    /// Encode one object payload into data/parity shards described by layout.
+    ///
+    /// The returned value records original_len so padding can be removed on reconstruction.
     async fn encode_layout(&self, data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards>;
+
+    /// Reconstruct the original object from available shards.
+    ///
+    /// Missing shards are represented by None. The method validates the layout and available
+    /// shard count, reconstructs as required, and truncates padding to original_len.
     async fn reconstruct_layout(
         &self,
         shards: &mut [Option<Vec<u8>>],
         original_len: u64,
         layout: &ErasureLayout,
     ) -> Result<Vec<u8>>;
+    /// Reconstruct one lost shard directly; exposed only to codec tests.
     #[cfg(test)]
     async fn repair_shard_layout(
         &self,
