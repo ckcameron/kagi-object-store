@@ -175,7 +175,8 @@ enum Cmd {
     },
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the NodeConfig path.
+#[serde(deny_unknown_fields)]
+/// Complete top-level node configuration. Unknown keys are rejected so typos cannot silently disable policy.
 struct NodeConfig {
     #[serde(default)]
     security: security::Config,
@@ -208,7 +209,8 @@ fn listen() -> String {
     "0.0.0.0:7400".into()
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the MetadataConfig path.
+#[serde(deny_unknown_fields)]
+/// Raft identity, peer set and timing configuration.
 struct MetadataConfig {
     node_id: String,
     peers: Vec<RaftPeer>,
@@ -232,7 +234,8 @@ fn raft_heartbeat() -> u64 {
     400
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the GarbageCollectionConfig path.
+#[serde(deny_unknown_fields)]
+/// Fenced physical garbage-collection policy.
 struct GarbageCollectionConfig {
     #[serde(default = "gc_enabled")]
     enabled: bool,
@@ -254,7 +257,8 @@ impl Default for GarbageCollectionConfig {
     }
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the SnapshotConfig path.
+#[serde(deny_unknown_fields)]
+/// Point-in-time snapshot materialization policy.
 struct SnapshotConfig {
     #[serde(default = "snap_enabled")]
     enabled: bool,
@@ -326,7 +330,8 @@ struct GcDeleteRequest {
     disk: String,
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the TlsConfig path.
+#[serde(deny_unknown_fields)]
+/// Native HTTPS/peer TLS identity and compatibility policy.
 struct TlsConfig {
     ca: PathBuf,
     cert: PathBuf,
@@ -336,7 +341,8 @@ struct TlsConfig {
     allow_tls12: bool,
 }
 #[derive(Clone, Deserialize)]
-/// Kagi state or configuration used by the PostQuantumConfig path.
+#[serde(deny_unknown_fields)]
+/// ML-DSA application identity and peer trust map.
 struct PostQuantumConfig {
     #[serde(default = "pq_required")]
     required: bool,
