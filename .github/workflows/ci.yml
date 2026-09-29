@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 name: ci
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 jobs:
   rust:
     runs-on: ubuntu-latest
