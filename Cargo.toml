@@ -28,6 +28,14 @@ path = "src/bin/kagi-host.rs"
 name = "kagi-volume-nbd"
 path = "src/bin/kagi-volume-nbd.rs"
 
+[[bin]]
+name = "kagi-bench"
+path = "src/bin/kagi-bench.rs"
+
+[[bench]]
+name = "erasure"
+harness = false
+
 [features]
 default = []
 cuda = []
@@ -84,3 +92,6 @@ clay-codes = "0.2.2"
 
 [build-dependencies]
 cc = "1"
+
+[dev-dependencies]
+criterion = "0.5"
