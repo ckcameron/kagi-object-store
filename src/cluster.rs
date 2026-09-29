@@ -97,6 +97,7 @@ fn default_transport_frame_bytes() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 // ---- Cluster topology and immutable object metadata ----------------------------
 /// Runtime cluster topology, protection policy and transport configuration.
 pub struct ClusterConfig {
@@ -141,6 +142,7 @@ fn one_usize() -> usize {
     1
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// One storage host and its advertised control/data-plane endpoints.
 pub struct PeerHost {
     /// Stable host identifier used by placement and metadata.
@@ -166,6 +168,7 @@ pub struct PeerHost {
     pub disks: Vec<PeerDisk>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Placement and identity information for one host storage device.
 pub struct PeerDisk {
     /// Stable disk identifier.
