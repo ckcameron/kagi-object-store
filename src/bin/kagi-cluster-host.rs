@@ -292,6 +292,9 @@ struct TlsConfig {
     ca: PathBuf,
     cert: PathBuf,
     key: PathBuf,
+    /// Compatibility mode. Native Kagi listeners otherwise require TLS 1.3.
+    #[serde(default)]
+    allow_tls12: bool,
 }
 #[derive(Clone, Deserialize)]
 /// Kagi state or configuration used by the PostQuantumConfig path.
@@ -502,6 +505,15 @@ fn http_client(c: &NodeConfig) -> Result<reqwest::Client> {
     let mut b = reqwest::Client::builder()
         .default_headers(headers)
         .https_only(c.tls.is_some());
+    if let Some(t) = &c.tls {
+        b = b
+            .tls_version_min(if t.allow_tls12 {
+                reqwest::tls::Version::TLS_1_2
+            } else {
+                reqwest::tls::Version::TLS_1_3
+            })
+            .tls_version_max(reqwest::tls::Version::TLS_1_3);
+    }
     if let Some(t) = &c.tls {
         let ca = reqwest::Certificate::from_pem(&fs::read(&t.ca)?)?;
         let mut pem = fs::read(&t.cert)?;
@@ -3407,17 +3419,36 @@ async fn main() -> Result<()> {
             let app = public.merge(maintenance).merge(internal_router(st)).layer(
                 axum::middleware::from_fn_with_state(v6.clone(), runtime_security::gate),
             );
-            let l = TcpListener::bind(&cfg.listen).await?;
             webui::append_log(
                 &cfg.web_console.log_path,
                 &cfg.local_host,
-                &format!("Kagi node listening on {}", cfg.listen),
+                &format!(
+                    "Kagi node listening on {}{}",
+                    cfg.listen,
+                    if cfg.tls.is_some() { " with native TLS" } else { "" }
+                ),
             );
             println!(
-                "Kagi node {} listening {} (console: /ui)",
-                cfg.local_host, cfg.listen
+                "Kagi node {} listening {}{} (console: /ui)",
+                cfg.local_host,
+                cfg.listen,
+                if cfg.tls.is_some() { " TLS" } else { "" }
             );
-            axum::serve(l, app).await?;
+            if let Some(tls_config) = &cfg.tls {
+                let address: std::net::SocketAddr = cfg.listen.parse()?;
+                let rustls = tls::server_config(
+                    &tls_config.cert,
+                    &tls_config.key,
+                    tls_config.allow_tls12,
+                )?;
+                let rustls = axum_server::tls_rustls::RustlsConfig::from_config(rustls);
+                axum_server::bind_rustls(address, rustls)
+                    .serve(app.into_make_service())
+                    .await?;
+            } else {
+                let listener = TcpListener::bind(&cfg.listen).await?;
+                axum::serve(listener, app).await?;
+            }
         }
         Cmd::Membership {
             action,
