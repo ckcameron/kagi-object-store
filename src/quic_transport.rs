@@ -19,14 +19,7 @@ use anyhow::{bail, Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fs::File,
-    io::BufReader,
-    net::SocketAddr,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fs::File, io::BufReader, net::SocketAddr, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 const ALPN: &[u8] = b"kagi-fragment/1";
@@ -133,7 +126,11 @@ impl Client {
         })
     }
 
-    async fn connection(&self, address: SocketAddr, server_name: &str) -> Result<quinn::Connection> {
+    async fn connection(
+        &self,
+        address: SocketAddr,
+        server_name: &str,
+    ) -> Result<quinn::Connection> {
         let key = format!("{server_name}@{address}");
         if let Some(connection) = self.connections.lock().await.get(&key).cloned() {
             if connection.close_reason().is_none() {
@@ -236,7 +233,8 @@ async fn write_request(
     if encoded.len() > MAX_META_BYTES {
         bail!("QUIC request metadata too large");
     }
-    send.write_all(&(encoded.len() as u32).to_be_bytes()).await?;
+    send.write_all(&(encoded.len() as u32).to_be_bytes())
+        .await?;
     send.write_all(&(body.len() as u64).to_be_bytes()).await?;
     send.write_all(&encoded).await?;
     send.write_all(body).await?;
@@ -271,7 +269,8 @@ async fn write_response(send: &mut quinn::SendStream, response: &Response) -> Re
         message: response.message.clone(),
     })?;
     send.write_all(&(meta.len() as u32).to_be_bytes()).await?;
-    send.write_all(&(response.body.len() as u64).to_be_bytes()).await?;
+    send.write_all(&(response.body.len() as u64).to_be_bytes())
+        .await?;
     send.write_all(&meta).await?;
     send.write_all(&response.body).await?;
     Ok(())
