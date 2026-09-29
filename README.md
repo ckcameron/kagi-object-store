@@ -311,6 +311,19 @@ kagi-cluster-host \
 - `scripts/test-all`
 - `scripts/coverage`
 
+## Configuration and command documentation
+
+The canonical runtime configuration is [`examples/node-v6.example.yaml`](examples/node-v6.example.yaml).
+It is intentionally verbose: every currently supported node/cluster parameter is shown or
+explained in-place with units, accepted values, security notes, and applicable defaults.
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) contains the corresponding reference tables,
+planner configuration, runtime caveats, and queue-control semantics.
+
+Command-line option descriptions are maintained in the Clap declarations themselves so
+`--help` and the source documentation stay synchronized. Public runtime configuration types
+carry Rustdoc explaining field semantics and defaults; new externally visible options should
+not be added without updating both the canonical example and configuration reference.
+
 ## Build
 
 Rust stable is expected. CUDA is optional.
@@ -383,10 +396,24 @@ The generated YAML includes the full keyspace slot geometry, per-disk slot range
 - `docs/OPERATIONS.md` — deployment, maintenance, capacity, snapshots, recovery, and virtual volumes.
 - `docs/SECURITY.md` — admission, encryption, PQ signatures, replay protection, and transport notes.
 - `docs/TESTING.md` — test/Clippy/CUDA/coverage procedures.
+- `docs/SECURITY-VALIDATION.md` — Miri, sanitizers, fuzzing, dependency/exploit checks, and performance regression workflow.
 - `docs/CODEMAP.md` — source responsibilities and review paths.
 - `docs/WEB-CONSOLE.md` — console configuration and operations.
 - `docs/man/` — command manual pages.
 - `CHANGELOG.md` — release history.
+
+
+## Security validation and performance analysis
+
+The fast local robustness gate is `bash scripts/kagi-security-check quick`. The deep gate adds
+RustSec/dependency checks, unsafe-code inventory, Miri, native sanitizers, and short libFuzzer
+campaigns; see `docs/SECURITY-VALIDATION.md`. NVIDIA builds can additionally run
+`bash scripts/kagi-gpu-sanitize` under Compute Sanitizer.
+
+Kagi 0.39 also includes `kagi-bench`, a correctness-checked compute/data-path benchmark that
+reports encoding/reconstruction throughput and latency plus actual CPU/GPU dispatch counters.
+`bash scripts/kagi-perf-demo` builds for the selected CPU target, writes JSON/text results,
+captures Linux `perf stat` counters when available, and runs the Criterion regression suite.
 
 ## Design boundaries
 

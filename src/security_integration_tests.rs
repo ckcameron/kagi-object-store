@@ -10,6 +10,13 @@ async fn fixture() -> (V6State, PathBuf) {
     let mut cfg: NodeConfig =
         serde_yaml::from_str(include_str!("../examples/node-v6.example.yaml")).unwrap();
     cfg.data_root = root.clone();
+    // This fixture exercises the HTTP security gate only. Keep its transport local so
+    // feature-enabled test builds do not attempt to initialize the example QUIC peer
+    // with the documentation-only /etc/kagi PKI paths.
+    cfg.cluster.transport.prefer_quic = false;
+    for host in &mut cfg.cluster.hosts {
+        host.quic_endpoint = None;
+    }
     cfg.web_console.userdb = root.join("users.yaml");
     cfg.security = serde_yaml::from_str("objects:\n - {key: secret, recursive: true, operations: [all], decision: deny}\n - {key: classified, recursive: true, privileged_only: true, operations: [all], decision: deny}\n").unwrap();
     webui::upsert_user(
@@ -30,7 +37,8 @@ async fn fixture() -> (V6State, PathBuf) {
         client.clone(),
         identity.clone(),
         RuntimeKeyring::default(),
-    );
+    )
+    .unwrap();
     let meta = RaftNode::open(
         "test".into(),
         vec![],
@@ -63,6 +71,7 @@ async fn fixture() -> (V6State, PathBuf) {
             .unwrap(),
         namespace_lock: Arc::new(tokio::sync::Mutex::new(())),
         web_console: cfg.web_console.clone(),
+        telemetry: telemetry::TelemetryStore::new(cfg.telemetry.clone()),
         node_config: Arc::new(cfg),
     };
     (st, root)

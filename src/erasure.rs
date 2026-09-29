@@ -32,12 +32,18 @@ use std::{
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
 /// Supported BackendKind states or operations.
+/// Requested execution backend for erasure operations.
 pub enum BackendKind {
+    /// Select the best initialized accelerator and fall back to CPU.
     #[default]
     Auto,
+    /// Force the CPU implementation.
     Cpu,
+    /// Request NVIDIA CUDA; requires the cuda Cargo feature and runtime support.
     Cuda,
+    /// Request AMD HIP/ROCm; requires the hip/rocm Cargo feature and runtime support.
     Hip,
+    /// Request OpenCL; requires the opencl Cargo feature and runtime support.
     Opencl,
 }
 /// Codec family used by a particular immutable object version.
@@ -53,22 +59,29 @@ pub enum ErasureScheme {
     Clay,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ErasureConfig path.
+#[serde(deny_unknown_fields)]
+/// Runtime erasure-coding and accelerator policy for newly protected objects.
 pub struct ErasureConfig {
+    /// Requested execution backend. Default: auto.
     #[serde(default)]
     pub backend: BackendKind,
+    /// Codec for new objects. Runtime default: CLAY.
     #[serde(default = "default_runtime_scheme")]
     pub scheme: ErasureScheme,
+    /// Number of data shards (k). Default: 6.
     #[serde(default = "default_k")]
     pub data_shards: usize,
+    /// Number of parity shards (m). Default: 3.
     #[serde(default = "default_m")]
     pub parity_shards: usize,
     /// Helper count for exact repair.  CLAY accepts k+1..n-1.  Product-matrix
     /// MSR currently implements the canonical d=2k-2 construction.
     #[serde(default)]
     pub repair_helpers: Option<usize>,
+    /// Minimum payload size for attempting GPU dispatch. Default: 1 MiB.
     #[serde(default = "default_gpu_threshold")]
     pub gpu_threshold_bytes: usize,
+    /// Maximum number of GPU operations admitted concurrently. Default: 32.
     #[serde(default = "default_gpu_queue")]
     pub max_gpu_inflight: u64,
     /// Maximum cached linear transform size.  Prevents an unexpectedly large
@@ -216,15 +229,31 @@ pub struct ExactRepairPlan {
     pub recovery_coeff: Vec<u8>,
 }
 #[async_trait]
+/// Common codec interface used by CPU and adaptive accelerator implementations.
+///
+/// Implementations must produce byte-identical logical data for a given layout regardless
+/// of execution backend; callers may therefore fall back from GPU to CPU without changing
+/// object metadata.
 pub trait ErasureBackend: Send + Sync {
+    /// Validate k/m for this backend and construct its default layout.
     fn default_layout(&self, k: usize, m: usize) -> Result<ErasureLayout>;
+
+    /// Encode one object payload into data/parity shards described by layout.
+    ///
+    /// The returned value records original_len so padding can be removed on reconstruction.
     async fn encode_layout(&self, data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards>;
+
+    /// Reconstruct the original object from available shards.
+    ///
+    /// Missing shards are represented by None. The method validates the layout and available
+    /// shard count, reconstructs as required, and truncates padding to original_len.
     async fn reconstruct_layout(
         &self,
         shards: &mut [Option<Vec<u8>>],
         original_len: u64,
         layout: &ErasureLayout,
     ) -> Result<Vec<u8>>;
+    /// Reconstruct one lost shard directly; exposed only to codec tests.
     #[cfg(test)]
     async fn repair_shard_layout(
         &self,
@@ -1399,6 +1428,55 @@ mod gpu {
         Ok(out)
     }
 }
+#[derive(Debug, Clone, Serialize)]
+pub struct ErasureMetricsSnapshot {
+    pub cpu_bytes: u64,
+    pub gpu_bytes: u64,
+    pub gpu_fallbacks: u64,
+    pub gpu_inflight: u64,
+    pub gpu_repairs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AccelerationStatus {
+    pub requested: BackendKind,
+    pub cuda_compiled: bool,
+    pub hip_compiled: bool,
+    pub opencl_compiled: bool,
+    pub isa_l_compiled: bool,
+    pub ipp_compiled: bool,
+    pub aocl_compiled: bool,
+    pub selected_gpu_available: bool,
+    pub avx2: bool,
+    pub avx512f: bool,
+    pub avx512bw: bool,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx2() -> bool {
+    std::arch::is_x86_feature_detected!("avx2")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx2() -> bool {
+    false
+}
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx512f() -> bool {
+    std::arch::is_x86_feature_detected!("avx512f")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx512f() -> bool {
+    false
+}
+#[cfg(target_arch = "x86_64")]
+fn cpu_feature_avx512bw() -> bool {
+    std::arch::is_x86_feature_detected!("avx512bw")
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn cpu_feature_avx512bw() -> bool {
+    false
+}
+
 #[derive(Default)]
 /// Kagi state or configuration used by the ErasureMetrics path.
 pub struct ErasureMetrics {
@@ -1434,6 +1512,37 @@ impl AdaptiveBackend {
             cfg,
             cpu_rs: Arc::new(CpuBackend),
             metrics: Arc::new(ErasureMetrics::default()),
+        }
+    }
+
+    pub fn metrics_snapshot(&self) -> ErasureMetricsSnapshot {
+        ErasureMetricsSnapshot {
+            cpu_bytes: self.metrics.cpu_bytes.load(Ordering::Relaxed),
+            gpu_bytes: self.metrics.gpu_bytes.load(Ordering::Relaxed),
+            gpu_fallbacks: self.metrics.gpu_fallbacks.load(Ordering::Relaxed),
+            gpu_inflight: self.metrics.gpu_inflight.load(Ordering::Relaxed),
+            gpu_repairs: self.metrics.gpu_repairs.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn acceleration_status(&self) -> AccelerationStatus {
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let selected_gpu_available = gpu::available(self.cfg.backend);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let selected_gpu_available = false;
+
+        AccelerationStatus {
+            requested: self.cfg.backend,
+            cuda_compiled: cfg!(feature = "cuda"),
+            hip_compiled: cfg!(feature = "hip"),
+            opencl_compiled: cfg!(feature = "opencl"),
+            isa_l_compiled: cfg!(feature = "isa-l"),
+            ipp_compiled: cfg!(feature = "ipp"),
+            aocl_compiled: cfg!(feature = "aocl"),
+            selected_gpu_available,
+            avx2: cpu_feature_avx2(),
+            avx512f: cpu_feature_avx512f(),
+            avx512bw: cpu_feature_avx512bw(),
         }
     }
     fn configured_layout(&self, k: usize, m: usize) -> Result<ErasureLayout> {

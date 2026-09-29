@@ -4,6 +4,30 @@
 
 Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 
+## 0.39.0 (development) — accelerated transports, hardened telemetry, validation and benchmarking
+- Added a self-documenting runtime configuration example covering every accepted node/cluster option, units, bounds and defaults; configuration structs now reject unknown keys and CI tests the canonical example against the production deserializer.
+- Expanded Rustdoc/CLI help for transport, erasure, recovery, maintenance, telemetry, console and cluster-host command options so defaults and operational effects live next to the implementation.
+
+- Added TLS 1.3 QUIC as an optional authenticated fragment/repair transport with persistent
+  multiplexed connections, disabled 0-RTT, strict frame-allocation bounds, ML-DSA request
+  envelopes, cluster admission proof, and HTTPS fallback.
+- Added direct-RDMA and FHE feature/configuration groundwork for the 0.39 acceleration layer;
+  RDMA is reserved for large registered-buffer transfers and FHE backends are optional rather
+  than changing the ordinary object format.
+- Added native HTTPS serving with rustls/AWS-LC, TLS 1.3 by default, optional TLS 1.2
+  compatibility, forward-secret AEAD suites, and preferred hybrid X25519+ML-KEM key exchange.
+- Added hierarchical live/historical telemetry for keyspace/site/rack/host/disk views, including
+  IOPS, throughput, queue depth, I/O latency, network rates/errors, operation state and alerts.
+- Added authenticated block scheduler/write-cache/read-ahead administration with audit events.
+- Added the `kagi-bench` correctness-checked performance demo, Criterion regression benchmarks,
+  native-build/perf capture script, and acceleration byte/status reporting.
+- Added fuzzable network frame guards, libFuzzer targets, Miri checks, ASan/TSan/leak sanitizer
+  harnesses, RustSec/cargo-deny dependency scanning, unsafe-code inventory, and NVIDIA
+  Compute Sanitizer support.
+- Added `docs/SECURITY-VALIDATION.md` describing the release security/UB/exploit test model.
+- 0.39 remains a development release until the complete feature matrix and hardware-dependent
+  paths are validated and recorded in BUILD-VALIDATION.md.
+
 ## 0.38.0 licensing update
 
 - License Kagi source and documentation under CC BY-NC-SA 4.0, replacing the proprietary/confidential notice.
