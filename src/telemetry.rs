@@ -192,7 +192,11 @@ impl TelemetryStore {
                     .as_deref()
                     .and_then(read_disk_counters)
                     .unwrap_or_default();
-                let previous = state.previous_disks.get(&disk.id).cloned().unwrap_or_default();
+                let previous = state
+                    .previous_disks
+                    .get(&disk.id)
+                    .cloned()
+                    .unwrap_or_default();
                 let queue = disk
                     .device_path
                     .as_deref()
@@ -206,9 +210,7 @@ impl TelemetryStore {
                 let write_ms = raw.write_ms.saturating_sub(previous.write_ms);
                 let io_ms = raw.io_ms.saturating_sub(previous.io_ms);
                 let sectors_read = raw.sectors_read.saturating_sub(previous.sectors_read);
-                let sectors_written = raw
-                    .sectors_written
-                    .saturating_sub(previous.sectors_written);
+                let sectors_written = raw.sectors_written.saturating_sub(previous.sectors_written);
 
                 disks.push(DiskTelemetry {
                     disk: disk.id.clone(),
@@ -273,10 +275,7 @@ impl TelemetryStore {
             system: crate::webui::system_stats(),
             total_read_iops: disks.iter().map(|disk| disk.read_iops).sum(),
             total_write_iops: disks.iter().map(|disk| disk.write_iops).sum(),
-            total_read_bytes_per_second: disks
-                .iter()
-                .map(|disk| disk.read_bytes_per_second)
-                .sum(),
+            total_read_bytes_per_second: disks.iter().map(|disk| disk.read_bytes_per_second).sum(),
             total_write_bytes_per_second: disks
                 .iter()
                 .map(|disk| disk.write_bytes_per_second)
