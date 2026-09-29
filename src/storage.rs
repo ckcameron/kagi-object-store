@@ -100,8 +100,7 @@ pub fn queue_settings(device: &str) -> Result<QueueSettings> {
         write_cache: read_trimmed(&queue.join("write_cache")),
         read_ahead_kb: read_trimmed(&queue.join("read_ahead_kb"))
             .and_then(|value| value.parse().ok()),
-        nr_requests: read_trimmed(&queue.join("nr_requests"))
-            .and_then(|value| value.parse().ok()),
+        nr_requests: read_trimmed(&queue.join("nr_requests")).and_then(|value| value.parse().ok()),
     })
 }
 
@@ -131,7 +130,11 @@ pub fn apply_queue_tuning(device: &str, tuning: &QueueTuning) -> Result<QueueSet
     }
 
     if let Some(enabled) = tuning.write_cache_enabled {
-        let value = if enabled { "write back" } else { "write through" };
+        let value = if enabled {
+            "write back"
+        } else {
+            "write through"
+        };
         fs::write(queue.join("write_cache"), value)
             .with_context(|| format!("set write-cache policy for {device}"))?;
     }
@@ -144,7 +147,10 @@ pub fn apply_queue_tuning(device: &str, tuning: &QueueTuning) -> Result<QueueSet
             .with_context(|| format!("set read-ahead for {device}"))?;
     } else if let Some(enabled) = tuning.read_cache_enabled {
         let value = if enabled {
-            current.read_ahead_kb.filter(|value| *value > 0).unwrap_or(128)
+            current
+                .read_ahead_kb
+                .filter(|value| *value > 0)
+                .unwrap_or(128)
         } else {
             0
         };
