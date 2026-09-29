@@ -3635,7 +3635,7 @@ async fn main() -> Result<()> {
                     "tls": cfg.tls.as_ref().map(|tls_config| tls::policy_summary(tls_config.allow_tls12)),
                 }))?
             )
-        },
+        }
         Cmd::Put { key, file } => {
             let previous = v6.meta.store.get(&key).await;
             if let Some(previous) = &previous {
