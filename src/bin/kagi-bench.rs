@@ -51,7 +51,11 @@ enum BenchScheme {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "kagi-bench", version, about = "Kagi compute/performance analysis demo")]
+#[command(
+    name = "kagi-bench",
+    version,
+    about = "Kagi compute/performance analysis demo"
+)]
 struct Args {
     /// Backend requested for erasure operations. Unavailable GPU backends may fall back to CPU.
     #[arg(long, value_enum, default_value_t = BenchBackend::Auto)]
@@ -298,7 +302,10 @@ async fn bench_one(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    anyhow::ensure!(args.iterations > 0, "--iterations must be greater than zero");
+    anyhow::ensure!(
+        args.iterations > 0,
+        "--iterations must be greater than zero"
+    );
 
     let sizes = args
         .sizes
