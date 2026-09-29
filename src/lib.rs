@@ -6,3 +6,5 @@
 //! deterministic compute components to benchmark, fuzz, Miri, and sanitizer harnesses.
 
 pub mod erasure;
+
+pub mod wire;
