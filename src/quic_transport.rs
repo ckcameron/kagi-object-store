@@ -53,14 +53,6 @@ pub struct Response {
 }
 
 impl Response {
-    pub fn ok(body: Vec<u8>) -> Self {
-        Self {
-            status: 200,
-            message: "ok".into(),
-            body,
-        }
-    }
-
     pub fn error(status: u16, message: impl Into<String>) -> Self {
         Self {
             status,
