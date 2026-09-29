@@ -75,10 +75,10 @@ echo "== Miri undefined-behavior interpreter =="
 RUSTFLAGS="-C target-feature=-avx2,-avx512f,-avx512bw"   cargo +nightly miri test --lib
 
 echo "== AddressSanitizer =="
-scripts/kagi-sanitize address
+bash scripts/kagi-sanitize address
 
 echo "== ThreadSanitizer =="
-scripts/kagi-sanitize thread
+bash scripts/kagi-sanitize thread
 
 echo "== fuzz smoke =="
 install_tool cargo-fuzz cargo-fuzz
