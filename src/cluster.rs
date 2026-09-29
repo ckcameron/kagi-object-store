@@ -1462,7 +1462,10 @@ fn join_authorized(cfg: &ClusterConfig, headers: &axum::http::HeaderMap) -> bool
     let Some(want) = cfg.join_key_hash_hex.as_deref() else {
         return false;
     };
-    let Some(raw) = headers.get("x-kagi-join-key").and_then(|value| value.to_str().ok()) else {
+    let Some(raw) = headers
+        .get("x-kagi-join-key")
+        .and_then(|value| value.to_str().ok())
+    else {
         return false;
     };
     let Ok(bytes) = B64.decode(raw) else {
@@ -1499,11 +1502,7 @@ impl InternalFragmentResult {
 
 fn fragment_route(path: &str) -> Option<(String, u64, u32, String, Option<String>)> {
     let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
-    if parts.len() < 7
-        || parts[0] != "internal"
-        || parts[1] != "v1"
-        || parts[2] != "fragment"
-    {
+    if parts.len() < 7 || parts[0] != "internal" || parts[1] != "v1" || parts[2] != "fragment" {
         return None;
     }
     let version = parts[4].parse().ok()?;
@@ -1549,13 +1548,18 @@ async fn dispatch_internal_fragment(
     }
 
     let Some((object, version, fragment, disk, operation)) = fragment_route(path) else {
-        return InternalFragmentResult::new(StatusCode::NOT_FOUND, b"unknown fragment route".to_vec());
+        return InternalFragmentResult::new(
+            StatusCode::NOT_FOUND,
+            b"unknown fragment route".to_vec(),
+        );
     };
     let fragment_file = fragment_path(&st.root, &disk, &object, version, fragment);
 
     match (method, operation.as_deref()) {
         ("PUT", None) => {
-            if headers.get("x-kagi-cluster").and_then(|value| value.to_str().ok())
+            if headers
+                .get("x-kagi-cluster")
+                .and_then(|value| value.to_str().ok())
                 != Some(st.cfg.id.as_str())
             {
                 return InternalFragmentResult::new(
@@ -1582,7 +1586,11 @@ async fn dispatch_internal_fragment(
             if tokio::fs::write(&temporary, body).await.is_err() {
                 return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
             }
-            if let Ok(file) = tokio::fs::OpenOptions::new().write(true).open(&temporary).await {
+            if let Ok(file) = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&temporary)
+                .await
+            {
                 if file.sync_all().await.is_err() {
                     let _ = tokio::fs::remove_file(&temporary).await;
                     return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1720,8 +1728,7 @@ async fn internal_subchunks(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
-    let path =
-        format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}/subchunks");
+    let path = format!("/internal/v1/fragment/{object}/{version}/{fragment}/{disk}/subchunks");
     dispatch_internal_fragment(&st, "POST", &path, &headers, &body)
         .await
         .into_response()
