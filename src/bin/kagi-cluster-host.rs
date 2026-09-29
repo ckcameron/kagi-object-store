@@ -47,6 +47,7 @@ mod telemetry;
 mod tls;
 #[path = "../webui.rs"]
 mod webui;
+#[cfg(any(test, feature = "quic"))]
 #[path = "../wire.rs"]
 mod wire;
 use anyhow::{Context, Result};
@@ -3621,7 +3622,20 @@ async fn main() -> Result<()> {
                 "joint consensus committed at {joint}; stable membership committed at {final_i}"
             );
         }
-        Cmd::Status => println!("{}", serde_json::to_string_pretty(&cfg.cluster.hosts)?),
+        Cmd::Status => {
+            let erasure = AdaptiveBackend::new(cfg.cluster.erasure.clone().unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "hosts": &cfg.cluster.hosts,
+                    "transport": &cfg.cluster.transport,
+                    "join_key_configured": st.join_key_b64.is_some(),
+                    "erasure_acceleration": erasure.acceleration_status(),
+                    "erasure_metrics": erasure.metrics_snapshot(),
+                    "tls": cfg.tls.as_ref().map(|tls_config| tls::policy_summary(tls_config.allow_tls12)),
+                }))?
+            )
+        },
         Cmd::Put { key, file } => {
             let previous = v6.meta.store.get(&key).await;
             if let Some(previous) = &previous {
