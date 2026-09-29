@@ -96,6 +96,7 @@ pub struct Heartbeat {
     pub unix_ms: u128,
 }
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 // ---- Recovery/survivability policy ---------------------------------------------
 pub struct RecoveryConfig {
     /// Health-probe cadence in milliseconds. Default: 2,000.
