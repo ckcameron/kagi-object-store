@@ -217,15 +217,20 @@ fn rust_version() -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BenchRun {
+    iterations: usize,
+    gpu_threshold_bytes: usize,
+    seed: u64,
+}
+
 async fn bench_one(
     backend_kind: BackendKind,
     scheme: ErasureScheme,
     bytes: usize,
     k: usize,
     m: usize,
-    iterations: usize,
-    gpu_threshold_bytes: usize,
-    seed: u64,
+    run: BenchRun,
 ) -> Result<(Sample, AdaptiveBackend)> {
     let layout = ErasureLayout {
         scheme,
@@ -241,12 +246,12 @@ async fn bench_one(
         data_shards: k,
         parity_shards: m,
         repair_helpers: None,
-        gpu_threshold_bytes,
+        gpu_threshold_bytes: run.gpu_threshold_bytes,
         ..ErasureConfig::default()
     });
 
     let mut input = vec![0u8; bytes];
-    ChaCha20Rng::seed_from_u64(seed ^ bytes as u64 ^ ((k as u64) << 32) ^ m as u64)
+    ChaCha20Rng::seed_from_u64(run.seed ^ bytes as u64 ^ ((k as u64) << 32) ^ m as u64)
         .fill_bytes(&mut input);
 
     // Untimed warmup catches invalid layouts/backends and primes lazy runtime setup.
@@ -258,10 +263,10 @@ async fn bench_one(
         .await?;
     anyhow::ensure!(rebuilt == input, "warmup reconstruction mismatch");
 
-    let mut encode_times = Vec::with_capacity(iterations);
-    let mut reconstruct_times = Vec::with_capacity(iterations);
+    let mut encode_times = Vec::with_capacity(run.iterations);
+    let mut reconstruct_times = Vec::with_capacity(run.iterations);
 
-    for iteration in 0..iterations {
+    for iteration in 0..run.iterations {
         let start = Instant::now();
         let encoded = backend.encode_layout(&input, &layout).await?;
         encode_times.push(start.elapsed());
@@ -332,9 +337,11 @@ async fn main() -> Result<()> {
                 bytes,
                 k,
                 m,
-                args.iterations,
-                args.gpu_threshold_bytes,
-                args.seed,
+                BenchRun {
+                    iterations: args.iterations,
+                    gpu_threshold_bytes: args.gpu_threshold_bytes,
+                    seed: args.seed,
+                },
             )
             .await
             .with_context(|| format!("benchmark {:?} {bytes} bytes {k}+{m}", scheme))?;
