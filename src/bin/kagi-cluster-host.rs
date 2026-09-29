@@ -82,60 +82,94 @@ use webui::{ConsoleRole, WebConsoleConfig};
 #[derive(Parser)]
 // ---- CLI, node configuration, and security bootstrap -------------------------
 struct Cli {
+    /// Node YAML configuration file.
     #[arg(short, long, default_value = "/etc/kagi/node.yaml")]
     config: PathBuf,
     #[command(subcommand)]
     command: Cmd,
 }
+
 #[derive(Subcommand)]
-/// Supported Cmd states or operations.
+/// Administrative and data-path commands exposed by the cluster-host binary.
 enum Cmd {
+    /// Run the node API, web console, metadata service and background controllers.
     Serve,
+    /// Print the local node/cluster health summary.
     Status,
+    /// Validate and print the effective security policy without serving traffic.
     Audit,
+    /// Store FILE as the immutable/versioned object KEY.
     Put {
+        /// Logical object key.
         key: String,
+        /// Local file whose bytes will be stored.
         file: PathBuf,
     },
+    /// Retrieve KEY and write its bytes to OUTPUT.
     Get {
+        /// Logical object key.
         key: String,
+        /// Local output path.
         output: PathBuf,
     },
+    /// Repair missing/damaged fragments for KEY using its current protection policy.
     Repair {
+        /// Logical object key to repair.
         key: String,
     },
+    /// Verify checksums/readability for KEY and report corruption.
     Scrub {
+        /// Logical object key to scrub.
         key: String,
     },
+    /// Print the current fragment placement/locality for KEY.
     Locate {
+        /// Logical object key to locate.
         key: String,
     },
+    /// Clear flap/quarantine health state for a resource after operator validation.
     ClearHealth {
+        /// Resource identifier understood by the recovery health map.
         resource: String,
     },
+    /// Generate a new ML-DSA-87 application identity for this node.
     GeneratePqIdentity {
+        /// Destination for the public identity.
         #[arg(long)]
         public: PathBuf,
+        /// Destination for the private identity; protect this file as a secret.
         #[arg(long)]
         secret: PathBuf,
     },
+    /// Add/update a local web-console user using a password read from a file.
     WebUserAdd {
+        /// Console login name.
         username: String,
+        /// Console role. Default: viewer; supported roles: viewer, admin.
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// File containing the password; avoids exposing it in process arguments.
         #[arg(long)]
         password_file: PathBuf,
     },
+    /// Change Raft membership/failure-domain metadata.
     Membership {
+        /// Membership operation accepted by the membership controller.
         action: String,
+        /// Failure-domain scope for the operation.
         scope: String,
+        /// Node/site/rack identifier affected by the operation.
         id: String,
+        /// Optional peer HTTPS endpoint.
         #[arg(long)]
         endpoint: Option<String>,
+        /// Optional site label.
         #[arg(long)]
         site: Option<String>,
+        /// Optional rack label.
         #[arg(long)]
         rack: Option<String>,
+        /// Optional file containing the peer ML-DSA public key.
         #[arg(long)]
         pq_public_key: Option<PathBuf>,
     },
