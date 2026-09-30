@@ -75,3 +75,44 @@ settings or permanent scheduling policy were changed.
 ## Licensing-only update (2026-09-28)
 
 Source comments, package license metadata, and documentation were updated to CC BY-NC-SA 4.0, preserving upstream security licenses. No executable statements were changed. Rust formatting, package metadata, notice coverage, and distribution checksums were checked for this update; runtime results above refer to the preceding development build.
+
+## 0.39 completion audit (2026-09-30)
+
+This checklist distinguishes implemented runtime behavior from planner-only, integration-boundary,
+and hardware-dependent work. A feature is not promoted to runtime-complete merely because its
+configuration type or protocol structure exists.
+
+| Area | Current status | 0.39 completion requirement |
+| --- | --- | --- |
+| Replication/object data path | Runtime complete | Keep end-to-end write/read/repair/scrub CI coverage green. |
+| Reed-Solomon | Runtime complete | Maintain encode/reconstruct tests. |
+| Product-matrix MSR | Runtime complete | Maintain round-trip and exact-repair tests. |
+| CLAY | Runtime complete | Maintain round-trip, exact-repair, and partial-helper-read tests. |
+| LRC | Planner-only | Implement runtime encode/reconstruct/repair, persisted scheme metadata, and end-to-end tests before advertising runtime LRC. |
+| S3 compatibility | Missing | Add S3 authentication/request parsing and core bucket/object/list/multipart semantics with compatibility tests. |
+| Native Kagi REST object API | Runtime complete | Maintain object/version/metadata routes and linearizable mutation behavior. |
+| Fragment encryption at rest | Runtime complete | Maintain chunked-AEAD round-trip, tamper/identity, and cross-chunk range tests. |
+| At-rest key rotation | Partial | Add envelope key generation/ID plus keyring or wrapped-DEK migration so old ciphertext remains readable during rotation. |
+| ML-DSA internal authentication | Runtime complete | Maintain signed-envelope/replay validation and key rotation/revocation tests. |
+| Strict end-to-end PQ-only operation | Partial | Remove/segregate classical compatibility paths and define PQ certificate/key-management requirements before making this claim. |
+| Raft metadata and membership | Runtime complete | Add/maintain multi-node failure/restart/joint-consensus integration tests. |
+| Snapshots/archive/GC | Runtime implemented | Expand crash/restart and multi-node integration tests for archive and destructive GC fencing. |
+| Filesystem namespace/NFSv4-style ACL model | Runtime implemented | Expand namespace transaction/rebuild integration coverage. |
+| Active Directory | Integration boundary | Add native LDAP/Kerberos/SSSD/winbind-backed identity and group resolution, or continue documenting external identity integration explicitly. |
+| NVMe/SATA/SAS storage | Runtime implemented | Validate against representative physical devices. |
+| Fibre Channel | Integration boundary | Validate Linux-visible FC LUN discovery/admission; a native FC protocol stack is out of scope unless explicitly required. |
+| NBD/QEMU/libvirt block frontend | Runtime/integration implemented | Add VM-level persistence/restart tests. |
+| VMware/Hyper-V | Integration boundary | Validate supported iSCSI/image workflows on those hypervisors before claiming native integration. |
+| SCSI-3 PR | Runtime implemented | Clear all-feature `scsi-target` strict-Clippy warnings and add frontend-level reservation conflict tests. |
+| CUDA/HIP/OpenCL/ISA-L/IPP/AOCL | Hardware/library dependent | Require execution-marked tests on matching CI runners; fallback/compile-only runs do not count as accelerator validation. |
+| eBPF/LSM security | Kernel-dependent | Build, attach, exercise allow/deny and side actions on a supported kernel in privileged CI. |
+| Web operations console | Runtime implemented | Add browser/API integration tests for auth, object inspection, logs, buckets and WORM controls. |
+| QUIC | Runtime optional | Maintain feature CI and add multi-node transfer/failure/fallback integration coverage. |
+| RDMA | Policy surface only | Implement a functional backend before advertising RDMA data movement. |
+
+### Release gate
+
+For 0.39, the repository should not describe planner-only or integration-boundary behavior as a
+native runtime implementation. Hardware-dependent paths require positive execution evidence on
+appropriate runners. The standard Rust CI passing is necessary but not sufficient for those
+claims.
