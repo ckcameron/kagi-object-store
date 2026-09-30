@@ -120,7 +120,7 @@ pub struct ClusterConfig {
     /// Optional erasure-coding policy; None retains replication-only protection.
     #[serde(default)]
     pub erasure: Option<ErasureConfig>,
-    /// Optional base64 32-byte key used for protected metadata.
+    /// Base64 32-byte at-rest root key. Domain-separated subkeys protect metadata and fragments.
     #[serde(default)]
     pub metadata_key_b64: Option<String>,
     /// Optional stored verifier/hash representation of the cluster join key.
@@ -492,7 +492,7 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     let s = cfg
         .metadata_key_b64
         .as_ref()
-        .context("cluster.metadata_key_b64 is required for encrypted object metadata")?;
+        .context("cluster.metadata_key_b64 is required for encrypted metadata and fragments")?;
     let v = B64.decode(s).context("metadata_key_b64 must be base64")?;
     if v.len() != 32 {
         bail!("metadata_key_b64 must decode to exactly 32 bytes")
@@ -2341,4 +2341,113 @@ pub fn internal_router(st: ClusterState) -> Router {
             post(internal_project),
         )
         .with_state(st)
+}
+
+
+#[cfg(test)]
+mod at_rest_encryption_tests {
+    use super::*;
+
+    fn encrypted_config() -> ClusterConfig {
+        ClusterConfig {
+            id: "test-cluster".into(),
+            placement_salt: 1,
+            hosts: Vec::new(),
+            replication: 3,
+            write_quorum: 2,
+            chunk_replicas: 1,
+            erasure: None,
+            metadata_key_b64: Some(B64.encode([0x5au8; 32])),
+            join_key_hash_hex: None,
+            transport: DataTransportConfig::default(),
+        }
+    }
+
+    #[test]
+    fn chunked_fragment_envelope_round_trips_and_rejects_plaintext() {
+        let cfg = encrypted_config();
+        let mut plaintext = vec![0x41; FRAGMENT_AEAD_CHUNK_BYTES + 137];
+        plaintext[FRAGMENT_AEAD_CHUNK_BYTES - 1] = 0x42;
+        plaintext[FRAGMENT_AEAD_CHUNK_BYTES] = 0x43;
+        let envelope =
+            protect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &plaintext).unwrap();
+
+        assert!(envelope.starts_with(FRAGMENT_ENVELOPE_MAGIC));
+        assert_ne!(envelope, plaintext);
+        assert_eq!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &envelope).unwrap(),
+            plaintext
+        );
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &plaintext).is_err(),
+            "plaintext must never silently bypass at-rest encryption"
+        );
+    }
+
+    #[test]
+    fn chunked_fragment_envelope_authenticates_header_ciphertext_and_identity() {
+        let cfg = encrypted_config();
+        let envelope =
+            protect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", b"sensitive").unwrap();
+
+        let mut tampered_header = envelope.clone();
+        tampered_header[12] ^= 0x01;
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &tampered_header).is_err()
+        );
+
+        let mut tampered_ciphertext = envelope.clone();
+        let last = tampered_ciphertext.len() - 1;
+        tampered_ciphertext[last] ^= 0x80;
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &tampered_ciphertext)
+                .is_err()
+        );
+
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-b", &envelope).is_err(),
+            "ciphertext relocation to another disk identity must fail authentication"
+        );
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 8, 2, "disk-a", &envelope).is_err(),
+            "ciphertext relocation to another object version must fail authentication"
+        );
+    }
+
+    #[tokio::test]
+    async fn range_read_crosses_aead_chunk_boundary_without_full_fragment_read() {
+        let cfg = encrypted_config();
+        let mut plaintext = vec![0u8; FRAGMENT_AEAD_CHUNK_BYTES * 2 + 73];
+        for (index, byte) in plaintext.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let path = std::env::temp_dir().join(format!(
+            "kagi-fragment-aead-{}.frag",
+            uuid::Uuid::new_v4()
+        ));
+        write_fragment_at_rest(&cfg, &path, "object-a", 7, 2, "disk-a", &plaintext)
+            .await
+            .unwrap();
+
+        let start = FRAGMENT_AEAD_CHUNK_BYTES - 31;
+        let length = 127;
+        let range = read_fragment_range_at_rest(
+            &cfg,
+            &path,
+            "object-a",
+            7,
+            2,
+            "disk-a",
+            start,
+            length,
+        )
+        .await
+        .unwrap();
+        assert_eq!(range, plaintext[start..start + length]);
+
+        let on_disk = tokio::fs::read(&path).await.unwrap();
+        assert_ne!(on_disk, plaintext);
+        assert!(on_disk.starts_with(FRAGMENT_ENVELOPE_MAGIC));
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 }
