@@ -421,6 +421,10 @@ The planner is an engineering durability model, not a mathematical proof of a co
 
 The repository includes integration boundaries for hypervisors, iSCSI, identity systems, and CUDA. Some of those rely on external operating-system/hypervisor tooling; Kagi keeps authoritative metadata, placement, and reservation state inside the cluster rather than treating those frontends as independent sources of truth.
 
+## Warranty disclaimer
+
+Kagi is provided **AS IS**, with **no warranty whatsoever**, express, implied, statutory, or otherwise. This includes, without limitation, any warranties of **merchantability**, fitness for a particular purpose, title, non-infringement, accuracy, reliability, availability, security, or freedom from defects. To the fullest extent permitted by applicable law, the authors, copyright holders, and contributors disclaim all warranties and make no representation that the software will meet any requirements or operate without interruption, error, data loss, or other failure.
+
 ## Licensing
 
 Kagi source and documentation are licensed under CC BY-NC-SA 4.0; see `LICENSE`. Third-party Rust/CUDA dependencies retain their upstream licenses; see `THIRD-PARTY-NOTICES.md`.
