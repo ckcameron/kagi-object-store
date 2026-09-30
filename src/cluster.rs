@@ -849,18 +849,10 @@ async fn read_subchunks_at_rest(
     alpha: usize,
     indices: &[usize],
 ) -> Result<Vec<u8>> {
-    let FragmentAtRestRef {
-        cfg,
-        path,
-        object,
-        version,
-        fragment,
-        disk,
-    } = fragment_ref;
     if alpha == 0 || indices.is_empty() {
         bail!("subchunk request requires alpha>0 and at least one index")
     }
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut file = tokio::fs::File::open(fragment_ref.path).await?;
     let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
     file.read_exact(&mut raw_header).await?;
     let header = decode_fragment_header(&raw_header)?;
