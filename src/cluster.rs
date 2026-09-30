@@ -1834,33 +1834,33 @@ async fn dispatch_internal_fragment(
                     b"checksum mismatch".to_vec(),
                 );
             }
-            if let Some(parent) = fragment_file.parent() {
-                if tokio::fs::create_dir_all(parent).await.is_err() {
-                    return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            }
-            let temporary = fragment_file.with_extension("tmp");
-            if tokio::fs::write(&temporary, body).await.is_err() {
-                return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
-            }
-            if let Ok(file) = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&temporary)
-                .await
+            match write_fragment_at_rest(
+                &st.cfg,
+                &fragment_file,
+                &object,
+                version,
+                fragment,
+                &disk,
+                body,
+            )
+            .await
             {
-                if file.sync_all().await.is_err() {
-                    let _ = tokio::fs::remove_file(&temporary).await;
-                    return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            }
-            match tokio::fs::rename(temporary, fragment_file).await {
                 Ok(_) => InternalFragmentResult::empty(StatusCode::CREATED),
                 Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
-        ("GET", None) => match tokio::fs::read(fragment_file).await {
+        ("GET", None) => match read_fragment_at_rest(
+            &st.cfg,
+            &fragment_file,
+            &object,
+            version,
+            fragment,
+            &disk,
+        )
+        .await
+        {
             Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {
                 InternalFragmentResult::empty(StatusCode::NOT_FOUND)
             }
             Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1882,7 +1882,17 @@ async fn dispatch_internal_fragment(
                     )
                 }
             };
-            match read_subchunks(fragment_file, request.alpha, &request.indices).await {
+            match read_fragment_at_rest(
+                &st.cfg,
+                &fragment_file,
+                &object,
+                version,
+                fragment,
+                &disk,
+            )
+            .await
+            .and_then(|plaintext| extract_subchunks(&plaintext, request.alpha, &request.indices))
+            {
                 Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
                 Err(error) => InternalFragmentResult::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -1918,9 +1928,18 @@ async fn dispatch_internal_fragment(
                     b"invalid projection matrix shape".to_vec(),
                 );
             }
-            let bytes = match tokio::fs::read(fragment_file).await {
+            let bytes = match read_fragment_at_rest(
+                &st.cfg,
+                &fragment_file,
+                &object,
+                version,
+                fragment,
+                &disk,
+            )
+            .await
+            {
                 Ok(value) => value,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {
                     return InternalFragmentResult::empty(StatusCode::NOT_FOUND)
                 }
                 Err(_) => return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
