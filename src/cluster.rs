@@ -514,6 +514,16 @@ struct FragmentEnvelopeHeader {
     nonce_prefix: [u8; FRAGMENT_NONCE_PREFIX_BYTES],
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FragmentAtRestRef<'a> {
+    cfg: &'a ClusterConfig,
+    path: &'a FsPath,
+    object: &'a str,
+    version: u64,
+    fragment: u32,
+    disk: &'a str,
+}
+
 fn fragment_at_rest_key(
     cfg: &ClusterConfig,
     object: &str,
@@ -758,15 +768,18 @@ async fn read_fragment_at_rest(
 }
 
 async fn read_fragment_range_at_rest(
-    cfg: &ClusterConfig,
-    path: &FsPath,
-    object: &str,
-    version: u64,
-    fragment: u32,
-    disk: &str,
+    fragment_ref: FragmentAtRestRef<'_>,
     range_start: usize,
     range_len: usize,
 ) -> Result<Vec<u8>> {
+    let FragmentAtRestRef {
+        cfg,
+        path,
+        object,
+        version,
+        fragment,
+        disk,
+    } = fragment_ref;
     let mut file = tokio::fs::File::open(path).await?;
     let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
     file.read_exact(&mut raw_header).await?;
@@ -832,15 +845,18 @@ async fn read_fragment_range_at_rest(
 }
 
 async fn read_subchunks_at_rest(
-    cfg: &ClusterConfig,
-    path: &FsPath,
-    object: &str,
-    version: u64,
-    fragment: u32,
-    disk: &str,
+    fragment_ref: FragmentAtRestRef<'_>,
     alpha: usize,
     indices: &[usize],
 ) -> Result<Vec<u8>> {
+    let FragmentAtRestRef {
+        cfg,
+        path,
+        object,
+        version,
+        fragment,
+        disk,
+    } = fragment_ref;
     if alpha == 0 || indices.is_empty() {
         bail!("subchunk request requires alpha>0 and at least one index")
     }
@@ -862,17 +878,7 @@ async fn read_subchunks_at_rest(
             bail!("subchunk index {index} out of range for alpha={alpha}")
         }
         out.extend_from_slice(
-            &read_fragment_range_at_rest(
-                cfg,
-                path,
-                object,
-                version,
-                fragment,
-                disk,
-                index * row_len,
-                row_len,
-            )
-            .await?,
+            &read_fragment_range_at_rest(fragment_ref, index * row_len, row_len).await?,
         );
     }
     Ok(out)
@@ -1159,12 +1165,14 @@ async fn rpc_get_subchunks(
     if loc.host == st.local_host {
         let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
         return read_subchunks_at_rest(
-            &st.cfg,
-            &path,
-            &m.object_id,
-            m.version,
-            loc.fragment,
-            &loc.disk,
+            FragmentAtRestRef {
+                cfg: &st.cfg,
+                path: &path,
+                object: &m.object_id,
+                version: m.version,
+                fragment: loc.fragment,
+                disk: &loc.disk,
+            },
             alpha,
             indices,
         )
@@ -2118,12 +2126,14 @@ async fn dispatch_internal_fragment(
                 }
             };
             match read_subchunks_at_rest(
-                &st.cfg,
-                &fragment_file,
-                &object,
-                version,
-                fragment,
-                &disk,
+                FragmentAtRestRef {
+                    cfg: &st.cfg,
+                    path: &fragment_file,
+                    object: &object,
+                    version,
+                    fragment,
+                    disk: &disk,
+                },
                 request.alpha,
                 &request.indices,
             )
@@ -2437,9 +2447,20 @@ mod at_rest_encryption_tests {
         let start = FRAGMENT_AEAD_CHUNK_BYTES - 31;
         let length = 127;
         let range =
-            read_fragment_range_at_rest(&cfg, &path, "object-a", 7, 2, "disk-a", start, length)
-                .await
-                .unwrap();
+            read_fragment_range_at_rest(
+                FragmentAtRestRef {
+                    cfg: &cfg,
+                    path: &path,
+                    object: "object-a",
+                    version: 7,
+                    fragment: 2,
+                    disk: "disk-a",
+                },
+                start,
+                length,
+            )
+            .await
+            .unwrap();
         assert_eq!(range, plaintext[start..start + length]);
 
         let on_disk = tokio::fs::read(&path).await.unwrap();
