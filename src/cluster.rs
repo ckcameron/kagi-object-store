@@ -39,7 +39,10 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::RwLock;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    sync::RwLock,
+};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 /// Ordered high-throughput transport policy. HTTPS remains the universal fallback.
@@ -497,12 +500,20 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     Ok(v.try_into().unwrap())
 }
 const PQ_METADATA_SUITE: &str = "XChaCha20-Poly1305-PQ128+BLAKE3-KDF+AAD+JSON+base64";
-const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR1\\0";
+const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR2\\0";
+const FRAGMENT_HEADER_BYTES: usize = 8 + 4 + 8 + 16;
+const FRAGMENT_NONCE_PREFIX_BYTES: usize = 16;
 const FRAGMENT_NONCE_BYTES: usize = 24;
 const FRAGMENT_TAG_BYTES: usize = 16;
+const FRAGMENT_AEAD_CHUNK_BYTES: usize = 1024 * 1024;
 
-/// Derive a domain-separated at-rest key for one immutable fragment.  The cluster
-/// metadata root is never used directly as an AEAD key for fragment data.
+#[derive(Debug, Clone, Copy)]
+struct FragmentEnvelopeHeader {
+    chunk_bytes: usize,
+    plaintext_bytes: usize,
+    nonce_prefix: [u8; FRAGMENT_NONCE_PREFIX_BYTES],
+}
+
 fn fragment_at_rest_key(
     cfg: &ClusterConfig,
     object: &str,
@@ -520,17 +531,91 @@ fn fragment_at_rest_key(
     material.extend_from_slice(&(disk.len() as u64).to_be_bytes());
     material.extend_from_slice(disk.as_bytes());
     Ok(blake3::derive_key(
-        "Kagi fragment at-rest XChaCha20-Poly1305 key v1",
+        "Kagi fragment at-rest chunked XChaCha20-Poly1305 key v2",
         &material,
     ))
 }
 
-fn fragment_aad(cfg: &ClusterConfig, object: &str, version: u64, fragment: u32, disk: &str) -> Vec<u8> {
-    format!(
-        "KAGI-FRAGMENT-AEAD-V1\\0{}\\0{}\\0{}\\0{}\\0{}",
-        cfg.id, object, version, fragment, disk
-    )
-    .into_bytes()
+fn encode_fragment_header(header: FragmentEnvelopeHeader) -> [u8; FRAGMENT_HEADER_BYTES] {
+    let mut out = [0u8; FRAGMENT_HEADER_BYTES];
+    out[..8].copy_from_slice(FRAGMENT_ENVELOPE_MAGIC);
+    out[8..12].copy_from_slice(&(header.chunk_bytes as u32).to_be_bytes());
+    out[12..20].copy_from_slice(&(header.plaintext_bytes as u64).to_be_bytes());
+    out[20..36].copy_from_slice(&header.nonce_prefix);
+    out
+}
+
+fn decode_fragment_header(bytes: &[u8]) -> Result<FragmentEnvelopeHeader> {
+    if bytes.len() != FRAGMENT_HEADER_BYTES || &bytes[..8] != FRAGMENT_ENVELOPE_MAGIC {
+        bail!("fragment is not a Kagi chunked encrypted-at-rest envelope")
+    }
+    let chunk_bytes = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let plaintext_bytes = u64::from_be_bytes(bytes[12..20].try_into().unwrap()) as usize;
+    if chunk_bytes == 0 {
+        bail!("invalid encrypted fragment chunk size")
+    }
+    let mut nonce_prefix = [0u8; FRAGMENT_NONCE_PREFIX_BYTES];
+    nonce_prefix.copy_from_slice(&bytes[20..36]);
+    Ok(FragmentEnvelopeHeader {
+        chunk_bytes,
+        plaintext_bytes,
+        nonce_prefix,
+    })
+}
+
+fn fragment_chunk_count(header: FragmentEnvelopeHeader) -> usize {
+    header.plaintext_bytes.div_ceil(header.chunk_bytes).max(1)
+}
+
+fn fragment_chunk_plaintext_len(header: FragmentEnvelopeHeader, index: usize) -> Result<usize> {
+    if index >= fragment_chunk_count(header) {
+        bail!("encrypted fragment chunk index out of range")
+    }
+    let start = index
+        .checked_mul(header.chunk_bytes)
+        .context("encrypted fragment offset overflow")?;
+    Ok(header.plaintext_bytes.saturating_sub(start).min(header.chunk_bytes))
+}
+
+fn fragment_chunk_nonce(
+    prefix: &[u8; FRAGMENT_NONCE_PREFIX_BYTES],
+    index: usize,
+) -> Result<[u8; FRAGMENT_NONCE_BYTES]> {
+    let index = u64::try_from(index).context("encrypted fragment chunk index overflow")?;
+    let mut nonce = [0u8; FRAGMENT_NONCE_BYTES];
+    nonce[..FRAGMENT_NONCE_PREFIX_BYTES].copy_from_slice(prefix);
+    nonce[FRAGMENT_NONCE_PREFIX_BYTES..].copy_from_slice(&index.to_be_bytes());
+    Ok(nonce)
+}
+
+fn fragment_chunk_aad(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    header_bytes: &[u8; FRAGMENT_HEADER_BYTES],
+    index: usize,
+) -> Result<Vec<u8>> {
+    let mut aad = Vec::with_capacity(
+        32 + cfg.id.len() + object.len() + disk.len() + header_bytes.len(),
+    );
+    aad.extend_from_slice(b"KAGI-FRAGMENT-CHUNK-AEAD-V2\\0");
+    aad.extend_from_slice(&(cfg.id.len() as u64).to_be_bytes());
+    aad.extend_from_slice(cfg.id.as_bytes());
+    aad.extend_from_slice(&(object.len() as u64).to_be_bytes());
+    aad.extend_from_slice(object.as_bytes());
+    aad.extend_from_slice(&version.to_be_bytes());
+    aad.extend_from_slice(&fragment.to_be_bytes());
+    aad.extend_from_slice(&(disk.len() as u64).to_be_bytes());
+    aad.extend_from_slice(disk.as_bytes());
+    aad.extend_from_slice(header_bytes);
+    aad.extend_from_slice(
+        &u64::try_from(index)
+            .context("encrypted fragment chunk index overflow")?
+            .to_be_bytes(),
+    );
+    Ok(aad)
 }
 
 fn protect_fragment_at_rest(
@@ -543,22 +628,42 @@ fn protect_fragment_at_rest(
 ) -> Result<Vec<u8>> {
     let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
     let cipher = XChaCha20Poly1305::new((&key).into());
-    let mut nonce = [0u8; FRAGMENT_NONCE_BYTES];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    let ciphertext = cipher
-        .encrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad: &fragment_aad(cfg, object, version, fragment, disk),
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("fragment encryption failed"))?;
-    let mut envelope =
-        Vec::with_capacity(FRAGMENT_ENVELOPE_MAGIC.len() + nonce.len() + ciphertext.len());
-    envelope.extend_from_slice(FRAGMENT_ENVELOPE_MAGIC);
-    envelope.extend_from_slice(&nonce);
-    envelope.extend_from_slice(&ciphertext);
+    let mut nonce_prefix = [0u8; FRAGMENT_NONCE_PREFIX_BYTES];
+    rand::thread_rng().fill_bytes(&mut nonce_prefix);
+    let header = FragmentEnvelopeHeader {
+        chunk_bytes: FRAGMENT_AEAD_CHUNK_BYTES,
+        plaintext_bytes: plaintext.len(),
+        nonce_prefix,
+    };
+    let header_bytes = encode_fragment_header(header);
+    let chunks = fragment_chunk_count(header);
+    let mut envelope = Vec::with_capacity(
+        FRAGMENT_HEADER_BYTES + plaintext.len() + chunks * FRAGMENT_TAG_BYTES,
+    );
+    envelope.extend_from_slice(&header_bytes);
+    for index in 0..chunks {
+        let start = index * header.chunk_bytes;
+        let len = fragment_chunk_plaintext_len(header, index)?;
+        let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &plaintext[start..start + len],
+                    aad: &fragment_chunk_aad(
+                        cfg,
+                        object,
+                        version,
+                        fragment,
+                        disk,
+                        &header_bytes,
+                        index,
+                    )?,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("fragment chunk encryption failed"))?;
+        envelope.extend_from_slice(&ciphertext);
+    }
     Ok(envelope)
 }
 
@@ -570,22 +675,49 @@ fn unprotect_fragment_at_rest(
     disk: &str,
     envelope: &[u8],
 ) -> Result<Vec<u8>> {
-    let minimum = FRAGMENT_ENVELOPE_MAGIC.len() + FRAGMENT_NONCE_BYTES + FRAGMENT_TAG_BYTES;
-    if envelope.len() < minimum || &envelope[..FRAGMENT_ENVELOPE_MAGIC.len()] != FRAGMENT_ENVELOPE_MAGIC {
-        bail!("fragment is not a Kagi encrypted-at-rest envelope")
+    if envelope.len() < FRAGMENT_HEADER_BYTES + FRAGMENT_TAG_BYTES {
+        bail!("truncated encrypted fragment")
     }
-    let nonce_start = FRAGMENT_ENVELOPE_MAGIC.len();
-    let ciphertext_start = nonce_start + FRAGMENT_NONCE_BYTES;
+    let header_bytes: [u8; FRAGMENT_HEADER_BYTES] =
+        envelope[..FRAGMENT_HEADER_BYTES].try_into().unwrap();
+    let header = decode_fragment_header(&header_bytes)?;
+    let chunks = fragment_chunk_count(header);
+    let expected = FRAGMENT_HEADER_BYTES
+        .checked_add(header.plaintext_bytes)
+        .and_then(|value| value.checked_add(chunks * FRAGMENT_TAG_BYTES))
+        .context("encrypted fragment length overflow")?;
+    if envelope.len() != expected {
+        bail!("encrypted fragment length mismatch")
+    }
     let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
-    XChaCha20Poly1305::new((&key).into())
-        .decrypt(
-            XNonce::from_slice(&envelope[nonce_start..ciphertext_start]),
-            Payload {
-                msg: &envelope[ciphertext_start..],
-                aad: &fragment_aad(cfg, object, version, fragment, disk),
-            },
-        )
-        .map_err(|_| anyhow::anyhow!("fragment at-rest authentication failed"))
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let mut plaintext = Vec::with_capacity(header.plaintext_bytes);
+    let mut offset = FRAGMENT_HEADER_BYTES;
+    for index in 0..chunks {
+        let plain_len = fragment_chunk_plaintext_len(header, index)?;
+        let cipher_len = plain_len + FRAGMENT_TAG_BYTES;
+        let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
+        let chunk = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &envelope[offset..offset + cipher_len],
+                    aad: &fragment_chunk_aad(
+                        cfg,
+                        object,
+                        version,
+                        fragment,
+                        disk,
+                        &header_bytes,
+                        index,
+                    )?,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("fragment chunk authentication failed"))?;
+        plaintext.extend_from_slice(&chunk);
+        offset += cipher_len;
+    }
+    Ok(plaintext)
 }
 
 async fn write_fragment_at_rest(
@@ -603,10 +735,7 @@ async fn write_fragment_at_rest(
     }
     let temporary = path.with_extension("tmp");
     tokio::fs::write(&temporary, envelope).await?;
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&temporary)
-        .await?;
+    let file = tokio::fs::OpenOptions::new().write(true).open(&temporary).await?;
     file.sync_all().await?;
     tokio::fs::rename(&temporary, path).await?;
     Ok(())
@@ -622,6 +751,126 @@ async fn read_fragment_at_rest(
 ) -> Result<Vec<u8>> {
     let envelope = tokio::fs::read(path).await?;
     unprotect_fragment_at_rest(cfg, object, version, fragment, disk, &envelope)
+}
+
+async fn read_fragment_range_at_rest(
+    cfg: &ClusterConfig,
+    path: &FsPath,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    range_start: usize,
+    range_len: usize,
+) -> Result<Vec<u8>> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
+    file.read_exact(&mut raw_header).await?;
+    let header = decode_fragment_header(&raw_header)?;
+    let range_end = range_start
+        .checked_add(range_len)
+        .context("fragment range overflow")?;
+    if range_end > header.plaintext_bytes {
+        bail!("fragment plaintext range out of bounds")
+    }
+    if range_len == 0 {
+        return Ok(Vec::new());
+    }
+    let chunks = fragment_chunk_count(header);
+    let expected_file_len = FRAGMENT_HEADER_BYTES
+        .checked_add(header.plaintext_bytes)
+        .and_then(|value| value.checked_add(chunks * FRAGMENT_TAG_BYTES))
+        .context("encrypted fragment length overflow")?;
+    if file.metadata().await?.len() != expected_file_len as u64 {
+        bail!("encrypted fragment length mismatch")
+    }
+
+    let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let first_chunk = range_start / header.chunk_bytes;
+    let last_chunk = (range_end - 1) / header.chunk_bytes;
+    let mut out = Vec::with_capacity(range_len);
+
+    for index in first_chunk..=last_chunk {
+        let plain_len = fragment_chunk_plaintext_len(header, index)?;
+        let cipher_offset = FRAGMENT_HEADER_BYTES
+            + index
+                .checked_mul(header.chunk_bytes + FRAGMENT_TAG_BYTES)
+                .context("encrypted fragment offset overflow")?;
+        file.seek(std::io::SeekFrom::Start(cipher_offset as u64)).await?;
+        let mut ciphertext = vec![0u8; plain_len + FRAGMENT_TAG_BYTES];
+        file.read_exact(&mut ciphertext).await?;
+        let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &fragment_chunk_aad(
+                        cfg,
+                        object,
+                        version,
+                        fragment,
+                        disk,
+                        &raw_header,
+                        index,
+                    )?,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("fragment chunk authentication failed"))?;
+        let chunk_start = index * header.chunk_bytes;
+        let copy_start = range_start.saturating_sub(chunk_start);
+        let copy_end = plaintext.len().min(range_end - chunk_start);
+        out.extend_from_slice(&plaintext[copy_start..copy_end]);
+    }
+    Ok(out)
+}
+
+async fn read_subchunks_at_rest(
+    cfg: &ClusterConfig,
+    path: &FsPath,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    alpha: usize,
+    indices: &[usize],
+) -> Result<Vec<u8>> {
+    if alpha == 0 || indices.is_empty() {
+        bail!("subchunk request requires alpha>0 and at least one index")
+    }
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
+    file.read_exact(&mut raw_header).await?;
+    let header = decode_fragment_header(&raw_header)?;
+    if header.plaintext_bytes == 0 || !header.plaintext_bytes.is_multiple_of(alpha) {
+        bail!(
+            "fragment length {} is not divisible by alpha={alpha}",
+            header.plaintext_bytes
+        )
+    }
+    drop(file);
+    let row_len = header.plaintext_bytes / alpha;
+    let mut out = Vec::with_capacity(indices.len() * row_len);
+    for &index in indices {
+        if index >= alpha {
+            bail!("subchunk index {index} out of range for alpha={alpha}")
+        }
+        out.extend_from_slice(
+            &read_fragment_range_at_rest(
+                cfg,
+                path,
+                object,
+                version,
+                fragment,
+                disk,
+                index * row_len,
+                row_len,
+            )
+            .await?,
+        );
+    }
+    Ok(out)
 }
 // ---- Protected metadata envelopes ----------------------------------------------
 fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<EncryptedMetadata> {
