@@ -39,10 +39,7 @@ use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
-    sync::RwLock,
-};
+use tokio::sync::RwLock;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 /// Ordered high-throughput transport policy. HTTPS remains the universal fallback.
@@ -500,6 +497,132 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     Ok(v.try_into().unwrap())
 }
 const PQ_METADATA_SUITE: &str = "XChaCha20-Poly1305-PQ128+BLAKE3-KDF+AAD+JSON+base64";
+const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR1\\0";
+const FRAGMENT_NONCE_BYTES: usize = 24;
+const FRAGMENT_TAG_BYTES: usize = 16;
+
+/// Derive a domain-separated at-rest key for one immutable fragment.  The cluster
+/// metadata root is never used directly as an AEAD key for fragment data.
+fn fragment_at_rest_key(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+) -> Result<[u8; 32]> {
+    let root = metadata_key(cfg)?;
+    let mut material = Vec::with_capacity(32 + object.len() + disk.len() + 24);
+    material.extend_from_slice(&root);
+    material.extend_from_slice(&(object.len() as u64).to_be_bytes());
+    material.extend_from_slice(object.as_bytes());
+    material.extend_from_slice(&version.to_be_bytes());
+    material.extend_from_slice(&fragment.to_be_bytes());
+    material.extend_from_slice(&(disk.len() as u64).to_be_bytes());
+    material.extend_from_slice(disk.as_bytes());
+    Ok(blake3::derive_key(
+        "Kagi fragment at-rest XChaCha20-Poly1305 key v1",
+        &material,
+    ))
+}
+
+fn fragment_aad(cfg: &ClusterConfig, object: &str, version: u64, fragment: u32, disk: &str) -> Vec<u8> {
+    format!(
+        "KAGI-FRAGMENT-AEAD-V1\\0{}\\0{}\\0{}\\0{}\\0{}",
+        cfg.id, object, version, fragment, disk
+    )
+    .into_bytes()
+}
+
+fn protect_fragment_at_rest(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let mut nonce = [0u8; FRAGMENT_NONCE_BYTES];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad: &fragment_aad(cfg, object, version, fragment, disk),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("fragment encryption failed"))?;
+    let mut envelope =
+        Vec::with_capacity(FRAGMENT_ENVELOPE_MAGIC.len() + nonce.len() + ciphertext.len());
+    envelope.extend_from_slice(FRAGMENT_ENVELOPE_MAGIC);
+    envelope.extend_from_slice(&nonce);
+    envelope.extend_from_slice(&ciphertext);
+    Ok(envelope)
+}
+
+fn unprotect_fragment_at_rest(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    envelope: &[u8],
+) -> Result<Vec<u8>> {
+    let minimum = FRAGMENT_ENVELOPE_MAGIC.len() + FRAGMENT_NONCE_BYTES + FRAGMENT_TAG_BYTES;
+    if envelope.len() < minimum || &envelope[..FRAGMENT_ENVELOPE_MAGIC.len()] != FRAGMENT_ENVELOPE_MAGIC {
+        bail!("fragment is not a Kagi encrypted-at-rest envelope")
+    }
+    let nonce_start = FRAGMENT_ENVELOPE_MAGIC.len();
+    let ciphertext_start = nonce_start + FRAGMENT_NONCE_BYTES;
+    let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
+    XChaCha20Poly1305::new((&key).into())
+        .decrypt(
+            XNonce::from_slice(&envelope[nonce_start..ciphertext_start]),
+            Payload {
+                msg: &envelope[ciphertext_start..],
+                aad: &fragment_aad(cfg, object, version, fragment, disk),
+            },
+        )
+        .map_err(|_| anyhow::anyhow!("fragment at-rest authentication failed"))
+}
+
+async fn write_fragment_at_rest(
+    cfg: &ClusterConfig,
+    path: &FsPath,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    plaintext: &[u8],
+) -> Result<()> {
+    let envelope = protect_fragment_at_rest(cfg, object, version, fragment, disk, plaintext)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let temporary = path.with_extension("tmp");
+    tokio::fs::write(&temporary, envelope).await?;
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .await?;
+    file.sync_all().await?;
+    tokio::fs::rename(&temporary, path).await?;
+    Ok(())
+}
+
+async fn read_fragment_at_rest(
+    cfg: &ClusterConfig,
+    path: &FsPath,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+) -> Result<Vec<u8>> {
+    let envelope = tokio::fs::read(path).await?;
+    unprotect_fragment_at_rest(cfg, object, version, fragment, disk, &envelope)
+}
 // ---- Protected metadata envelopes ----------------------------------------------
 fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<EncryptedMetadata> {
     let root = metadata_key(cfg)?;
@@ -649,12 +772,16 @@ async fn rpc_store(
 ) -> Result<()> {
     if loc.host == st.local_host {
         let p = fragment_path(&st.root, &loc.disk, &h.object_id, h.version, h.fragment);
-        tokio::fs::create_dir_all(p.parent().unwrap()).await?;
-        let tmp = p.with_extension("tmp");
-        tokio::fs::write(&tmp, data).await?;
-        let f = tokio::fs::OpenOptions::new().write(true).open(&tmp).await?;
-        f.sync_all().await?;
-        tokio::fs::rename(tmp, p).await?;
+        write_fragment_at_rest(
+            &st.cfg,
+            &p,
+            &h.object_id,
+            h.version,
+            h.fragment,
+            &loc.disk,
+            data,
+        )
+        .await?;
         return Ok(());
     }
     let peer = st
@@ -707,14 +834,16 @@ async fn rpc_store(
 /// Implements the rpc get step and keeps its validation and state transitions visible at the call site.
 async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) -> Result<Vec<u8>> {
     if loc.host == st.local_host {
-        return Ok(tokio::fs::read(fragment_path(
-            &st.root,
-            &loc.disk,
+        let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
+        return read_fragment_at_rest(
+            &st.cfg,
+            &path,
             &m.object_id,
             m.version,
             loc.fragment,
-        ))
-        .await?);
+            &loc.disk,
+        )
+        .await;
     }
     let peer = st
         .cfg
@@ -763,12 +892,11 @@ struct ProjectionRequest {
     coeff_b64: String,
 }
 /// Implements the read subchunks step and keeps its validation and state transitions visible at the call site.
-async fn read_subchunks(path: PathBuf, alpha: usize, indices: &[usize]) -> Result<Vec<u8>> {
+fn extract_subchunks(data: &[u8], alpha: usize, indices: &[usize]) -> Result<Vec<u8>> {
     if alpha == 0 || indices.is_empty() {
         bail!("subchunk request requires alpha>0 and at least one index")
     }
-    let mut f = tokio::fs::File::open(path).await?;
-    let len = f.metadata().await?.len() as usize;
+    let len = data.len();
     if len == 0 || !len.is_multiple_of(alpha) {
         bail!("fragment length {len} is not divisible by alpha={alpha}")
     }
@@ -778,11 +906,8 @@ async fn read_subchunks(path: PathBuf, alpha: usize, indices: &[usize]) -> Resul
         if idx >= alpha {
             bail!("subchunk index {idx} out of range for alpha={alpha}")
         }
-        f.seek(std::io::SeekFrom::Start((idx * row_len) as u64))
-            .await?;
-        let start = out.len();
-        out.resize(start + row_len, 0);
-        f.read_exact(&mut out[start..]).await?;
+        let offset = idx * row_len;
+        out.extend_from_slice(&data[offset..offset + row_len]);
     }
     Ok(out)
 }
@@ -797,12 +922,17 @@ async fn rpc_get_subchunks(
     indices: &[usize],
 ) -> Result<Vec<u8>> {
     if loc.host == st.local_host {
-        return read_subchunks(
-            fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment),
-            alpha,
-            indices,
+        let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
+        let plaintext = read_fragment_at_rest(
+            &st.cfg,
+            &path,
+            &m.object_id,
+            m.version,
+            loc.fragment,
+            &loc.disk,
         )
-        .await;
+        .await?;
+        return extract_subchunks(&plaintext, alpha, indices);
     }
     let peer = st
         .cfg
@@ -850,13 +980,15 @@ async fn rpc_project(
         bail!("invalid projection matrix")
     }
     if loc.host == st.local_host {
-        let v = tokio::fs::read(fragment_path(
-            &st.root,
-            &loc.disk,
+        let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
+        let v = read_fragment_at_rest(
+            &st.cfg,
+            &path,
             &m.object_id,
             m.version,
             loc.fragment,
-        ))
+            &loc.disk,
+        )
         .await?;
         if !v.len().is_multiple_of(rows) {
             bail!("fragment length is not divisible by projection rows")
