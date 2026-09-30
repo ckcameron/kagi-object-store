@@ -120,7 +120,7 @@ pub struct ClusterConfig {
     /// Optional erasure-coding policy; None retains replication-only protection.
     #[serde(default)]
     pub erasure: Option<ErasureConfig>,
-    /// Optional base64 32-byte key used for protected metadata.
+    /// Base64 32-byte at-rest root key. Domain-separated subkeys protect metadata and fragments.
     #[serde(default)]
     pub metadata_key_b64: Option<String>,
     /// Optional stored verifier/hash representation of the cluster join key.
@@ -492,7 +492,7 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     let s = cfg
         .metadata_key_b64
         .as_ref()
-        .context("cluster.metadata_key_b64 is required for encrypted object metadata")?;
+        .context("cluster.metadata_key_b64 is required for encrypted metadata and fragments")?;
     let v = B64.decode(s).context("metadata_key_b64 must be base64")?;
     if v.len() != 32 {
         bail!("metadata_key_b64 must decode to exactly 32 bytes")
@@ -500,6 +500,381 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     Ok(v.try_into().unwrap())
 }
 const PQ_METADATA_SUITE: &str = "XChaCha20-Poly1305-PQ128+BLAKE3-KDF+AAD+JSON+base64";
+const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR2\0";
+const FRAGMENT_HEADER_BYTES: usize = 8 + 4 + 8 + 16;
+const FRAGMENT_NONCE_PREFIX_BYTES: usize = 16;
+const FRAGMENT_NONCE_BYTES: usize = 24;
+const FRAGMENT_TAG_BYTES: usize = 16;
+const FRAGMENT_AEAD_CHUNK_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct FragmentEnvelopeHeader {
+    chunk_bytes: usize,
+    plaintext_bytes: usize,
+    nonce_prefix: [u8; FRAGMENT_NONCE_PREFIX_BYTES],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FragmentAtRestRef<'a> {
+    cfg: &'a ClusterConfig,
+    path: &'a FsPath,
+    object: &'a str,
+    version: u64,
+    fragment: u32,
+    disk: &'a str,
+}
+
+fn fragment_at_rest_key(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+) -> Result<[u8; 32]> {
+    let root = metadata_key(cfg)?;
+    let mut material = Vec::with_capacity(32 + object.len() + disk.len() + 24);
+    material.extend_from_slice(&root);
+    material.extend_from_slice(&(object.len() as u64).to_be_bytes());
+    material.extend_from_slice(object.as_bytes());
+    material.extend_from_slice(&version.to_be_bytes());
+    material.extend_from_slice(&fragment.to_be_bytes());
+    material.extend_from_slice(&(disk.len() as u64).to_be_bytes());
+    material.extend_from_slice(disk.as_bytes());
+    Ok(blake3::derive_key(
+        "Kagi fragment at-rest chunked XChaCha20-Poly1305 key v2",
+        &material,
+    ))
+}
+
+fn encode_fragment_header(header: FragmentEnvelopeHeader) -> [u8; FRAGMENT_HEADER_BYTES] {
+    let mut out = [0u8; FRAGMENT_HEADER_BYTES];
+    out[..8].copy_from_slice(FRAGMENT_ENVELOPE_MAGIC);
+    out[8..12].copy_from_slice(&(header.chunk_bytes as u32).to_be_bytes());
+    out[12..20].copy_from_slice(&(header.plaintext_bytes as u64).to_be_bytes());
+    out[20..36].copy_from_slice(&header.nonce_prefix);
+    out
+}
+
+fn decode_fragment_header(bytes: &[u8]) -> Result<FragmentEnvelopeHeader> {
+    if bytes.len() != FRAGMENT_HEADER_BYTES || &bytes[..8] != FRAGMENT_ENVELOPE_MAGIC {
+        bail!("fragment is not a Kagi chunked encrypted-at-rest envelope")
+    }
+    let chunk_bytes = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let plaintext_bytes = u64::from_be_bytes(bytes[12..20].try_into().unwrap()) as usize;
+    if chunk_bytes == 0 {
+        bail!("invalid encrypted fragment chunk size")
+    }
+    let mut nonce_prefix = [0u8; FRAGMENT_NONCE_PREFIX_BYTES];
+    nonce_prefix.copy_from_slice(&bytes[20..36]);
+    Ok(FragmentEnvelopeHeader {
+        chunk_bytes,
+        plaintext_bytes,
+        nonce_prefix,
+    })
+}
+
+fn fragment_chunk_count(header: FragmentEnvelopeHeader) -> usize {
+    header.plaintext_bytes.div_ceil(header.chunk_bytes).max(1)
+}
+
+fn fragment_chunk_plaintext_len(header: FragmentEnvelopeHeader, index: usize) -> Result<usize> {
+    if index >= fragment_chunk_count(header) {
+        bail!("encrypted fragment chunk index out of range")
+    }
+    let start = index
+        .checked_mul(header.chunk_bytes)
+        .context("encrypted fragment offset overflow")?;
+    Ok(header
+        .plaintext_bytes
+        .saturating_sub(start)
+        .min(header.chunk_bytes))
+}
+
+fn fragment_chunk_nonce(
+    prefix: &[u8; FRAGMENT_NONCE_PREFIX_BYTES],
+    index: usize,
+) -> Result<[u8; FRAGMENT_NONCE_BYTES]> {
+    let index = u64::try_from(index).context("encrypted fragment chunk index overflow")?;
+    let mut nonce = [0u8; FRAGMENT_NONCE_BYTES];
+    nonce[..FRAGMENT_NONCE_PREFIX_BYTES].copy_from_slice(prefix);
+    nonce[FRAGMENT_NONCE_PREFIX_BYTES..].copy_from_slice(&index.to_be_bytes());
+    Ok(nonce)
+}
+
+fn fragment_chunk_aad(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    header_bytes: &[u8; FRAGMENT_HEADER_BYTES],
+    index: usize,
+) -> Result<Vec<u8>> {
+    let mut aad =
+        Vec::with_capacity(32 + cfg.id.len() + object.len() + disk.len() + header_bytes.len());
+    aad.extend_from_slice(b"KAGI-FRAGMENT-CHUNK-AEAD-V2\\0");
+    aad.extend_from_slice(&(cfg.id.len() as u64).to_be_bytes());
+    aad.extend_from_slice(cfg.id.as_bytes());
+    aad.extend_from_slice(&(object.len() as u64).to_be_bytes());
+    aad.extend_from_slice(object.as_bytes());
+    aad.extend_from_slice(&version.to_be_bytes());
+    aad.extend_from_slice(&fragment.to_be_bytes());
+    aad.extend_from_slice(&(disk.len() as u64).to_be_bytes());
+    aad.extend_from_slice(disk.as_bytes());
+    aad.extend_from_slice(header_bytes);
+    aad.extend_from_slice(
+        &u64::try_from(index)
+            .context("encrypted fragment chunk index overflow")?
+            .to_be_bytes(),
+    );
+    Ok(aad)
+}
+
+fn protect_fragment_at_rest(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let mut nonce_prefix = [0u8; FRAGMENT_NONCE_PREFIX_BYTES];
+    rand::thread_rng().fill_bytes(&mut nonce_prefix);
+    let header = FragmentEnvelopeHeader {
+        chunk_bytes: FRAGMENT_AEAD_CHUNK_BYTES,
+        plaintext_bytes: plaintext.len(),
+        nonce_prefix,
+    };
+    let header_bytes = encode_fragment_header(header);
+    let chunks = fragment_chunk_count(header);
+    let mut envelope =
+        Vec::with_capacity(FRAGMENT_HEADER_BYTES + plaintext.len() + chunks * FRAGMENT_TAG_BYTES);
+    envelope.extend_from_slice(&header_bytes);
+    for index in 0..chunks {
+        let start = index * header.chunk_bytes;
+        let len = fragment_chunk_plaintext_len(header, index)?;
+        let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &plaintext[start..start + len],
+                    aad: &fragment_chunk_aad(
+                        cfg,
+                        object,
+                        version,
+                        fragment,
+                        disk,
+                        &header_bytes,
+                        index,
+                    )?,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("fragment chunk encryption failed"))?;
+        envelope.extend_from_slice(&ciphertext);
+    }
+    Ok(envelope)
+}
+
+fn unprotect_fragment_at_rest(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    envelope: &[u8],
+) -> Result<Vec<u8>> {
+    if envelope.len() < FRAGMENT_HEADER_BYTES + FRAGMENT_TAG_BYTES {
+        bail!("truncated encrypted fragment")
+    }
+    let header_bytes: [u8; FRAGMENT_HEADER_BYTES] =
+        envelope[..FRAGMENT_HEADER_BYTES].try_into().unwrap();
+    let header = decode_fragment_header(&header_bytes)?;
+    let chunks = fragment_chunk_count(header);
+    let expected = FRAGMENT_HEADER_BYTES
+        .checked_add(header.plaintext_bytes)
+        .and_then(|value| value.checked_add(chunks * FRAGMENT_TAG_BYTES))
+        .context("encrypted fragment length overflow")?;
+    if envelope.len() != expected {
+        bail!("encrypted fragment length mismatch")
+    }
+    let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let mut plaintext = Vec::with_capacity(header.plaintext_bytes);
+    let mut offset = FRAGMENT_HEADER_BYTES;
+    for index in 0..chunks {
+        let plain_len = fragment_chunk_plaintext_len(header, index)?;
+        let cipher_len = plain_len + FRAGMENT_TAG_BYTES;
+        let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
+        let chunk = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &envelope[offset..offset + cipher_len],
+                    aad: &fragment_chunk_aad(
+                        cfg,
+                        object,
+                        version,
+                        fragment,
+                        disk,
+                        &header_bytes,
+                        index,
+                    )?,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("fragment chunk authentication failed"))?;
+        plaintext.extend_from_slice(&chunk);
+        offset += cipher_len;
+    }
+    Ok(plaintext)
+}
+
+async fn write_fragment_at_rest(
+    cfg: &ClusterConfig,
+    path: &FsPath,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    plaintext: &[u8],
+) -> Result<()> {
+    let envelope = protect_fragment_at_rest(cfg, object, version, fragment, disk, plaintext)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let temporary = path.with_extension("tmp");
+    tokio::fs::write(&temporary, envelope).await?;
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .await?;
+    file.sync_all().await?;
+    tokio::fs::rename(&temporary, path).await?;
+    Ok(())
+}
+
+async fn read_fragment_at_rest(
+    cfg: &ClusterConfig,
+    path: &FsPath,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+) -> Result<Vec<u8>> {
+    let envelope = tokio::fs::read(path).await?;
+    unprotect_fragment_at_rest(cfg, object, version, fragment, disk, &envelope)
+}
+
+async fn read_fragment_range_at_rest(
+    fragment_ref: FragmentAtRestRef<'_>,
+    range_start: usize,
+    range_len: usize,
+) -> Result<Vec<u8>> {
+    let FragmentAtRestRef {
+        cfg,
+        path,
+        object,
+        version,
+        fragment,
+        disk,
+    } = fragment_ref;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
+    file.read_exact(&mut raw_header).await?;
+    let header = decode_fragment_header(&raw_header)?;
+    let range_end = range_start
+        .checked_add(range_len)
+        .context("fragment range overflow")?;
+    if range_end > header.plaintext_bytes {
+        bail!("fragment plaintext range out of bounds")
+    }
+    if range_len == 0 {
+        return Ok(Vec::new());
+    }
+    let chunks = fragment_chunk_count(header);
+    let expected_file_len = FRAGMENT_HEADER_BYTES
+        .checked_add(header.plaintext_bytes)
+        .and_then(|value| value.checked_add(chunks * FRAGMENT_TAG_BYTES))
+        .context("encrypted fragment length overflow")?;
+    if file.metadata().await?.len() != expected_file_len as u64 {
+        bail!("encrypted fragment length mismatch")
+    }
+
+    let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
+    let first_chunk = range_start / header.chunk_bytes;
+    let last_chunk = (range_end - 1) / header.chunk_bytes;
+    let mut out = Vec::with_capacity(range_len);
+
+    for index in first_chunk..=last_chunk {
+        let plain_len = fragment_chunk_plaintext_len(header, index)?;
+        let cipher_offset = FRAGMENT_HEADER_BYTES
+            + index
+                .checked_mul(header.chunk_bytes + FRAGMENT_TAG_BYTES)
+                .context("encrypted fragment offset overflow")?;
+        file.seek(std::io::SeekFrom::Start(cipher_offset as u64))
+            .await?;
+        let mut ciphertext = vec![0u8; plain_len + FRAGMENT_TAG_BYTES];
+        file.read_exact(&mut ciphertext).await?;
+        let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: &fragment_chunk_aad(
+                        cfg,
+                        object,
+                        version,
+                        fragment,
+                        disk,
+                        &raw_header,
+                        index,
+                    )?,
+                },
+            )
+            .map_err(|_| anyhow::anyhow!("fragment chunk authentication failed"))?;
+        let chunk_start = index * header.chunk_bytes;
+        let copy_start = range_start.saturating_sub(chunk_start);
+        let copy_end = plaintext.len().min(range_end - chunk_start);
+        out.extend_from_slice(&plaintext[copy_start..copy_end]);
+    }
+    Ok(out)
+}
+
+async fn read_subchunks_at_rest(
+    fragment_ref: FragmentAtRestRef<'_>,
+    alpha: usize,
+    indices: &[usize],
+) -> Result<Vec<u8>> {
+    if alpha == 0 || indices.is_empty() {
+        bail!("subchunk request requires alpha>0 and at least one index")
+    }
+    let mut file = tokio::fs::File::open(fragment_ref.path).await?;
+    let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
+    file.read_exact(&mut raw_header).await?;
+    let header = decode_fragment_header(&raw_header)?;
+    if header.plaintext_bytes == 0 || !header.plaintext_bytes.is_multiple_of(alpha) {
+        bail!(
+            "fragment length {} is not divisible by alpha={alpha}",
+            header.plaintext_bytes
+        )
+    }
+    drop(file);
+    let row_len = header.plaintext_bytes / alpha;
+    let mut out = Vec::with_capacity(indices.len() * row_len);
+    for &index in indices {
+        if index >= alpha {
+            bail!("subchunk index {index} out of range for alpha={alpha}")
+        }
+        out.extend_from_slice(
+            &read_fragment_range_at_rest(fragment_ref, index * row_len, row_len).await?,
+        );
+    }
+    Ok(out)
+}
 // ---- Protected metadata envelopes ----------------------------------------------
 fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<EncryptedMetadata> {
     let root = metadata_key(cfg)?;
@@ -649,12 +1024,16 @@ async fn rpc_store(
 ) -> Result<()> {
     if loc.host == st.local_host {
         let p = fragment_path(&st.root, &loc.disk, &h.object_id, h.version, h.fragment);
-        tokio::fs::create_dir_all(p.parent().unwrap()).await?;
-        let tmp = p.with_extension("tmp");
-        tokio::fs::write(&tmp, data).await?;
-        let f = tokio::fs::OpenOptions::new().write(true).open(&tmp).await?;
-        f.sync_all().await?;
-        tokio::fs::rename(tmp, p).await?;
+        write_fragment_at_rest(
+            &st.cfg,
+            &p,
+            &h.object_id,
+            h.version,
+            h.fragment,
+            &loc.disk,
+            data,
+        )
+        .await?;
         return Ok(());
     }
     let peer = st
@@ -707,14 +1086,16 @@ async fn rpc_store(
 /// Implements the rpc get step and keeps its validation and state transitions visible at the call site.
 async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) -> Result<Vec<u8>> {
     if loc.host == st.local_host {
-        return Ok(tokio::fs::read(fragment_path(
-            &st.root,
-            &loc.disk,
+        let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
+        return read_fragment_at_rest(
+            &st.cfg,
+            &path,
             &m.object_id,
             m.version,
             loc.fragment,
-        ))
-        .await?);
+            &loc.disk,
+        )
+        .await;
     }
     let peer = st
         .cfg
@@ -763,29 +1144,6 @@ struct ProjectionRequest {
     coeff_b64: String,
 }
 /// Implements the read subchunks step and keeps its validation and state transitions visible at the call site.
-async fn read_subchunks(path: PathBuf, alpha: usize, indices: &[usize]) -> Result<Vec<u8>> {
-    if alpha == 0 || indices.is_empty() {
-        bail!("subchunk request requires alpha>0 and at least one index")
-    }
-    let mut f = tokio::fs::File::open(path).await?;
-    let len = f.metadata().await?.len() as usize;
-    if len == 0 || !len.is_multiple_of(alpha) {
-        bail!("fragment length {len} is not divisible by alpha={alpha}")
-    }
-    let row_len = len / alpha;
-    let mut out = Vec::with_capacity(indices.len() * row_len);
-    for &idx in indices {
-        if idx >= alpha {
-            bail!("subchunk index {idx} out of range for alpha={alpha}")
-        }
-        f.seek(std::io::SeekFrom::Start((idx * row_len) as u64))
-            .await?;
-        let start = out.len();
-        out.resize(start + row_len, 0);
-        f.read_exact(&mut out[start..]).await?;
-    }
-    Ok(out)
-}
 /// Read only the CLAY subchunks named by the exact-repair plan. Remote peers
 /// receive a signed request and perform positioned reads, so unused subchunks
 /// never cross either the disk or network repair path.
@@ -797,8 +1155,16 @@ async fn rpc_get_subchunks(
     indices: &[usize],
 ) -> Result<Vec<u8>> {
     if loc.host == st.local_host {
-        return read_subchunks(
-            fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment),
+        let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
+        return read_subchunks_at_rest(
+            FragmentAtRestRef {
+                cfg: &st.cfg,
+                path: &path,
+                object: &m.object_id,
+                version: m.version,
+                fragment: loc.fragment,
+                disk: &loc.disk,
+            },
             alpha,
             indices,
         )
@@ -850,13 +1216,15 @@ async fn rpc_project(
         bail!("invalid projection matrix")
     }
     if loc.host == st.local_host {
-        let v = tokio::fs::read(fragment_path(
-            &st.root,
-            &loc.disk,
+        let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
+        let v = read_fragment_at_rest(
+            &st.cfg,
+            &path,
             &m.object_id,
             m.version,
             loc.fragment,
-        ))
+            &loc.disk,
+        )
         .await?;
         if !v.len().is_multiple_of(rows) {
             bail!("fragment length is not divisible by projection rows")
@@ -1702,37 +2070,36 @@ async fn dispatch_internal_fragment(
                     b"checksum mismatch".to_vec(),
                 );
             }
-            if let Some(parent) = fragment_file.parent() {
-                if tokio::fs::create_dir_all(parent).await.is_err() {
-                    return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            }
-            let temporary = fragment_file.with_extension("tmp");
-            if tokio::fs::write(&temporary, body).await.is_err() {
-                return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
-            }
-            if let Ok(file) = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&temporary)
-                .await
+            match write_fragment_at_rest(
+                &st.cfg,
+                &fragment_file,
+                &object,
+                version,
+                fragment,
+                &disk,
+                body,
+            )
+            .await
             {
-                if file.sync_all().await.is_err() {
-                    let _ = tokio::fs::remove_file(&temporary).await;
-                    return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            }
-            match tokio::fs::rename(temporary, fragment_file).await {
                 Ok(_) => InternalFragmentResult::empty(StatusCode::CREATED),
                 Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
-        ("GET", None) => match tokio::fs::read(fragment_file).await {
-            Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+        ("GET", None) => {
+            match read_fragment_at_rest(&st.cfg, &fragment_file, &object, version, fragment, &disk)
+                .await
+            {
+                Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+                }
+                Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
             }
-            Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
-        },
+        }
         ("DELETE", None) => match tokio::fs::remove_file(fragment_file).await {
             Ok(_) => InternalFragmentResult::empty(StatusCode::NO_CONTENT),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1750,7 +2117,20 @@ async fn dispatch_internal_fragment(
                     )
                 }
             };
-            match read_subchunks(fragment_file, request.alpha, &request.indices).await {
+            match read_subchunks_at_rest(
+                FragmentAtRestRef {
+                    cfg: &st.cfg,
+                    path: &fragment_file,
+                    object: &object,
+                    version,
+                    fragment,
+                    disk: &disk,
+                },
+                request.alpha,
+                &request.indices,
+            )
+            .await
+            {
                 Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
                 Err(error) => InternalFragmentResult::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -1786,9 +2166,22 @@ async fn dispatch_internal_fragment(
                     b"invalid projection matrix shape".to_vec(),
                 );
             }
-            let bytes = match tokio::fs::read(fragment_file).await {
+            let bytes = match read_fragment_at_rest(
+                &st.cfg,
+                &fragment_file,
+                &object,
+                version,
+                fragment,
+                &disk,
+            )
+            .await
+            {
                 Ok(value) => value,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                {
                     return InternalFragmentResult::empty(StatusCode::NOT_FOUND)
                 }
                 Err(_) => return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
@@ -1958,4 +2351,112 @@ pub fn internal_router(st: ClusterState) -> Router {
             post(internal_project),
         )
         .with_state(st)
+}
+
+#[cfg(test)]
+mod at_rest_encryption_tests {
+    use super::*;
+
+    fn encrypted_config() -> ClusterConfig {
+        ClusterConfig {
+            id: "test-cluster".into(),
+            placement_salt: 1,
+            hosts: Vec::new(),
+            replication: 3,
+            write_quorum: 2,
+            chunk_replicas: 1,
+            erasure: None,
+            metadata_key_b64: Some(B64.encode([0x5au8; 32])),
+            join_key_hash_hex: None,
+            transport: DataTransportConfig::default(),
+        }
+    }
+
+    #[test]
+    fn chunked_fragment_envelope_round_trips_and_rejects_plaintext() {
+        let cfg = encrypted_config();
+        let mut plaintext = vec![0x41; FRAGMENT_AEAD_CHUNK_BYTES + 137];
+        plaintext[FRAGMENT_AEAD_CHUNK_BYTES - 1] = 0x42;
+        plaintext[FRAGMENT_AEAD_CHUNK_BYTES] = 0x43;
+        let envelope =
+            protect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &plaintext).unwrap();
+
+        assert!(envelope.starts_with(FRAGMENT_ENVELOPE_MAGIC));
+        assert_ne!(envelope, plaintext);
+        assert_eq!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &envelope).unwrap(),
+            plaintext
+        );
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &plaintext).is_err(),
+            "plaintext must never silently bypass at-rest encryption"
+        );
+    }
+
+    #[test]
+    fn chunked_fragment_envelope_authenticates_header_ciphertext_and_identity() {
+        let cfg = encrypted_config();
+        let envelope =
+            protect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", b"sensitive").unwrap();
+
+        let mut tampered_header = envelope.clone();
+        tampered_header[12] ^= 0x01;
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &tampered_header).is_err()
+        );
+
+        let mut tampered_ciphertext = envelope.clone();
+        let last = tampered_ciphertext.len() - 1;
+        tampered_ciphertext[last] ^= 0x80;
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-a", &tampered_ciphertext)
+                .is_err()
+        );
+
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 7, 2, "disk-b", &envelope).is_err(),
+            "ciphertext relocation to another disk identity must fail authentication"
+        );
+        assert!(
+            unprotect_fragment_at_rest(&cfg, "object-a", 8, 2, "disk-a", &envelope).is_err(),
+            "ciphertext relocation to another object version must fail authentication"
+        );
+    }
+
+    #[tokio::test]
+    async fn range_read_crosses_aead_chunk_boundary_without_full_fragment_read() {
+        let cfg = encrypted_config();
+        let mut plaintext = vec![0u8; FRAGMENT_AEAD_CHUNK_BYTES * 2 + 73];
+        for (index, byte) in plaintext.iter_mut().enumerate() {
+            *byte = (index % 251) as u8;
+        }
+        let path =
+            std::env::temp_dir().join(format!("kagi-fragment-aead-{}.frag", uuid::Uuid::new_v4()));
+        write_fragment_at_rest(&cfg, &path, "object-a", 7, 2, "disk-a", &plaintext)
+            .await
+            .unwrap();
+
+        let start = FRAGMENT_AEAD_CHUNK_BYTES - 31;
+        let length = 127;
+        let range = read_fragment_range_at_rest(
+            FragmentAtRestRef {
+                cfg: &cfg,
+                path: &path,
+                object: "object-a",
+                version: 7,
+                fragment: 2,
+                disk: "disk-a",
+            },
+            start,
+            length,
+        )
+        .await
+        .unwrap();
+        assert_eq!(range, plaintext[start..start + length]);
+
+        let on_disk = tokio::fs::read(&path).await.unwrap();
+        assert_ne!(on_disk, plaintext);
+        assert!(on_disk.starts_with(FRAGMENT_ENVELOPE_MAGIC));
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 }
