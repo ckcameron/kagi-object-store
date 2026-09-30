@@ -2,14 +2,14 @@
 
 # Kagi
 
-**Development release 0.38.0 — experimental; not production-ready.**
+**Development release 0.39.0 — experimental; not production-ready.**
 
 Kagi: a GPU-accelerated, CPU-optimized, CLAY/MSR Erasure-coded Enterprise Object Store.
 **Kagi** is a distributed object-storage, filesystem, block-volume, durability-planning, and cluster-operations system written primarily in Rust.
 
 > **Licensed under [CC BY-NC-SA 4.0](LICENSE).** Copyright (c) 2026 CK Cameron. Third-party exceptions are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Current source edition: **0.38.0**.
+Current source edition: **0.39.0**.
 
 The planner is now `kagi-config`, with atomic periodic checkpoints and resume.
 Optional HIP/ROCm, OpenCL, ISA-L, IPP and AOCL paths supplement CUDA and the
@@ -34,6 +34,39 @@ See [security policy, build and monitoring](docs/SECURITY-POLICY.md),
 [validation results and limitations](BUILD-VALIDATION.md). Kernel protection is
 opt-in and requires the separate BPF build plus target-kernel validation. The
 existing v35 architecture, features, prior fixes and release history are retained.
+
+## Implementation status
+
+The inventory below describes the implemented 0.39 source tree, but not every item has the same
+runtime or validation status. The following boundaries are material:
+
+- **Runtime complete:** replication, Reed-Solomon, product-matrix MSR, CLAY, exact repair,
+  deterministic failure-domain placement, Raft metadata/membership, object versioning,
+  WORM/retention, fenced GC, snapshots/archive state, filesystem namespace/ACL evaluation,
+  sparse block volumes, persistent reservations, the web console, and chunked
+  XChaCha20-Poly1305 fragment encryption are wired into runtime paths.
+- **Planner-only:** LRC is currently a topology/planner protection geometry. There is no LRC
+  runtime codec or persisted LRC object format.
+- **Integration boundary:** Active Directory ACL principals consume SIDs supplied by trusted
+  headers and the identity resolver can use Samba/winbind; Kagi does not yet implement a native
+  LDAP/Kerberos directory client. Fibre Channel support consumes Linux-visible SCSI LUNs rather
+  than implementing an FC stack. VMware and Hyper-V use external iSCSI/image/hypervisor
+  integration rather than native Kagi frontends.
+- **Not yet implemented:** an S3-compatible public API is not present in this source edition;
+  the public object API is Kagi's native REST interface.
+- **Encryption/key rotation boundary:** persisted fragments use authenticated chunked
+  XChaCha20-Poly1305 encryption, but the fragment envelope does not yet carry a key-generation
+  identifier or wrapped DEK. Rotating the configured at-rest root therefore requires an
+  explicit migration/re-encryption procedure for existing fragments.
+- **PQ boundary:** internal requests use ML-DSA-87 and the rustls provider prefers hybrid
+  post-quantum key exchange, but Kagi does not claim that every certificate signature,
+  compatibility transport, or at-rest key-management operation is strictly post-quantum-only.
+- **Hardware/kernel validation boundary:** optional GPU/CPU-library and eBPF paths require the
+  corresponding hardware, libraries, kernel bindings, and privileges for execution validation.
+  A compile/fallback result is not treated as proof that the accelerator or kernel enforcement
+  path executed.
+
+See `BUILD-VALIDATION.md` for the validation environment and known execution limitations.
 
 ## Feature inventory
 
