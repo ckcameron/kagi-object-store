@@ -574,7 +574,10 @@ fn fragment_chunk_plaintext_len(header: FragmentEnvelopeHeader, index: usize) ->
     let start = index
         .checked_mul(header.chunk_bytes)
         .context("encrypted fragment offset overflow")?;
-    Ok(header.plaintext_bytes.saturating_sub(start).min(header.chunk_bytes))
+    Ok(header
+        .plaintext_bytes
+        .saturating_sub(start)
+        .min(header.chunk_bytes))
 }
 
 fn fragment_chunk_nonce(
@@ -597,9 +600,8 @@ fn fragment_chunk_aad(
     header_bytes: &[u8; FRAGMENT_HEADER_BYTES],
     index: usize,
 ) -> Result<Vec<u8>> {
-    let mut aad = Vec::with_capacity(
-        32 + cfg.id.len() + object.len() + disk.len() + header_bytes.len(),
-    );
+    let mut aad =
+        Vec::with_capacity(32 + cfg.id.len() + object.len() + disk.len() + header_bytes.len());
     aad.extend_from_slice(b"KAGI-FRAGMENT-CHUNK-AEAD-V2\\0");
     aad.extend_from_slice(&(cfg.id.len() as u64).to_be_bytes());
     aad.extend_from_slice(cfg.id.as_bytes());
@@ -637,9 +639,8 @@ fn protect_fragment_at_rest(
     };
     let header_bytes = encode_fragment_header(header);
     let chunks = fragment_chunk_count(header);
-    let mut envelope = Vec::with_capacity(
-        FRAGMENT_HEADER_BYTES + plaintext.len() + chunks * FRAGMENT_TAG_BYTES,
-    );
+    let mut envelope =
+        Vec::with_capacity(FRAGMENT_HEADER_BYTES + plaintext.len() + chunks * FRAGMENT_TAG_BYTES);
     envelope.extend_from_slice(&header_bytes);
     for index in 0..chunks {
         let start = index * header.chunk_bytes;
@@ -735,7 +736,10 @@ async fn write_fragment_at_rest(
     }
     let temporary = path.with_extension("tmp");
     tokio::fs::write(&temporary, envelope).await?;
-    let file = tokio::fs::OpenOptions::new().write(true).open(&temporary).await?;
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .await?;
     file.sync_all().await?;
     tokio::fs::rename(&temporary, path).await?;
     Ok(())
@@ -797,7 +801,8 @@ async fn read_fragment_range_at_rest(
             + index
                 .checked_mul(header.chunk_bytes + FRAGMENT_TAG_BYTES)
                 .context("encrypted fragment offset overflow")?;
-        file.seek(std::io::SeekFrom::Start(cipher_offset as u64)).await?;
+        file.seek(std::io::SeekFrom::Start(cipher_offset as u64))
+            .await?;
         let mut ciphertext = vec![0u8; plain_len + FRAGMENT_TAG_BYTES];
         file.read_exact(&mut ciphertext).await?;
         let nonce = fragment_chunk_nonce(&header.nonce_prefix, index)?;
@@ -2080,22 +2085,21 @@ async fn dispatch_internal_fragment(
                 Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
             }
         }
-        ("GET", None) => match read_fragment_at_rest(
-            &st.cfg,
-            &fragment_file,
-            &object,
-            version,
-            fragment,
-            &disk,
-        )
-        .await
-        {
-            Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
-            Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {
-                InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+        ("GET", None) => {
+            match read_fragment_at_rest(&st.cfg, &fragment_file, &object, version, fragment, &disk)
+                .await
+            {
+                Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    InternalFragmentResult::empty(StatusCode::NOT_FOUND)
+                }
+                Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
             }
-            Err(_) => InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
-        },
+        }
         ("DELETE", None) => match tokio::fs::remove_file(fragment_file).await {
             Ok(_) => InternalFragmentResult::empty(StatusCode::NO_CONTENT),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2171,7 +2175,11 @@ async fn dispatch_internal_fragment(
             .await
             {
                 Ok(value) => value,
-                Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) => {
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+                {
                     return InternalFragmentResult::empty(StatusCode::NOT_FOUND)
                 }
                 Err(_) => return InternalFragmentResult::empty(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2343,7 +2351,6 @@ pub fn internal_router(st: ClusterState) -> Router {
         .with_state(st)
 }
 
-
 #[cfg(test)]
 mod at_rest_encryption_tests {
     use super::*;
@@ -2421,28 +2428,18 @@ mod at_rest_encryption_tests {
         for (index, byte) in plaintext.iter_mut().enumerate() {
             *byte = (index % 251) as u8;
         }
-        let path = std::env::temp_dir().join(format!(
-            "kagi-fragment-aead-{}.frag",
-            uuid::Uuid::new_v4()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("kagi-fragment-aead-{}.frag", uuid::Uuid::new_v4()));
         write_fragment_at_rest(&cfg, &path, "object-a", 7, 2, "disk-a", &plaintext)
             .await
             .unwrap();
 
         let start = FRAGMENT_AEAD_CHUNK_BYTES - 31;
         let length = 127;
-        let range = read_fragment_range_at_rest(
-            &cfg,
-            &path,
-            "object-a",
-            7,
-            2,
-            "disk-a",
-            start,
-            length,
-        )
-        .await
-        .unwrap();
+        let range =
+            read_fragment_range_at_rest(&cfg, &path, "object-a", 7, 2, "disk-a", start, length)
+                .await
+                .unwrap();
         assert_eq!(range, plaintext[start..start + length]);
 
         let on_disk = tokio::fs::read(&path).await.unwrap();
