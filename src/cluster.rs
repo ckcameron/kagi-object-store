@@ -1141,25 +1141,6 @@ struct ProjectionRequest {
     coeff_b64: String,
 }
 /// Implements the read subchunks step and keeps its validation and state transitions visible at the call site.
-fn extract_subchunks(data: &[u8], alpha: usize, indices: &[usize]) -> Result<Vec<u8>> {
-    if alpha == 0 || indices.is_empty() {
-        bail!("subchunk request requires alpha>0 and at least one index")
-    }
-    let len = data.len();
-    if len == 0 || !len.is_multiple_of(alpha) {
-        bail!("fragment length {len} is not divisible by alpha={alpha}")
-    }
-    let row_len = len / alpha;
-    let mut out = Vec::with_capacity(indices.len() * row_len);
-    for &idx in indices {
-        if idx >= alpha {
-            bail!("subchunk index {idx} out of range for alpha={alpha}")
-        }
-        let offset = idx * row_len;
-        out.extend_from_slice(&data[offset..offset + row_len]);
-    }
-    Ok(out)
-}
 /// Read only the CLAY subchunks named by the exact-repair plan. Remote peers
 /// receive a signed request and perform positioned reads, so unused subchunks
 /// never cross either the disk or network repair path.
@@ -1172,16 +1153,17 @@ async fn rpc_get_subchunks(
 ) -> Result<Vec<u8>> {
     if loc.host == st.local_host {
         let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
-        let plaintext = read_fragment_at_rest(
+        return read_subchunks_at_rest(
             &st.cfg,
             &path,
             &m.object_id,
             m.version,
             loc.fragment,
             &loc.disk,
+            alpha,
+            indices,
         )
-        .await?;
-        return extract_subchunks(&plaintext, alpha, indices);
+        .await;
     }
     let peer = st
         .cfg
@@ -2131,16 +2113,17 @@ async fn dispatch_internal_fragment(
                     )
                 }
             };
-            match read_fragment_at_rest(
+            match read_subchunks_at_rest(
                 &st.cfg,
                 &fragment_file,
                 &object,
                 version,
                 fragment,
                 &disk,
+                request.alpha,
+                &request.indices,
             )
             .await
-            .and_then(|plaintext| extract_subchunks(&plaintext, request.alpha, &request.indices))
             {
                 Ok(bytes) => InternalFragmentResult::new(StatusCode::OK, bytes),
                 Err(error) => InternalFragmentResult::new(
