@@ -500,7 +500,7 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     Ok(v.try_into().unwrap())
 }
 const PQ_METADATA_SUITE: &str = "XChaCha20-Poly1305-PQ128+BLAKE3-KDF+AAD+JSON+base64";
-const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR2\\0";
+const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR2\0";
 const FRAGMENT_HEADER_BYTES: usize = 8 + 4 + 8 + 16;
 const FRAGMENT_NONCE_PREFIX_BYTES: usize = 16;
 const FRAGMENT_NONCE_BYTES: usize = 24;
