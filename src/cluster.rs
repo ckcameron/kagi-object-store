@@ -2446,21 +2446,20 @@ mod at_rest_encryption_tests {
 
         let start = FRAGMENT_AEAD_CHUNK_BYTES - 31;
         let length = 127;
-        let range =
-            read_fragment_range_at_rest(
-                FragmentAtRestRef {
-                    cfg: &cfg,
-                    path: &path,
-                    object: "object-a",
-                    version: 7,
-                    fragment: 2,
-                    disk: "disk-a",
-                },
-                start,
-                length,
-            )
-            .await
-            .unwrap();
+        let range = read_fragment_range_at_rest(
+            FragmentAtRestRef {
+                cfg: &cfg,
+                path: &path,
+                object: "object-a",
+                version: 7,
+                fragment: 2,
+                disk: "disk-a",
+            },
+            start,
+            length,
+        )
+        .await
+        .unwrap();
         assert_eq!(range, plaintext[start..start + length]);
 
         let on_disk = tokio::fs::read(&path).await.unwrap();
