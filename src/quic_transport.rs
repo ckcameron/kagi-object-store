@@ -290,3 +290,98 @@ async fn read_response(recv: &mut quinn::RecvStream, max_body_bytes: usize) -> R
         body,
     })
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    struct Echo;
+    #[async_trait::async_trait]
+    impl Handler for Echo {
+        async fn handle(&self, request: Request) -> Response {
+            if request.meta.path == "/denied" {
+                return Response::error(403, "denied");
+            }
+            Response {
+                status: 200,
+                message: String::new(),
+                body: request.body,
+            }
+        }
+    }
+    #[tokio::test]
+    async fn tls_loopback_transfer_bounds_application_error_and_disconnect() {
+        let root = std::env::temp_dir().join(format!("kagi-quic-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let cert = root.join("cert.pem");
+        let key = root.join("key.pem");
+        let status = tokio::process::Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost",
+                "-addext",
+                "basicConstraints=critical,CA:FALSE",
+                "-keyout",
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let tls = crate::tls::server_config(&cert, &key, false).unwrap();
+        let (endpoint, limit) =
+            server_endpoint("127.0.0.1:0".parse().unwrap(), tls, 1024 * 1024).unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let close = endpoint.clone();
+        let server = tokio::spawn(serve(endpoint, limit, Arc::new(Echo)));
+        let client = Client::new(&cert, limit).unwrap();
+        let meta = RequestMeta {
+            method: "PUT".into(),
+            path: "/echo".into(),
+            headers: BTreeMap::new(),
+        };
+        for data in [vec![], vec![0x53; 128 * 1024]] {
+            let response = client
+                .request(addr, "localhost", meta.clone(), &data)
+                .await
+                .unwrap();
+            assert_eq!(response.ensure_success().unwrap(), data);
+        }
+        assert!(client
+            .request(addr, "localhost", meta.clone(), &vec![0; limit + 1])
+            .await
+            .is_err());
+        let mut denied = meta.clone();
+        denied.path = "/denied".into();
+        let response = client
+            .request(addr, "localhost", denied, b"")
+            .await
+            .unwrap();
+        assert_eq!(response.status, 403);
+        assert!(response.ensure_success().is_err());
+        close.close(0u32.into(), b"test shutdown");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.request(addr, "localhost", meta, b"after shutdown"),
+        )
+        .await;
+        assert!(result.is_err() || result.unwrap().is_err());
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

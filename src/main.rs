@@ -11,6 +11,10 @@
 mod checkpoint;
 mod durability;
 
+// Link the core's native accelerator libraries for this binary's Monte Carlo FFI.
+#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+use kagi_object_store as _;
+
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use blake3::Hasher;

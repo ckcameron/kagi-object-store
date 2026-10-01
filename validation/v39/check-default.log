@@ -1,0 +1,40 @@
+    Blocking waiting for file lock on build directory
+    Checking yoke v0.8.3
+    Checking hashbrown v0.17.1
+    Checking num-traits v0.2.19
+    Checking getrandom v0.4.3
+   Compiling kagi-object-store v0.39.0 (<workspace>)
+    Checking zerovec v0.11.8
+    Checking indexmap v2.14.2
+    Checking zerotrie v0.2.5
+    Checking chrono v0.4.45
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+    Checking icu_collections v2.3.0
+    Checking icu_locale_core v2.3.0
+    Checking h2 v0.4.19
+    Checking approx v0.5.1
+    Checking atoi v3.1.0
+    Checking lru v0.18.5
+    Checking serde_yaml v0.9.34+deprecated
+    Checking icu_provider v2.3.1
+    Checking reed-solomon-erasure v6.0.0 (<workspace>/vendor/reed-solomon-erasure)
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+    Checking chrono-tz v0.10.4
+    Checking statrs v0.18.0
+    Checking uuid v1.26.1
+    Checking idna_adapter v1.2.2
+    Checking plotters v0.3.7
+    Checking idna v1.1.0
+    Checking url v2.5.8
+    Checking hyper v1.11.1
+    Checking tower-http v0.6.11
+    Checking criterion v0.5.1
+    Checking hyper-util v0.1.21
+    Checking s3s v0.17.0
+    Checking hyper-rustls v0.27.10
+    Checking axum-server v0.8.0
+    Checking reqwest v0.12.28
+    Checking axum v0.7.9
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 50s

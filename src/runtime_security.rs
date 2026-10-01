@@ -63,7 +63,19 @@ pub fn audit_config(cfg: &NodeConfig) -> Vec<Finding> {
             "Use authenticated TLS termination for every peer endpoint.",
         ));
     }
-    if cfg.cluster.metadata_key_b64.is_none() {
+    if cfg
+        .cluster
+        .hosts
+        .iter()
+        .any(|host| host.rdma_endpoint.is_some())
+    {
+        findings.push(finding(
+            "transport.rdma_unavailable", "warning", "cluster",
+            "RDMA endpoints are configured, but this build has no RDMA data-movement backend.",
+            "Use the authenticated HTTPS/QUIC transport; RDMA configuration does not enable RDMA transfers.",
+        ));
+    }
+    if cfg.cluster.metadata_key_b64.is_none() && cfg.cluster.active_key_id.is_none() {
         findings.push(finding(
             "metadata.unencrypted",
             "warning",

@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
 [advisories]
-# These are transitive maintenance advisories with no compatible replacement
-# in the current upstream dependency chains. cargo audit remains a separate CI
-# gate for vulnerabilities; keep this list narrow and remove entries as soon as
-# their parent crates migrate.
-ignore = [
-    "RUSTSEC-2024-0384", # instant via reed-solomon-erasure -> parking_lot 0.11
-    "RUSTSEC-2024-0436", # paste via statrs -> nalgebra -> simba
-]
+
 
 [sources]
 unknown-registry = "deny"

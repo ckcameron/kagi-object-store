@@ -23,4 +23,6 @@ jobs:
       - run: cargo check --all-targets --features ebpf
       - run: cargo test --all-targets --features ebpf
       - run: cargo clippy --all-targets --features ebpf -- -D warnings
+      - run: cargo test --all-targets --features quic,ebpf,scsi-target,rdma
+      - run: cargo clippy --all-targets --features quic,ebpf,scsi-target,rdma -- -D warnings
       - run: cargo bench --bench erasure --no-run
