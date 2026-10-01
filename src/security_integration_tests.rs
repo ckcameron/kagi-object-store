@@ -376,3 +376,219 @@ async fn scsi_bridge_authentication_conflict_and_persistence() {
     raft.abort();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn gc_fence_binds_replica_and_rechecks_retention_after_restart() {
+    let (st, root) = fixture().await;
+    let raft = tokio::spawn(st.meta.clone().run());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !st.meta.is_leader().await {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let manifest: ObjectManifest = serde_json::from_value(serde_json::json!({
+        "key":"bucket/gc", "object_id":"gc-victim", "version":1, "bytes":4,
+        "checksum":"test", "committed_at_unix_ms":0,
+        "chunks":[{"chunk":0,"bytes":4,"checksum":"test","replicas":[{"host":st.data.local_host,"disk":"gc-disk","checksum":"test"}]}]
+    })).unwrap();
+    st.meta
+        .propose(MetadataCommand::PutManifest {
+            key: manifest.key.clone(),
+            manifest: manifest.clone(),
+        })
+        .await
+        .unwrap();
+    st.meta
+        .propose(MetadataCommand::DeleteManifest {
+            key: manifest.key.clone(),
+            version: 1,
+            deleted_at_unix_ms: 0,
+            eligible_after_unix_ms: 0,
+        })
+        .await
+        .unwrap();
+    st.meta
+        .propose(MetadataCommand::AuthorizeGarbage {
+            id: "gc-victim:1".into(),
+        })
+        .await
+        .unwrap();
+    let restored = MetadataStore::open(root.join("metadata"))
+        .await
+        .unwrap()
+        .state()
+        .await;
+    let g = restored.garbage["gc-victim:1"].clone();
+    let term = st.meta.status().await.term;
+    let req = GcDeleteRequest {
+        term,
+        leader_id: st.meta.node_id.clone(),
+        garbage_id: g.id.clone(),
+        fence_index: g.fence_index,
+        object_id: g.manifest.object_id.clone(),
+        version: 1,
+        fragment: 0,
+        disk: "gc-disk".into(),
+    };
+    assert!(gc_delete_authorized(
+        &restored,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    assert!(!gc_delete_authorized(&restored, &req, "other-host", 10));
+    let mut altered = restored.clone();
+    altered.applied_index = g.fence_index - 1;
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    let mut altered = restored.clone();
+    altered
+        .garbage
+        .get_mut(&g.id)
+        .unwrap()
+        .eligible_after_unix_ms = 11;
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    altered
+        .garbage
+        .get_mut(&g.id)
+        .unwrap()
+        .eligible_after_unix_ms = 0;
+    altered
+        .garbage
+        .get_mut(&g.id)
+        .unwrap()
+        .manifest
+        .worm
+        .legal_hold = true;
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    let mut altered = restored.clone();
+    altered
+        .versions
+        .insert(manifest.key.clone(), vec![manifest.clone()]);
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    let mut altered = restored.clone();
+    altered.snapshots.insert(
+        "snapshot".into(),
+        SnapshotRecord {
+            id: "snapshot".into(),
+            name: "snapshot".into(),
+            created_at_unix_ms: 0,
+            raft_index: 1,
+            prefix: None,
+            mode: SnapshotMode::PointInTime,
+            logical_bytes: 4,
+            delta_bytes: 0,
+            archived_bytes: 0,
+            objects: BTreeMap::from([(
+                manifest.key.clone(),
+                SnapshotObject {
+                    key: manifest.key.clone(),
+                    version: 1,
+                    source: manifest.clone(),
+                    archived: None,
+                },
+            )]),
+        },
+    );
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    altered.snapshots.get_mut("snapshot").unwrap().mode = SnapshotMode::Archived;
+    // An incomplete historical archive record must retain its source bytes.
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    let mut archive = manifest.clone();
+    archive.object_id = "separate-archive".into();
+    altered
+        .snapshots
+        .get_mut("snapshot")
+        .unwrap()
+        .objects
+        .get_mut(&manifest.key)
+        .unwrap()
+        .archived = Some(archive);
+    assert!(gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+    altered
+        .snapshots
+        .get_mut("snapshot")
+        .unwrap()
+        .objects
+        .get_mut(&manifest.key)
+        .unwrap()
+        .archived = Some(manifest.clone());
+    assert!(!gc_delete_authorized(
+        &altered,
+        &req,
+        &st.data.local_host,
+        10
+    ));
+
+    let replica = manifest.chunks[0].replicas[0].clone();
+    let path = fragment_path(&st.data.root, &replica.disk, &manifest.object_id, 1, 0);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"keep").unwrap();
+    let mut wrong = g.clone();
+    wrong.manifest.object_id = "another-object".into();
+    assert!(delete_gc_replica(&st, &wrong, 0, &replica, term)
+        .await
+        .is_err());
+    wrong = g.clone();
+    wrong.version = 2;
+    assert!(delete_gc_replica(&st, &wrong, 0, &replica, term)
+        .await
+        .is_err());
+    wrong = g.clone();
+    wrong.fence_index = 0;
+    assert!(delete_gc_replica(&st, &wrong, 0, &replica, term)
+        .await
+        .is_err());
+    assert!(delete_gc_replica(&st, &g, 1, &replica, term).await.is_err());
+    let mut wrong_disk = replica.clone();
+    wrong_disk.disk = "another-disk".into();
+    assert!(delete_gc_replica(&st, &g, 0, &wrong_disk, term)
+        .await
+        .is_err());
+    assert!(delete_gc_replica(&st, &g, 0, &replica, term + 1)
+        .await
+        .is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"keep");
+    delete_gc_replica(&st, &g, 0, &replica, term).await.unwrap();
+    assert!(!path.exists());
+    delete_gc_replica(&st, &g, 0, &replica, term).await.unwrap();
+    raft.abort();
+    let _ = raft.await;
+    fs::remove_dir_all(root).unwrap();
+}

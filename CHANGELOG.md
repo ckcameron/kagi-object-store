@@ -6,6 +6,7 @@ Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 
 ## 0.39.0 (development) — accelerated transports, hardened telemetry, validation and benchmarking
 
+- Bind GC deletion fences to recorded local replicas and recheck retention and references on both local and remote deletion paths; preserve incomplete archive sources.
 - Upgrade transitive cache dependencies to remove the LRU memory-safety advisory;
   remove unused statistical linear-algebra dependencies and advisory exceptions.
 - Repair verifies replica contents before retaining placements, so missing or
