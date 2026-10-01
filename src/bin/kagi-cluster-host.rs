@@ -1920,6 +1920,56 @@ async fn volume_pr_cdb(
     }
 }
 
+/// Bind a destructive GC fence to one recorded local replica and recheck retention
+/// against the currently applied metadata. A record ID alone is not authorization
+/// to delete an arbitrary path supplied by a worker.
+fn gc_delete_authorized(
+    ms: &raftmeta::MetadataState,
+    req: &GcDeleteRequest,
+    local_host: &str,
+    now: u128,
+) -> bool {
+    let Some(g) = ms.garbage.get(&req.garbage_id) else {
+        return false;
+    };
+    if req.fence_index == 0
+        || ms.applied_index < req.fence_index
+        || g.fence_index != req.fence_index
+        || g.id != req.garbage_id
+        || g.manifest.object_id != req.object_id
+        || g.version != req.version
+        || g.manifest.version != req.version
+        || g.eligible_after_unix_ms > now
+        || g.manifest.worm.immutable(now)
+    {
+        return false;
+    }
+    let matches = |m: &ObjectManifest| m.object_id == req.object_id && m.version == req.version;
+    if ms.manifests.values().any(matches)
+        || ms.versions.values().flatten().any(matches)
+        || ms
+            .s3_uploads
+            .values()
+            .any(|u| u.parts.values().any(|p| matches(&p.manifest)))
+        || ms.snapshots.values().any(|snapshot| {
+            snapshot.objects.values().any(|object| {
+                ((snapshot.mode != SnapshotMode::Archived || object.archived.is_none())
+                    && matches(&object.source))
+                    || object.archived.as_ref().is_some_and(matches)
+            })
+        })
+    {
+        return false;
+    }
+    normalize_chunks(&g.manifest).iter().any(|chunk| {
+        chunk.chunk == req.fragment
+            && chunk
+                .replicas
+                .iter()
+                .any(|replica| replica.host == local_host && replica.disk == req.disk)
+    })
+}
+
 /// Implements the gc delete in step and keeps its validation and state transitions visible at the call site.
 async fn gc_delete_in(
     State(st): State<V6State>,
@@ -1937,16 +1987,10 @@ async fn gc_delete_in(
         return (StatusCode::CONFLICT, "stale or non-leader GC fence").into_response();
     }
     let ms = st.meta.store.state().await;
-    let committed = ms.applied_index >= req.fence_index
-        && ms
-            .garbage
-            .get(&req.garbage_id)
-            .map(|g| g.fence_index == req.fence_index)
-            .unwrap_or(false);
-    if !committed {
+    if !gc_delete_authorized(&ms, &req, &st.data.local_host, now_ms()) {
         return (
             StatusCode::CONFLICT,
-            "GC authorization not committed/applied on this voter",
+            "GC fence does not authorize this unreferenced, retention-eligible local replica",
         )
             .into_response();
     }
@@ -1989,6 +2033,19 @@ async fn delete_gc_replica(
         disk: r.disk.clone(),
     };
     if r.host == st.data.local_host {
+        let status = st.meta.status().await;
+        anyhow::ensure!(
+            st.meta.is_leader().await
+                && status.term == req.term
+                && status.leader.as_deref() == Some(req.leader_id.as_str()),
+            "stale or non-leader GC fence"
+        );
+        let ms = st.meta.store.state().await;
+        anyhow::ensure!(
+            gc_delete_authorized(&ms, &req, &st.data.local_host, now_ms()),
+            "GC fence does not authorize this local replica"
+        );
+
         let p = fragment_path(
             &st.data.root,
             &r.disk,

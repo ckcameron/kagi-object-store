@@ -181,7 +181,8 @@ kagi-config \
 - Bucket versioning setting.
 - Raft-fenced garbage collection.
 - Grace periods before destructive reclamation.
-- Leader-only GC authorization fences.
+- Leader-only GC authorization fences, bound to the recorded object, version, fragment, disk, and destination host.
+- Deletion rechecks grace, WORM, live versions, multipart references, and snapshot/archive references in applied metadata; an incomplete archive keeps its source pinned.
 - Idempotent physical deletion.
 - Defense-in-depth checks that prevent reclaiming snapshot-pinned or retention-protected versions.
 

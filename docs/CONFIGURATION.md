@@ -318,3 +318,11 @@ With `scsi-target`, administrator-authenticated `POST /v1/volumes/:id/pr/cdb`
 accepts `{cdb: [bytes], parameters: [bytes], initiator: string}` and dispatches PR
 IN/OUT through the existing replicated reservation state. This is a target bridge,
 not a native iSCSI/FC target daemon.
+
+Garbage collection checks `grace_period_ms` eligibility again at deletion time,
+using the destination's applied metadata and clock. A committed, nonzero fence
+must identify the exact recorded replica. Retained live versions, active multipart
+parts, legal holds and snapshot/archive references prevent deletion. An archived
+snapshot entry without an archive manifest continues pinning its source. A
+lagging follower or clock can defer deletion; retries do not bypass these checks.
+No additional configuration is required for these receiver-side safeguards.
