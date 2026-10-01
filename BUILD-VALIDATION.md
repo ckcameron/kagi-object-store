@@ -137,7 +137,9 @@ Validated locally on x86-64 Linux with Rust/Cargo 1.99.0-beta.7:
 | `cargo test --all-targets --all-features` | 140 reported passed; two ignored provider/kernel tests; accelerator fallback is not execution evidence |
 | `cargo audit` | Passed with no advisory warnings |
 | `cargo deny check advisories sources` | Passed without advisory exceptions |
-| Repository CI/security workflow | Miri, ASan and supply-chain jobs passed on initial PR revision; fuzz and final CI still pending |
+| Repository security workflow at `d0032bf` | Miri, ASan, fuzz smoke and supply-chain passed; scheduled-only TSan skipped |
+| Repository Rust CI at `d0032bf` | Formatting, checks, tests and strict Clippy passed; benchmark compilation pending at this checkpoint |
+| Patched upstream Reed-Solomon library tests | 99 passed in an isolated copy of the vendored package |
 
 The S3 integration test uses curl's independent SigV4 implementation against the
 actual HTTP service, including bucket/object operations, multipart completion,
@@ -163,3 +165,9 @@ AOCL's copy test executed and passed. These are explicit environment limitations
 not waived passing hardware results. The expanded signed S3 test also verifies
 206/416 ranges, failed conditional writes, checksum rejection with no object
 published, unsupported ACL rejection, and multipart listings.
+
+Repository execution evidence: [security workflow](https://github.com/ckcameron/kagi-object-store/actions/runs/36815539519)
+and [Rust workflow](https://github.com/ckcameron/kagi-object-store/actions/runs/36815539663).
+These links identify the tested revision; consult PR checks for later revisions.
+The vendored source includes its upstream benchmark and algebra-reference files,
+so its own test manifest remains usable independently of the Kagi package.
