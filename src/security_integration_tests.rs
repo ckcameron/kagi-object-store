@@ -4,12 +4,16 @@ use crate::runtime_security;
 use crate::*;
 
 /// Use a real HTTP router and isolated metadata store without starting a cluster.
-async fn fixture() -> (V6State, PathBuf) {
+pub(crate) async fn fixture() -> (V6State, PathBuf) {
     let root = std::env::temp_dir().join(format!("kagi-security-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let mut cfg: NodeConfig =
         serde_yaml::from_str(include_str!("../examples/node-v6.example.yaml")).unwrap();
     cfg.data_root = root.clone();
+    cfg.cluster.metadata_key_b64 = Some(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        [0x5au8; 32],
+    ));
     // This fixture exercises the HTTP security gate only. Keep its transport local so
     // feature-enabled test builds do not attempt to initialize the example QUIC peer
     // with the documentation-only /etc/kagi PKI paths.
@@ -198,5 +202,177 @@ async fn http_gate_and_monitoring_authentication() {
     drop(stream);
     server.abort();
     drop(st);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn console_roles_and_bucket_state_survive_reopen() {
+    let (st, root) = fixture().await;
+    webui::upsert_user(
+        &st.web_console.userdb,
+        "admin",
+        "admin-test-password",
+        ConsoleRole::Admin,
+    )
+    .unwrap();
+    let raft = tokio::spawn(st.meta.clone().run());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !st.meta.is_leader().await {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let app = Router::new()
+        .route("/ui/api/buckets", get(ui_buckets).post(ui_bucket_put))
+        .with_state(st.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/ui/api/buckets", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let bucket = serde_json::json!({"name":"protected", "versioning":true});
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .basic_auth("viewer", Some("test-only-password"))
+            .json(&bucket)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .basic_auth("admin", Some("admin-test-password"))
+            .json(&bucket)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let result: serde_json::Value = client
+        .get(&url)
+        .basic_auth("viewer", Some("test-only-password"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(result["protected"]["versioning"], true);
+    let reopened = MetadataStore::open(root.join("metadata")).await.unwrap();
+    assert!(reopened.state().await.buckets["protected"].versioning);
+    server.abort();
+    raft.abort();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "scsi-target")]
+#[tokio::test]
+async fn scsi_bridge_authentication_conflict_and_persistence() {
+    let (st, root) = fixture().await;
+    webui::upsert_user(
+        &st.web_console.userdb,
+        "admin",
+        "admin-test-password",
+        ConsoleRole::Admin,
+    )
+    .unwrap();
+    let raft = tokio::spawn(st.meta.clone().run());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !st.meta.is_leader().await {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let volume: VolumeCreate = serde_json::from_value(
+        serde_json::json!({"id":"test-volume", "name":"test", "size_bytes":4194304}),
+    )
+    .unwrap();
+    assert_eq!(
+        volume_create(State(st.clone()), Json(volume))
+            .await
+            .into_response()
+            .status(),
+        StatusCode::CREATED
+    );
+    let app = Router::new()
+        .route("/pr/:id", axum::routing::post(volume_pr_cdb))
+        .with_state(st.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/pr/test-volume", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    let mut cdb = vec![0u8; 10];
+    cdb[0] = 0x5f;
+    cdb[8] = 24;
+    let mut params = vec![0u8; 24];
+    params[8..16].copy_from_slice(&123u64.to_be_bytes());
+    let register = serde_json::json!({"cdb":cdb,"parameters":params,"initiator":"initiator-a"});
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&register)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .basic_auth("admin", Some("admin-test-password"))
+            .json(&register)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    cdb[1] = 1;
+    cdb[2] = 1;
+    params[0..8].copy_from_slice(&999u64.to_be_bytes());
+    let conflict = serde_json::json!({"cdb":cdb,"parameters":params,"initiator":"initiator-a"});
+    assert_eq!(
+        client
+            .post(&url)
+            .basic_auth("admin", Some("admin-test-password"))
+            .json(&conflict)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let read = serde_json::json!({"cdb":[94,0,0,0,0,0,0,0,16,0],"initiator":"initiator-a"});
+    let response = client
+        .post(&url)
+        .basic_auth("admin", Some("admin-test-password"))
+        .json(&read)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.bytes().await.unwrap();
+    assert_eq!(&bytes[8..16], &123u64.to_be_bytes());
+    let reopened = MetadataStore::open(root.join("metadata")).await.unwrap();
+    assert_eq!(
+        reopened.state().await.volumes["test-volume"]
+            .persistent_reservation
+            .registrations["initiator-a"]
+            .key,
+        123
+    );
+    server.abort();
+    raft.abort();
     fs::remove_dir_all(root).unwrap();
 }

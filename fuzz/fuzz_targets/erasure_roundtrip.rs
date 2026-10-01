@@ -21,10 +21,11 @@ fuzz_target!(|input: &[u8]| {
         return;
     }
 
-    let scheme = match input[0] % 3 {
+    let scheme = match input[0] % 4 {
         0 => ErasureScheme::ReedSolomon,
         1 => ErasureScheme::Clay,
-        _ => ErasureScheme::Msr,
+        2 => ErasureScheme::Msr,
+        _ => ErasureScheme::Lrc,
     };
     let k = 1 + input[1] as usize % 8;
     let m = 1 + input[2] as usize % 8;

@@ -45,19 +45,20 @@ runtime or validation status. The following boundaries are material:
   WORM/retention, fenced GC, snapshots/archive state, filesystem namespace/ACL evaluation,
   sparse block volumes, persistent reservations, the web console, and chunked
   XChaCha20-Poly1305 fragment encryption are wired into runtime paths.
-- **Planner-only:** LRC is currently a topology/planner protection geometry. There is no LRC
-  runtime codec or persisted LRC object format.
-- **Integration boundary:** Active Directory ACL principals consume SIDs supplied by trusted
-  headers and the identity resolver can use Samba/winbind; Kagi does not yet implement a native
-  LDAP/Kerberos directory client. Fibre Channel support consumes Linux-visible SCSI LUNs rather
-  than implementing an FC stack. VMware and Hyper-V use external iSCSI/image/hypervisor
-  integration rather than native Kagi frontends.
-- **Not yet implemented:** an S3-compatible public API is not present in this source edition;
-  the public object API is Kagi's native REST interface.
-- **Encryption/key rotation boundary:** persisted fragments use authenticated chunked
-  XChaCha20-Poly1305 encryption, but the fragment envelope does not yet carry a key-generation
-  identifier or wrapped DEK. Rotating the configured at-rest root therefore requires an
-  explicit migration/re-encryption procedure for existing fragments.
+- **Runtime LRC:** the CPU LRC v1 codec persists its scheme/k/m, reconstructs by
+  matrix rank and repairs through local helpers. Its geometry is narrower than
+  the planner's LRC family; see [runtime LRC](docs/LRC.md).
+- **Directory integration:** native NSS user/group resolution supports configured
+  LDAP/SSSD/winbind providers and optional AD user/group SIDs. LDAP binds and
+  Kerberos authentication remain with the host provider. See
+  [directory identities](docs/DIRECTORY-IDENTITY.md). Fibre Channel consumes
+  Linux-visible SCSI LUNs; VMware/Hyper-V use external integration helpers.
+- **Experimental S3 subset:** a separately authenticated listener implements core
+  bucket/object/list/multipart operations over Kagi storage and Raft. It is not
+  full AWS S3/IAM conformance; see [supported operations and limits](docs/S3.md).
+- **At-rest key generations:** keyring-based rotation preserves legacy reads and
+  authenticated chunk range reads. Retiring keys still requires migration of all
+  historical versions, snapshots and backups. See [rotation](docs/AT-REST-ROTATION.md).
 - **PQ boundary:** internal requests use ML-DSA-87 and the rustls provider prefers hybrid
   post-quantum key exchange, but Kagi does not claim that every certificate signature,
   compatibility transport, or at-rest key-management operation is strictly post-quantum-only.

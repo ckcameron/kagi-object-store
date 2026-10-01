@@ -151,6 +151,9 @@ pub enum NamespaceMutation {
                                                 // Every externally visible metadata mutation is represented here so commit/apply
                                                 // ordering can be shared by objects, snapshots, topology, volumes, and PR state.
 pub enum MetadataCommand {
+    S3 {
+        mutation: crate::s3::Mutation,
+    },
     NamespaceTransaction {
         txid: String,
         mutations: Vec<NamespaceMutation>,
@@ -262,6 +265,10 @@ pub enum MetadataCommand {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MetadataState {
+    #[serde(default)]
+    pub s3_uploads: BTreeMap<String, crate::s3::Upload>,
+    #[serde(default)]
+    pub s3_attributes: BTreeMap<String, crate::s3::Attributes>,
     pub manifests: BTreeMap<String, ObjectManifest>,
     #[serde(default)]
     pub versions: BTreeMap<String, Vec<ObjectManifest>>,
@@ -361,7 +368,7 @@ pub struct MetadataStore {
     state: Arc<RwLock<MetadataState>>,
 }
 /// Implements the apply namespace mutation step and keeps its validation and state transitions visible at the call site.
-fn apply_namespace_mutation(s: &mut MetadataState, m: NamespaceMutation) {
+pub(crate) fn apply_namespace_mutation(s: &mut MetadataState, m: NamespaceMutation) {
     match m {
         NamespaceMutation::PutManifest { key, manifest } => {
             let manifest = *manifest;
@@ -541,15 +548,21 @@ impl MetadataStore {
             MetadataCommand::ArchiveSnapshotObject { id, key, manifest } => {
                 if let Some(x) = s.snapshots.get_mut(&id) {
                     if let Some(o) = x.objects.get_mut(&key) {
-                        x.archived_bytes = x.archived_bytes.saturating_add(manifest.bytes);
+                        let previous = o.archived.as_ref().map_or(0, |m| m.bytes);
+                        x.archived_bytes = x
+                            .archived_bytes
+                            .saturating_sub(previous)
+                            .saturating_add(manifest.bytes);
                         o.archived = Some(manifest);
                     }
                 }
             }
             MetadataCommand::FinishSnapshotArchive { id } => {
                 if let Some(x) = s.snapshots.get_mut(&id) {
-                    x.mode = SnapshotMode::Archived;
-                    x.delta_bytes = 0;
+                    if x.objects.values().all(|o| o.archived.is_some()) {
+                        x.mode = SnapshotMode::Archived;
+                        x.delta_bytes = 0;
+                    }
                 }
             }
             MetadataCommand::AddCapacity { host, disk } => {
@@ -650,6 +663,7 @@ impl MetadataStore {
             MetadataCommand::DeleteVolume { id } => {
                 s.volumes.remove(&id);
             }
+            MetadataCommand::S3 { mutation } => crate::s3::apply(&mut s, mutation),
             MetadataCommand::PutBucket { bucket } => {
                 s.buckets.insert(bucket.name.clone(), bucket);
             }
@@ -714,6 +728,8 @@ pub struct RaftNode {
     election_max_ms: u64,
     heartbeat_ms: u64,
     pq_identity: LocalPqIdentity,
+    proposal_lock: Arc<tokio::sync::Mutex<()>>,
+    persistence_lock: Arc<tokio::sync::Mutex<()>>,
 }
 // ---- Raft election, replication, barriers, and joint consensus -----------------
 impl RaftNode {
@@ -747,6 +763,8 @@ impl RaftNode {
             election_max_ms: timing.election_max_ms,
             heartbeat_ms: timing.heartbeat_ms,
             pq_identity,
+            proposal_lock: Arc::new(tokio::sync::Mutex::new(())),
+            persistence_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         n.apply_committed().await?;
         Ok(n)
@@ -771,6 +789,7 @@ impl RaftNode {
         self.membership().await.quorum()
     }
     async fn persist(&self) -> Result<()> {
+        let _guard = self.persistence_lock.lock().await;
         let p = self.persistent.read().await.clone();
         let tmp = self.root.join("raft.tmp");
         tokio::fs::write(&tmp, serde_json::to_vec(&p)?).await?;
@@ -935,6 +954,7 @@ impl RaftNode {
         .await?)
     }
     pub async fn propose(&self, cmd: MetadataCommand) -> Result<u64> {
+        let _guard = self.proposal_lock.lock().await;
         if !self.is_leader().await {
             bail!("not raft leader; leader={:?}", *self.leader.read().await)
         }
@@ -984,7 +1004,7 @@ impl RaftNode {
                         self.step_down(ar.term, None).await?;
                         bail!("higher raft term observed")
                     }
-                    if ar.success {
+                    if ar.success && ar.match_index >= entry.index {
                         acked.insert(peer.id.clone());
                     }
                 }
@@ -1007,7 +1027,10 @@ impl RaftNode {
         }
         {
             let mut p = self.persistent.write().await;
-            p.commit_index = entry.index
+            if p.current_term != term || !self.is_leader().await {
+                bail!("leadership changed during proposal")
+            }
+            p.commit_index = p.commit_index.max(entry.index)
         }
         self.persist().await?;
         self.apply_committed().await?;
@@ -1084,6 +1107,9 @@ impl RaftNode {
                 acked
             )
         }
+        if self.persistent.read().await.current_term != p.current_term || !self.is_leader().await {
+            bail!("leadership changed during read barrier")
+        }
         Ok(())
     }
     async fn send_heartbeat(&self) {
@@ -1144,6 +1170,7 @@ impl RaftNode {
         }
     }
     pub async fn change_membership(&self, new_membership: Membership) -> Result<(u64, u64)> {
+        let _guard = self.proposal_lock.lock().await;
         if !self.is_leader().await {
             bail!("not raft leader")
         }
@@ -1245,7 +1272,7 @@ impl RaftNode {
                         self.step_down(ar.term, None).await?;
                         bail!("higher raft term observed")
                     }
-                    if ar.success {
+                    if ar.success && ar.match_index >= entry.index {
                         acked.insert(peer.id.clone());
                     }
                 }
@@ -1266,7 +1293,10 @@ impl RaftNode {
         }
         {
             let mut p = self.persistent.write().await;
-            p.commit_index = entry.index
+            if p.current_term != term || !self.is_leader().await {
+                bail!("leadership changed during membership proposal")
+            }
+            p.commit_index = p.commit_index.max(entry.index)
         }
         self.persist().await?;
         self.apply_committed().await?;
@@ -1358,5 +1388,229 @@ impl RaftNode {
                 *self.role.write().await = Role::Follower
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[tokio::test]
+    async fn archive_replay_and_gc_fence_survive_restart() {
+        let (state, root) = crate::security_integration_tests::fixture().await;
+        let store = state.meta.store;
+        let manifest: ObjectManifest = serde_json::from_value(serde_json::json!({
+            "key":"bucket/file", "object_id":"source", "version":1,
+            "bytes":17, "checksum":"test", "committed_at_unix_ms":0
+        }))
+        .unwrap();
+        store
+            .apply(
+                1,
+                MetadataCommand::PutManifest {
+                    key: manifest.key.clone(),
+                    manifest: manifest.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                2,
+                MetadataCommand::CreateSnapshot {
+                    snapshot: SnapshotRecord {
+                        id: "snapshot".into(),
+                        name: "snapshot".into(),
+                        created_at_unix_ms: 0,
+                        raft_index: 1,
+                        prefix: None,
+                        mode: SnapshotMode::PointInTime,
+                        objects: BTreeMap::from([(
+                            manifest.key.clone(),
+                            SnapshotObject {
+                                key: manifest.key.clone(),
+                                version: 1,
+                                source: manifest.clone(),
+                                archived: None,
+                            },
+                        )]),
+                        logical_bytes: 17,
+                        delta_bytes: 0,
+                        archived_bytes: 0,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                3,
+                MetadataCommand::BeginSnapshotArchive {
+                    id: "snapshot".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                4,
+                MetadataCommand::FinishSnapshotArchive {
+                    id: "snapshot".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.state().await.snapshots["snapshot"].mode,
+            SnapshotMode::Archiving
+        ));
+        let mut archive = manifest.clone();
+        archive.object_id = "archive".into();
+        for index in [5, 6] {
+            store
+                .apply(
+                    index,
+                    MetadataCommand::ArchiveSnapshotObject {
+                        id: "snapshot".into(),
+                        key: manifest.key.clone(),
+                        manifest: archive.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(store.state().await.snapshots["snapshot"].archived_bytes, 17);
+        store
+            .apply(
+                7,
+                MetadataCommand::FinishSnapshotArchive {
+                    id: "snapshot".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                8,
+                MetadataCommand::DeleteManifest {
+                    key: manifest.key.clone(),
+                    version: 1,
+                    deleted_at_unix_ms: 0,
+                    eligible_after_unix_ms: 1,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                9,
+                MetadataCommand::AuthorizeGarbage {
+                    id: "source:1".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let restored = MetadataStore::open(root.join("metadata"))
+            .await
+            .unwrap()
+            .state()
+            .await;
+        assert!(matches!(
+            restored.snapshots["snapshot"].mode,
+            SnapshotMode::Archived
+        ));
+        assert_eq!(
+            restored.snapshots["snapshot"].objects[&manifest.key]
+                .archived
+                .as_ref()
+                .unwrap()
+                .object_id,
+            "archive"
+        );
+        assert_eq!(restored.garbage["source:1"].fence_index, 9);
+        assert!(restored.manifests.is_empty());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_proposals_survive_restart_without_lost_buckets() {
+        let (state, root) = crate::security_integration_tests::fixture().await;
+        let node = state.meta;
+        *node.role.write().await = Role::Leader;
+        node.persistent.write().await.current_term = 1;
+        let mut writes = Vec::new();
+        for index in 0..12 {
+            let node = node.clone();
+            writes.push(tokio::spawn(async move {
+                node.propose(MetadataCommand::PutBucket {
+                    bucket: BucketRecord {
+                        name: format!("bucket-{index}"),
+                        ..Default::default()
+                    },
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        let mut indices = Vec::new();
+        for task in writes {
+            indices.push(task.await.unwrap());
+        }
+        indices.sort_unstable();
+        assert_eq!(indices, (1..=12).collect::<Vec<_>>());
+        let reopened = MetadataStore::open(root.join("metadata")).await.unwrap();
+        assert_eq!(reopened.state().await.buckets.len(), 12);
+        assert_eq!(node.status().await.commit_index, 12);
+        let disk: PersistentRaft =
+            serde_json::from_slice(&tokio::fs::read(root.join("raft/raft.json")).await.unwrap())
+                .unwrap();
+        assert_eq!(disk.commit_index, 12);
+        assert_eq!(disk.log.len(), 12);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+    #[tokio::test]
+    async fn joint_membership_requires_both_majorities() {
+        let (state, root) = crate::security_integration_tests::fixture().await;
+        let node = state.meta;
+        *node.role.write().await = Role::Leader;
+        let old = node.membership().await;
+        let mut new = old.clone();
+        for name in ["offline-a", "offline-b"] {
+            new.voters.insert(
+                name.into(),
+                RaftPeer {
+                    id: name.into(),
+                    endpoint: "http://127.0.0.1:1".into(),
+                    site: None,
+                    rack: None,
+                    pq_public_key_b64: None,
+                },
+            );
+        }
+        node.store
+            .apply(
+                1,
+                MetadataCommand::BeginJointMembership {
+                    joint: JointMembership { old, new },
+                },
+            )
+            .await
+            .unwrap();
+        assert!(node
+            .propose(MetadataCommand::PutBucket {
+                bucket: BucketRecord {
+                    name: "must-not-commit".into(),
+                    ..Default::default()
+                }
+            })
+            .await
+            .is_err());
+        assert!(!node
+            .store
+            .state()
+            .await
+            .buckets
+            .contains_key("must-not-commit"));
+        assert!(node.linearizable_barrier(0).await.is_err());
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

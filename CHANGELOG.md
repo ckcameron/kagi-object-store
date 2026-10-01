@@ -5,6 +5,22 @@
 Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 
 ## 0.39.0 (development) — accelerated transports, hardened telemetry, validation and benchmarking
+
+- Upgrade transitive cache dependencies to remove the LRU memory-safety advisory;
+  remove unused statistical linear-algebra dependencies and advisory exceptions.
+- Repair verifies replica contents before retaining placements, so missing or
+  corrupt fragments on otherwise healthy disks are actually rebuilt.
+- Added an experimental, separately authenticated S3 core API with explicit bucket allowlists,
+  Raft-persisted multipart state, checksum checks, bounded buffering and compatibility tests.
+- Added generation-tagged at-rest keyring envelopes while retaining legacy and authenticated
+  range reads; key retirement still requires explicit historical-data migration.
+- Added CPU runtime LRC v1 with persisted layout, rank-based reconstruction and local repair.
+- Added native NSS user/group lookup and directory-backed S3 identities, retaining AD SID ACLs.
+- Serialized Raft proposal/persistence paths and guarded commit authority against leadership
+  changes; made snapshot archive accounting idempotent and completion conditional on all objects.
+- Connected the optional SCSI PR wire decoder to an authenticated administrative CDB bridge.
+- Added execution-only hardware/kernel/directory CI gates. RDMA remains unavailable as a backend;
+  portable QUIC/HTTPS fallback remains explicit.
 - Added a self-documenting runtime configuration example covering every accepted node/cluster option, units, bounds and defaults; configuration structs now reject unknown keys and CI tests the canonical example against the production deserializer.
 - Expanded Rustdoc/CLI help for transport, erasure, recovery, maintenance, telemetry, console and cluster-host command options so defaults and operational effects live next to the implementation.
 

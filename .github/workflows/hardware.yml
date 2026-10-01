@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+name: hardware-execution
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Dedicated disposable runner backend
+        required: true
+        type: choice
+        options: [cuda, hip, opencl, isa-l, ipp, aocl, ebpf, directory]
+permissions:
+  contents: read
+jobs:
+  execute:
+    environment: hardware-validation
+    runs-on: [self-hosted, linux, "kagi-${{ inputs.backend }}"]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require actual accelerator execution
+        if: inputs.backend != 'ebpf' && inputs.backend != 'directory'
+        env:
+          BACKEND: ${{ inputs.backend }}
+        run: |
+          set -euo pipefail
+          case "$BACKEND" in
+            cuda|hip|opencl) export KAGI_REQUIRE_GPU_TESTS=1 ;;
+            isa-l|ipp|aocl) export KAGI_REQUIRE_CPU_LIB_TESTS=1 ;;
+            *) exit 2 ;;
+          esac
+          cargo test --lib --features "$BACKEND" -- --nocapture 2>&1 | tee hardware-execution.log
+      - uses: dtolnay/rust-toolchain@nightly
+        if: inputs.backend == 'ebpf'
+        with:
+          components: rust-src
+      - name: Build target-kernel bindings and exercise enforcement
+        if: inputs.backend == 'ebpf'
+        run: |
+          set -euo pipefail
+          test -r /sys/kernel/btf/vmlinux
+          grep -qw bpf /sys/kernel/security/lsm
+          make -C security bindings ebpf
+          export KAGI_EBPF_OBJECT="$PWD/security/target/bpfel-unknown-none/release/kagi-guard-ebpf"
+          cargo test --features ebpf --bin kagi-cluster-host security_ebpf::execution_tests::kernel_allow_deny_and_side_action_execute -- --ignored --exact --nocapture 2>&1 | tee hardware-execution.log
+          grep -q 'test result: ok. 1 passed' hardware-execution.log
+      - name: Require real directory user and group resolution
+        if: inputs.backend == 'directory'
+        run: |
+          set -euo pipefail
+          cargo test --bin kagi-cluster-host identity::directory_execution_tests::directory_provider_matches_expected_user_and_groups -- --ignored --exact --nocapture 2>&1 | tee hardware-execution.log
+          grep -q 'test result: ok. 1 passed' hardware-execution.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: execution-${{ inputs.backend }}-${{ github.sha }}
+          path: hardware-execution.log
+          if-no-files-found: error

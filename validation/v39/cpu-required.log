@@ -1,0 +1,29 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.35s
+     Running unittests src/lib.rs (../target/debug/deps/kagi_object_store-2ccb4b6a4501d169)
+
+running 3 tests
+test erasure::cpu_libraries::tests::ipp_xor_matches_reference ... FAILED
+test erasure::cpu_libraries::tests::isal_matches_independent_field_reference ... FAILED
+test erasure::cpu_libraries::tests::aocl_copy_matches_reference ... ok
+
+failures:
+
+---- erasure::cpu_libraries::tests::ipp_xor_matches_reference stdout ----
+
+thread 'erasure::cpu_libraries::tests::ipp_xor_matches_reference' (36) panicked at src/cpu_libraries.rs:149:9:
+required CPU library IPP is unavailable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- erasure::cpu_libraries::tests::isal_matches_independent_field_reference stdout ----
+
+thread 'erasure::cpu_libraries::tests::isal_matches_independent_field_reference' (37) panicked at src/cpu_libraries.rs:149:9:
+required CPU library ISA-L is unavailable
+
+
+failures:
+    erasure::cpu_libraries::tests::ipp_xor_matches_reference
+    erasure::cpu_libraries::tests::isal_matches_independent_field_reference
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--lib`

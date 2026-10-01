@@ -218,3 +218,76 @@ mod tests {
         assert_eq!(kernel_device(0x100803), (8 << 20) | 259);
     }
 }
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    /// Run only on a disposable privileged runner with BPF LSM enabled. Missing
+    /// bindings, attachment, deny enforcement or side-action delivery is failure.
+    #[tokio::test]
+    #[ignore = "requires privileged BPF LSM runner and KAGI_EBPF_OBJECT"]
+    async fn kernel_allow_deny_and_side_action_execute() {
+        let object = std::env::var_os("KAGI_EBPF_OBJECT").expect("set KAGI_EBPF_OBJECT");
+        let root = std::env::temp_dir().join(format!("kagi-lsm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let denied = root.join("denied");
+        let allowed = root.join("allowed");
+        let marker = root.join("action");
+        std::fs::write(&denied, b"secret").unwrap();
+        std::fs::write(&allowed, b"public").unwrap();
+        let monitor = crate::monitoring::Monitor::new(32);
+        let mut config = security::Config {
+            kernel: security::KernelConfig {
+                enabled: true,
+                object: Some(object.into()),
+                audit_only: false,
+                rules: vec![security::FileRule {
+                    path: denied.to_string_lossy().into_owned(),
+                    operations: vec!["open".into(), "read".into()],
+                    decision: Decision::Deny,
+                    recursive: false,
+                    action: Some("mark".into()),
+                }],
+            },
+            ..Default::default()
+        };
+        config.actions.insert(
+            "mark".into(),
+            security::Action::Exec {
+                program: "/usr/bin/touch".into(),
+                args: vec![marker.to_string_lossy().into_owned()],
+            },
+        );
+        let guard = start(Security::new(config, monitor).unwrap()).unwrap();
+        let output = tokio::process::Command::new("/bin/cat")
+            .arg(&allowed)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"public");
+        let output = tokio::process::Command::new("/bin/cat")
+            .arg(&denied)
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("kernel event side action was not delivered");
+        drop(guard);
+        assert!(tokio::process::Command::new("/bin/cat")
+            .arg(&denied)
+            .output()
+            .await
+            .unwrap()
+            .status
+            .success());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

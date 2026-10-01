@@ -1,6 +1,10 @@
 <!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
 
-# Kagi 0.38.0 development build validation
+# Kagi 0.39 development build validation
+
+Current completion-branch evidence is recorded below. The 0.38 results are historical.
+
+## Historical 0.38 validation
 
 **Experimental development release; not production-ready.**
 
@@ -76,7 +80,7 @@ settings or permanent scheduling policy were changed.
 
 Source comments, package license metadata, and documentation were updated to CC BY-NC-SA 4.0, preserving upstream security licenses. No executable statements were changed. Rust formatting, package metadata, notice coverage, and distribution checksums were checked for this update; runtime results above refer to the preceding development build.
 
-## 0.39 completion audit (2026-09-30)
+## 0.39 completion status (2026-09-30)
 
 This checklist distinguishes implemented runtime behavior from planner-only, integration-boundary,
 and hardware-dependent work. A feature is not promoted to runtime-complete merely because its
@@ -88,17 +92,17 @@ configuration type or protocol structure exists.
 | Reed-Solomon | Runtime complete | Maintain encode/reconstruct tests. |
 | Product-matrix MSR | Runtime complete | Maintain round-trip and exact-repair tests. |
 | CLAY | Runtime complete | Maintain round-trip, exact-repair, and partial-helper-read tests. |
-| LRC | Planner-only | Implement runtime encode/reconstruct/repair, persisted scheme metadata, and end-to-end tests before advertising runtime LRC. |
-| S3 compatibility | Missing | Add S3 authentication/request parsing and core bucket/object/list/multipart semantics with compatibility tests. |
+| LRC | Runtime implemented, validation in progress | Fixed v1 local-XOR/global-parity geometry, persisted scheme, rank-aware reconstruction and repair. See docs/LRC.md; planner geometry is broader. |
+| S3 compatibility | Experimental core API | Signature authentication, bucket/object/list/multipart operations and independent signed HTTP tests. See docs/S3.md for supported semantics and limits; full SDK conformance remains outstanding. |
 | Native Kagi REST object API | Runtime complete | Maintain object/version/metadata routes and linearizable mutation behavior. |
 | Fragment encryption at rest | Runtime complete | Maintain chunked-AEAD round-trip, tamper/identity, and cross-chunk range tests. |
-| At-rest key rotation | Partial | Add envelope key generation/ID plus keyring or wrapped-DEK migration so old ciphertext remains readable during rotation. |
+| At-rest key rotation | Keyring envelopes implemented | Generation-tagged fragments and metadata, legacy reads, authenticated chunk ranges. Migration and key retirement require operator verification; see docs/AT-REST-ROTATION.md. |
 | ML-DSA internal authentication | Runtime complete | Maintain signed-envelope/replay validation and key rotation/revocation tests. |
 | Strict end-to-end PQ-only operation | Partial | Remove/segregate classical compatibility paths and define PQ certificate/key-management requirements before making this claim. |
 | Raft metadata and membership | Runtime complete | Add/maintain multi-node failure/restart/joint-consensus integration tests. |
 | Snapshots/archive/GC | Runtime implemented | Expand crash/restart and multi-node integration tests for archive and destructive GC fencing. |
 | Filesystem namespace/NFSv4-style ACL model | Runtime implemented | Expand namespace transaction/rebuild integration coverage. |
-| Active Directory | Integration boundary | Add native LDAP/Kerberos/SSSD/winbind-backed identity and group resolution, or continue documenting external identity integration explicitly. |
+| Active Directory | Native NSS resolution with external directory providers | User/group lookup uses NSS (including configured SSSD/winbind), with optional winbind SID expansion. LDAP binds and Kerberos authentication remain provider responsibilities. See docs/DIRECTORY-IDENTITY.md. |
 | NVMe/SATA/SAS storage | Runtime implemented | Validate against representative physical devices. |
 | Fibre Channel | Integration boundary | Validate Linux-visible FC LUN discovery/admission; a native FC protocol stack is out of scope unless explicitly required. |
 | NBD/QEMU/libvirt block frontend | Runtime/integration implemented | Add VM-level persistence/restart tests. |
@@ -116,3 +120,54 @@ For 0.39, the repository should not describe planner-only or integration-boundar
 native runtime implementation. Hardware-dependent paths require positive execution evidence on
 appropriate runners. The standard Rust CI passing is necessary but not sufficient for those
 claims.
+
+### Completion-branch validation evidence
+
+Validated locally on x86-64 Linux with Rust/Cargo 1.99.0-beta.7:
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed |
+| `cargo check --all-targets` | Passed |
+| `cargo test --all-targets` | 125 passed; one real-directory test intentionally ignored |
+| `cargo test --all-targets --features quic,ebpf,scsi-target,rdma` | 128 passed; real-directory and privileged LSM tests intentionally ignored |
+| `cargo clippy --all-targets -- -D warnings` | Passed |
+| `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
+| `cargo check --all-targets --all-features` | Passed |
+| `cargo test --all-targets --all-features` | 140 reported passed; two ignored provider/kernel tests; accelerator fallback is not execution evidence |
+| `cargo audit` | Passed with no advisory warnings |
+| `cargo deny check advisories sources` | Passed without advisory exceptions |
+| Repository security workflow at `d0032bf` | Miri, ASan, fuzz smoke and supply-chain passed; scheduled-only TSan skipped |
+| Repository Rust CI at `d0032bf` | Formatting, checks, tests and strict Clippy passed; benchmark compilation pending at this checkpoint |
+| Patched upstream Reed-Solomon library tests | 99 passed in an isolated copy of the vendored package |
+
+The S3 integration test uses curl's independent SigV4 implementation against the
+actual HTTP service, including bucket/object operations, multipart completion,
+persisted upload state, and authentication/authorization failures. Additional
+passing tests cover generation selection and legacy ciphertext, runtime LRC object
+repair, concurrent Raft proposals and joint-majority rejection, snapshot archive
+replay/GC fences, console role enforcement and persisted buckets, SCSI CDB conflicts
+and persisted registrations, and actual TLS QUIC transfers and failures.
+
+Local QUIC validation uses the system OpenSSL on PATH: the unrelated installation
+in /usr/local/bin cannot load its libompstub.so dependency on this machine.
+
+The manual hardware workflow requires matching protected runners and records
+positive execution evidence. No GPU, LSM attachment, or directory-provider
+execution is claimed by fallback or ignored tests. RDMA remains unavailable,
+with a configuration audit finding and HTTPS/QUIC transport as the fallback.
+Native LDAP binds/Kerberos authentication, full S3 SDK conformance, and VM-level
+block persistence tests remain integration boundaries or further validation work.
+
+Raw local logs are retained under `validation/v39/`. The required-execution probes
+correctly fail for unavailable GPU devices, ISA-L and IPP in this environment;
+AOCL's copy test executed and passed. These are explicit environment limitations,
+not waived passing hardware results. The expanded signed S3 test also verifies
+206/416 ranges, failed conditional writes, checksum rejection with no object
+published, unsupported ACL rejection, and multipart listings.
+
+Repository execution evidence: [security workflow](https://github.com/ckcameron/kagi-object-store/actions/runs/36815539519)
+and [Rust workflow](https://github.com/ckcameron/kagi-object-store/actions/runs/36815539663).
+These links identify the tested revision; consult PR checks for later revisions.
+The vendored source includes its upstream benchmark and algebra-reference files,
+so its own test manifest remains usable independently of the Kagi package.

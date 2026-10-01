@@ -1,0 +1,135 @@
+    Updating crates.io index
+     Locking 39 packages to highest compatible versions
+      Adding quickcheck v0.9.2 (available: v1.1.0)
+      Adding rand v0.7.3 (available: v0.10.3)
+      Adding spin v0.9.9 (available: v0.12.3)
+ Downloading crates ...
+  Downloaded env_logger v0.7.1
+  Downloaded rand_chacha v0.2.2
+  Downloaded rand_core v0.5.1
+  Downloaded getrandom v0.1.16
+  Downloaded quickcheck v0.9.2
+  Downloaded rand v0.7.3
+   Compiling zerocopy v0.8.59
+   Compiling getrandom v0.1.16
+   Compiling memchr v2.8.3
+   Compiling smallvec v1.16.2
+   Compiling log v0.4.34
+   Compiling rand_core v0.5.1
+   Compiling aho-corasick v1.1.5
+   Compiling parking_lot_core v0.9.12
+   Compiling reed-solomon-erasure v6.0.0 (<validation-workspace>/rs-validation)
+   Compiling parking_lot v0.12.5
+   Compiling regex-automata v0.4.18
+   Compiling regex v1.13.1
+   Compiling env_logger v0.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.2.2
+   Compiling rand v0.7.3
+   Compiling quickcheck v0.9.2
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.59s
+     Running unittests src/lib.rs (../target/debug/deps/reed_solomon_erasure-7ea2f2817ef09254)
+
+running 99 tests
+test errors::tests::test_error_display_does_not_panic ... ok
+test errors::tests::test_error_to_string_is_okay ... ok
+test errors::tests::test_sbserror_display_does_not_panic ... ok
+test errors::tests::test_sbserror_to_string_is_okay ... ok
+test galois_16::tests::qc_add_associativity ... ok
+test galois_16::tests::qc_additive_identity ... ok
+test galois_16::tests::qc_exp_zero_is_one ... ok
+test galois_16::tests::qc_add_commutativity ... ok
+test galois_16::tests::qc_add_distributivity ... ok
+test galois_16::tests::qc_inverse ... ok
+test galois_16::tests::test_div_b_is_0 - should panic ... ok
+test galois_16::tests::qc_mul_associativity ... ok
+test galois_16::tests::qc_mul_commutativity ... ok
+test galois_16::tests::qc_multiplicative_identity ... ok
+test galois_8::tests::log_table_same_as_backblaze ... ok
+test galois_16::tests::zero_to_zero_is_one ... ok
+test galois_8::tests::qc_add_associativity ... ok
+test galois_8::tests::qc_add_commutativity ... ok
+test galois_8::tests::qc_add_distributivity ... ok
+test galois_8::tests::qc_additive_identity ... ok
+test galois_8::tests::qc_multiplicative_identity ... ok
+test galois_8::tests::qc_mul_commutativity ... ok
+test galois_8::tests::test_div_a_is_0 ... ok
+test galois_8::tests::test_div_b_is_0 - should panic ... ok
+test galois_8::tests::qc_mul_associativity ... ok
+test galois_8::tests::test_galois ... ok
+test galois_16::tests::qc_exponent_1 ... ok
+test matrix::tests::test_incompatible_augment - should panic ... ok
+test galois_8::tests::test_slice_add ... ok
+test matrix::tests::test_incompatible_multiply - should panic ... ok
+test galois_8::tests::test_commutativity ... ok
+test galois_8::tests::test_identity ... ok
+test matrix::tests::test_matrix_col_count ... ok
+test matrix::tests::test_matrix_inverse_non_square - should panic ... ok
+test matrix::tests::test_inconsistent_row_sizes - should panic ... ok
+test matrix::tests::test_matrix_inverse_singular - should panic ... ok
+test matrix::tests::test_matrix_inverse_pass_cases ... ok
+test matrix::tests::test_matrix_multiply ... ok
+test matrix::tests::test_matrix_row_count ... ok
+test matrix::tests::test_matrix_swap_rows ... ok
+test matrix::tests::test_matrix_identity ... ok
+test galois_8::tests::test_exp ... ok
+test galois_16::tests::qc_exponent_2 ... ok
+test tests::galois_16::correct_field_order_restriction ... ok
+test galois_8::tests::test_distributivity ... ok
+test galois_8::tests::test_associativity ... ok
+test galois_8::tests::test_same_as_maybe_ffi ... ok
+test tests::qc_encode_sep_same_as_encode ... ok
+test tests::qc_encode_single_same_as_encode ... ok
+test tests::qc_encode_sep_same_as_encode_shards ... ok
+test tests::qc_encode_single_sep_same_as_encode ... ok
+test tests::qc_encode_single_same_as_encode_shards ... ok
+test tests::qc_encode_single_sep_same_as_encode_shards ... ok
+test tests::qc_encode_verify_reconstruct_verify_shards ... ok
+test tests::galois_16::qc_verify ... ok
+test tests::qc_shardbyshard_encode_same_as_encode ... ok
+test tests::shardbyshard_encode_correctly ... ok
+test tests::qc_encode_verify_reconstruct_verify ... ok
+test tests::shardbyshard_encode_correctly_more_rigorous ... ok
+test tests::shardbyshard_encode_error_handling ... ok
+test tests::shardbyshard_encode_sep_correctly ... ok
+test tests::shardbyshard_encode_sep_error_handling ... ok
+test tests::shardbyshard_encode_shard_error_handling ... ok
+test tests::test_check_slices_or_shards_size ... ok
+test tests::shardbyshard_encode_shard_sep_error_handling ... ok
+test tests::test_encode_sep ... ok
+test tests::test_encode_single_error_handling ... ok
+test tests::test_encode_single_sep ... ok
+test tests::test_encode_sep_error_handling ... ok
+test tests::test_encode_single_sep_error_handling ... ok
+test tests::test_no_data_shards ... ok
+test tests::test_no_parity_shards ... ok
+test tests::test_one_encode ... ok
+test tests::test_reconstruct ... ok
+test tests::test_reconstruct_error_handling ... ok
+test tests::qc_shardbyshard_encode_same_as_encode_shards ... ok
+test tests::test_reed_solomon_clone ... ok
+test tests::galois_16::qc_encode_single_sep_same_as_encode ... ok
+test tests::test_slices_or_shards_count_check ... ok
+test tests::test_too_many_shards ... ok
+test tests::test_verify_shards_with_buffer_gives_correct_parity_shards ... ok
+test tests::test_verify_shards_with_buffer_incorrect_buffer_sizes ... ok
+test tests::test_verify_too_few_shards ... ok
+test tests::test_encoding ... ok
+test tests::test_verify_with_buffer_gives_correct_parity_shards ... ok
+test tests::galois_16::qc_encode_single_same_as_encode_shards ... ok
+test tests::test_reconstruct_shards ... ok
+test tests::galois_16::qc_encode_sep_same_as_encode_shards ... ok
+test tests::test_shard_count ... ok
+test tests::galois_16::qc_encode_single_sep_same_as_encode_shards ... ok
+test tests::qc_shardbyshard_encode_sep_same_as_encode ... ok
+test tests::qc_shardbyshard_encode_sep_same_as_encode_shards ... ok
+test tests::galois_16::qc_encode_single_same_as_encode ... ok
+test tests::galois_16::qc_encode_sep_same_as_encode ... ok
+test tests::galois_16::qc_verify_shards ... ok
+test tests::galois_16::qc_encode_verify_reconstruct_verify_shards ... ok
+test tests::qc_verify_shards ... ok
+test tests::qc_verify ... ok
+test tests::galois_16::qc_encode_verify_reconstruct_verify ... ok
+
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.78s
+
