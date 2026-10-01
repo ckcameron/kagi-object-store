@@ -45,6 +45,7 @@ impl From<BenchBackend> for BackendKind {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum BenchScheme {
     ReedSolomon,
+    Lrc,
     Clay,
     Msr,
     All,
@@ -160,8 +161,10 @@ fn schemes(selection: BenchScheme) -> Vec<ErasureScheme> {
         BenchScheme::ReedSolomon => vec![ErasureScheme::ReedSolomon],
         BenchScheme::Clay => vec![ErasureScheme::Clay],
         BenchScheme::Msr => vec![ErasureScheme::Msr],
+        BenchScheme::Lrc => vec![ErasureScheme::Lrc],
         BenchScheme::All => vec![
             ErasureScheme::ReedSolomon,
+            ErasureScheme::Lrc,
             ErasureScheme::Clay,
             ErasureScheme::Msr,
         ],
@@ -174,7 +177,7 @@ fn default_geometry(
     m_override: Option<usize>,
 ) -> (usize, usize) {
     let (k, m) = match scheme {
-        ErasureScheme::ReedSolomon | ErasureScheme::Clay => (6, 3),
+        ErasureScheme::ReedSolomon | ErasureScheme::Clay | ErasureScheme::Lrc => (6, 3),
         // Product-matrix MSR requires n > d=2k-2. 4+4 gives d=6,n=8.
         ErasureScheme::Msr => (4, 4),
     };

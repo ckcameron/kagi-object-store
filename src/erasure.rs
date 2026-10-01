@@ -55,6 +55,8 @@ pub enum BackendKind {
 pub enum ErasureScheme {
     #[default]
     ReedSolomon,
+    /// XOR local groups plus one independent GF(256) global parity row.
+    Lrc,
     Msr,
     Clay,
 }
@@ -144,6 +146,15 @@ impl ErasureLayout {
         validate_common(self.data_shards, self.parity_shards)?;
         match self.scheme {
             ErasureScheme::ReedSolomon => Ok(()),
+            ErasureScheme::Lrc => {
+                if self.parity_shards < 2
+                    || self.parity_shards > self.data_shards + 1
+                    || self.repair_helpers.is_some()
+                {
+                    bail!("LRC requires 2 <= m <= k+1 and no repair_helpers override")
+                }
+                Ok(())
+            }
             ErasureScheme::Clay => {
                 let d = clay_d(self.data_shards, self.parity_shards, self.repair_helpers)?;
                 if d < self.data_shards + 1 || d >= self.n() {
@@ -487,6 +498,188 @@ fn gf_matrix_apply_cpu(
     }
     Ok(out)
 }
+/// LRC v1 uses m-1 disjoint local XOR groups (data index modulo m-1),
+/// followed by a GF(256) global row with distinct nonzero coefficients. The
+/// persisted scheme/k/m completely determine the code; no runtime policy leaks
+/// into decoding. LRC is not MDS: availability is determined by matrix rank.
+fn lrc_matrix(layout: &ErasureLayout) -> Vec<u8> {
+    let k = layout.data_shards;
+    let groups = layout.parity_shards - 1;
+    let mut matrix = vec![0; layout.n() * k];
+    for i in 0..k {
+        matrix[i * k + i] = 1;
+        matrix[(k + i % groups) * k + i] = 1;
+        matrix[(layout.n() - 1) * k + i] = gf_pow(2, i);
+    }
+    matrix
+}
+
+fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
+    let k = layout.data_shards;
+    let size = data.len().div_ceil(k).max(1);
+    let packed = pack_source_rows(data, k, size);
+    let output = gf_matrix_apply_cpu(&packed, k, &lrc_matrix(layout), layout.n(), size)?;
+    Ok(EncodedShards {
+        original_len: data.len() as u64,
+        data_shards: k as u16,
+        parity_shards: layout.parity_shards as u16,
+        scheme: ErasureScheme::Lrc,
+        repair_helpers: None,
+        sub_chunk_no: 1,
+        shards: output.chunks_exact(size).map(<[u8]>::to_vec).collect(),
+    })
+}
+
+/// Select a basis by elimination, rather than assuming any k surviving rows
+/// suffice. This also supports recoverable patterns involving local parity.
+fn lrc_basis(layout: &ErasureLayout, available: &[usize]) -> Result<Vec<usize>> {
+    let k = layout.data_shards;
+    let matrix = lrc_matrix(layout);
+    let mut pivots: Vec<Option<Vec<u8>>> = vec![None; k];
+    let mut selected = Vec::new();
+    for &index in available {
+        if index >= layout.n() {
+            bail!("LRC shard index out of bounds")
+        }
+        let mut row = matrix[index * k..(index + 1) * k].to_vec();
+        for col in 0..k {
+            if row[col] == 0 {
+                continue;
+            }
+            if let Some(pivot) = &pivots[col] {
+                let factor = row[col];
+                for j in col..k {
+                    row[j] ^= gf_mul(factor, pivot[j]);
+                }
+            } else {
+                let inverse = gf_inv(row[col])?;
+                for value in &mut row[col..] {
+                    *value = gf_mul(*value, inverse);
+                }
+                pivots[col] = Some(row);
+                selected.push(index);
+                break;
+            }
+        }
+        if selected.len() == k {
+            return Ok(selected);
+        }
+    }
+    bail!("insufficient independent LRC shards")
+}
+
+fn lrc_plan(
+    layout: &ErasureLayout,
+    available: &[usize],
+    lost: usize,
+    size: usize,
+) -> Result<ExactRepairPlan> {
+    if lost >= layout.n() || available.contains(&lost) {
+        bail!("invalid LRC lost shard")
+    }
+    let k = layout.data_shards;
+    let groups = layout.parity_shards - 1;
+    let local = if lost < k {
+        Some(lost % groups)
+    } else if lost < k + groups {
+        Some(lost - k)
+    } else {
+        None
+    };
+    if let Some(group) = local {
+        let helpers: Vec<_> = (0..k)
+            .filter(|i| i % groups == group)
+            .chain(std::iter::once(k + group))
+            .filter(|i| *i != lost)
+            .collect();
+        if helpers.iter().all(|i| available.contains(i)) {
+            return Ok(ExactRepairPlan {
+                chunk_len: size,
+                row_len: size,
+                input_rows: helpers.len(),
+                output_rows: 1,
+                recovery_coeff: vec![1; helpers.len()],
+                fetches: helpers
+                    .into_iter()
+                    .map(|shard| RepairFetch::SubChunks {
+                        shard,
+                        alpha: 1,
+                        indices: vec![0],
+                    })
+                    .collect(),
+            });
+        }
+    }
+    let basis = lrc_basis(layout, available)?;
+    let matrix = lrc_matrix(layout);
+    let rows: Vec<_> = basis
+        .iter()
+        .flat_map(|i| matrix[i * k..(i + 1) * k].iter().copied())
+        .collect();
+    let inverse = gf_matrix_inverse(&rows, k)?;
+    let mut recovery = vec![0; k];
+    for (col, value) in recovery.iter_mut().enumerate() {
+        for row in 0..k {
+            *value ^= gf_mul(matrix[lost * k + row], inverse[row * k + col]);
+        }
+    }
+    Ok(ExactRepairPlan {
+        chunk_len: size,
+        row_len: size,
+        input_rows: k,
+        output_rows: 1,
+        recovery_coeff: recovery,
+        fetches: basis
+            .into_iter()
+            .map(|shard| RepairFetch::SubChunks {
+                shard,
+                alpha: 1,
+                indices: vec![0],
+            })
+            .collect(),
+    })
+}
+
+fn lrc_reconstruct(
+    shards: &mut [Option<Vec<u8>>],
+    original_len: u64,
+    layout: &ErasureLayout,
+) -> Result<Vec<u8>> {
+    if shards.len() != layout.n() {
+        bail!("LRC shard count mismatch")
+    }
+    let original_len = usize::try_from(original_len).context("LRC object exceeds address space")?;
+    let size = original_len.div_ceil(layout.data_shards).max(1);
+    if shards.iter().flatten().any(|s| s.len() != size) {
+        bail!("LRC shard length mismatch")
+    }
+    let available: Vec<_> = shards
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.as_ref().map(|_| i))
+        .collect();
+    let basis = lrc_basis(layout, &available)?;
+    let k = layout.data_shards;
+    let matrix = lrc_matrix(layout);
+    let rows: Vec<_> = basis
+        .iter()
+        .flat_map(|i| matrix[i * k..(i + 1) * k].iter().copied())
+        .collect();
+    let input: Vec<_> = basis
+        .iter()
+        .flat_map(|i| shards[*i].as_ref().unwrap().iter().copied())
+        .collect();
+    let mut data = gf_matrix_apply_cpu(&input, k, &gf_matrix_inverse(&rows, k)?, k, size)?;
+    data.truncate(original_len);
+    let encoded = lrc_encode(&data, layout)?;
+    for (target, recovered) in shards.iter_mut().zip(encoded.shards) {
+        if target.is_none() {
+            *target = Some(recovered);
+        }
+    }
+    Ok(data)
+}
+
 /// Implements the pack source rows step and keeps its validation and state transitions visible at the call site.
 fn pack_source_rows(data: &[u8], rows: usize, row_len: usize) -> Vec<u8> {
     let mut packed = vec![0u8; rows * row_len];
@@ -1596,6 +1789,7 @@ impl ErasureBackend for AdaptiveBackend {
         layout.validate()?;
         Ok(match layout.scheme {
             ErasureScheme::ReedSolomon => None,
+            ErasureScheme::Lrc => Some(lrc_plan(layout, available, lost, chunk_len)?),
             ErasureScheme::Msr => {
                 let pm = pm_layout(layout.data_shards, layout.parity_shards)?;
                 Some(pm_exact_repair_plan(
@@ -1641,11 +1835,13 @@ impl ErasureBackend for AdaptiveBackend {
     }
     async fn encode_layout(&self, data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
         layout.validate()?;
-        let use_gpu = self.can_gpu(data.len()) && self.try_gpu_slot();
+        let use_gpu =
+            layout.scheme != ErasureScheme::Lrc && self.can_gpu(data.len()) && self.try_gpu_slot();
         if use_gpu {
             #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
             {
                 let r = match layout.scheme {
+                    ErasureScheme::Lrc => lrc_encode(data, layout),
                     ErasureScheme::ReedSolomon => {
                         // Reuse the RS generator by encoding basis bytes; this preserves byte-for-byte compatibility.
                         let (k, m) = (layout.data_shards, layout.parity_shards);
@@ -1729,6 +1925,7 @@ impl ErasureBackend for AdaptiveBackend {
             .cpu_bytes
             .fetch_add(data.len() as u64, Ordering::Relaxed);
         match layout.scheme {
+            ErasureScheme::Lrc => lrc_encode(data, layout),
             ErasureScheme::ReedSolomon => self.cpu_rs.encode_layout(data, layout).await,
             ErasureScheme::Msr => {
                 let p = pm_layout(layout.data_shards, layout.parity_shards)?;
@@ -1758,6 +1955,7 @@ impl ErasureBackend for AdaptiveBackend {
     ) -> Result<Vec<u8>> {
         layout.validate()?;
         match layout.scheme {
+            ErasureScheme::Lrc => lrc_reconstruct(shards, original_len, layout),
             ErasureScheme::ReedSolomon => {
                 self.cpu_rs
                     .reconstruct_layout(shards, original_len, layout)
@@ -1838,6 +2036,7 @@ impl ErasureBackend for AdaptiveBackend {
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
         if self.can_gpu(shard_bytes) && self.try_gpu_slot() {
             let r = match layout.scheme {
+                ErasureScheme::Lrc => Err(anyhow!("LRC uses CPU repair")),
                 ErasureScheme::ReedSolomon => {
                     Err(anyhow!("RS exact-repair CUDA path uses normal reconstruct"))
                 }
@@ -1884,6 +2083,32 @@ impl ErasureBackend for AdaptiveBackend {
             self.metrics.gpu_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
         match layout.scheme {
+            ErasureScheme::Lrc => {
+                if shards.len() != layout.n() {
+                    bail!("LRC shard count mismatch")
+                }
+                let size = shards
+                    .iter()
+                    .flatten()
+                    .next()
+                    .context("no LRC helpers")?
+                    .len();
+                if size == 0 || shards.iter().flatten().any(|s| s.len() != size) {
+                    bail!("LRC helper size mismatch")
+                }
+                let available: Vec<_> = shards
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| s.as_ref().map(|_| i))
+                    .collect();
+                let plan = lrc_plan(layout, &available, lost, size)?;
+                let input: Vec<_> = plan
+                    .fetches
+                    .iter()
+                    .flat_map(|f| shards[f.shard()].as_ref().unwrap().iter().copied())
+                    .collect();
+                gf_matrix_apply_cpu(&input, plan.input_rows, &plan.recovery_coeff, 1, size)
+            }
             ErasureScheme::ReedSolomon => {
                 self.cpu_rs.repair_shard_layout(shards, lost, layout).await
             }
@@ -1903,6 +2128,64 @@ impl ErasureBackend for AdaptiveBackend {
 }
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn lrc_roundtrip_all_single_and_double_losses_and_local_repair() {
+        let layout = super::ErasureLayout {
+            scheme: super::ErasureScheme::Lrc,
+            data_shards: 6,
+            parity_shards: 3,
+            repair_helpers: None,
+        };
+        let backend = super::AdaptiveBackend::new(super::ErasureConfig::default());
+        use super::ErasureBackend;
+        for length in [0, 1, 31, 65537] {
+            let data: Vec<_> = (0..length).map(|i| (i % 251) as u8).collect();
+            let encoded = backend.encode_layout(&data, &layout).await.unwrap();
+            let serialized = serde_json::to_vec(&encoded).unwrap();
+            let encoded: super::EncodedShards = serde_json::from_slice(&serialized).unwrap();
+            for lost in 0..layout.n() {
+                let mut shards: Vec<_> = encoded.shards.iter().cloned().map(Some).collect();
+                shards[lost] = None;
+                assert_eq!(
+                    backend
+                        .repair_shard_layout(&shards, lost, &layout)
+                        .await
+                        .unwrap(),
+                    encoded.shards[lost]
+                );
+                for second in lost..layout.n() {
+                    let mut shards = shards.clone();
+                    shards[second] = None;
+                    assert_eq!(
+                        backend
+                            .reconstruct_layout(&mut shards, length as u64, &layout)
+                            .await
+                            .unwrap(),
+                        data
+                    );
+                    assert_eq!(
+                        shards.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+                        encoded.shards
+                    );
+                }
+            }
+        }
+        let plan = backend
+            .exact_repair_plan(&[1, 2, 3, 4, 5, 6, 7, 8], 0, 100, &layout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            plan.fetches.iter().map(|f| f.shard()).collect::<Vec<_>>(),
+            vec![2, 4, 6]
+        );
+        let mut insufficient = vec![None; 9];
+        insufficient[0] = Some(vec![0]);
+        assert!(backend
+            .reconstruct_layout(&mut insufficient, 6, &layout)
+            .await
+            .is_err());
+    }
+
     #[test]
     fn matrix_rejects_overflowing_dimensions() {
         assert!(super::gf_matrix_apply_cpu(&[], usize::MAX, &[], 2, 2).is_err());
