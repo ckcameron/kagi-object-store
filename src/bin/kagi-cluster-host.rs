@@ -7,6 +7,10 @@
 //! runs health and maintenance loops, and hosts the operations console. CLI subcommands use
 //! the same state and validation rules as the long-running daemon wherever practical.
 
+// Link native accelerator libraries used by this daemon's embedded erasure module.
+#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+use kagi_object_store as _;
+
 // Full Kagi cluster daemon and administrative CLI for distributed storage nodes.
 #[path = "../block.rs"]
 mod block;
@@ -16,6 +20,8 @@ mod cluster;
 mod erasure;
 #[path = "../filesystem.rs"]
 mod filesystem;
+#[path = "../identity.rs"]
+mod identity;
 #[path = "../maintenance.rs"]
 mod maintenance;
 #[path = "../monitoring.rs"]
@@ -31,6 +37,8 @@ mod raftmeta;
 mod recovery;
 #[path = "../runtime_security.rs"]
 mod runtime_security;
+#[path = "../s3.rs"]
+mod s3;
 #[cfg(any(test, feature = "scsi-target"))]
 #[path = "../scsi_pr.rs"]
 mod scsi_pr;
@@ -77,7 +85,7 @@ use raftmeta::{
 use recovery::{object_risk, HealthMap, Heartbeat, RecoveryConfig};
 use serde::Deserialize;
 use serde::Serialize;
-use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, sync::Arc};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 use tokio::{net::TcpListener, sync::RwLock};
 use webui::{ConsoleRole, WebConsoleConfig};
 #[derive(Parser)]
@@ -179,6 +187,8 @@ enum Cmd {
 #[serde(deny_unknown_fields)]
 /// Complete top-level node configuration. Unknown keys are rejected so typos cannot silently disable policy.
 struct NodeConfig {
+    #[serde(default)]
+    s3: Option<s3::Config>,
     #[serde(default)]
     security: security::Config,
     cluster: ClusterConfig,
@@ -576,6 +586,7 @@ fn state(
     pq_identity: LocalPqIdentity,
     pq_keys: RuntimeKeyring,
 ) -> Result<ClusterState> {
+    validate_at_rest_keys(&c.cluster)?;
     #[cfg(feature = "quic")]
     let quic = if c.cluster.transport.prefer_quic
         && c.cluster
@@ -1046,57 +1057,12 @@ async fn gossip_fs_index(st: V6State) {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResolvedIdentity {
-    user: String,
-    uid: Option<String>,
-    gids: Vec<String>,
-    ad_sid: Option<String>,
-}
-/// Implements the identity resolve step and keeps its validation and state transitions visible at the call site.
+/// Resolve native directory-backed Unix groups and optional AD SID principals.
 async fn identity_resolve(Path(user): Path<String>) -> impl IntoResponse {
-    // Uses Linux NSS, so local /etc/passwd, LDAP/NIS, SSSD and winbind-backed AD users resolve identically.
-    let uid = Command::new("id")
-        .args(["-u", &user])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let gids = Command::new("id")
-        .args(["-G", &user])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
-    if uid.is_none() {
-        return StatusCode::NOT_FOUND.into_response();
+    match identity::resolve(user).await {
+        Ok(identity) => Json(identity).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
-    // Samba/winbind exposes the canonical AD SID when installed; SSSD-only installations can continue to use stable mapped UID/GID ACL principals.
-    let ad_sid = Command::new("wbinfo")
-        .arg("--name-to-sid")
-        .arg(&user)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .next()
-                .map(String::from)
-        });
-    Json(ResolvedIdentity {
-        user,
-        uid,
-        gids,
-        ad_sid,
-    })
-    .into_response()
 }
 #[derive(Debug, Clone, Serialize, Deserialize)] // ---- Joint-consensus membership and post-quantum key administration ----------
 /// Kagi state or configuration used by the MembershipRequest path.
@@ -1894,6 +1860,66 @@ async fn volume_pr_out(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
+#[cfg(feature = "scsi-target")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrCdbRequest {
+    cdb: Vec<u8>,
+    #[serde(default)]
+    parameters: Vec<u8>,
+    initiator: String,
+}
+
+/// Administrative target bridge for SCSI PR CDBs. Uses the existing replicated
+/// reservation transaction, including conflict checks and generation fencing.
+#[cfg(feature = "scsi-target")]
+async fn volume_pr_cdb(
+    State(st): State<V6State>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PrCdbRequest>,
+) -> Response {
+    if console_auth(&st, &headers, true).is_none() {
+        return webui::unauthorized();
+    }
+    if req.initiator.is_empty() || req.initiator.len() > 1024 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match req.cdb.first() {
+        Some(&scsi_pr::OP_PERSISTENT_RESERVE_OUT) => {
+            match scsi_pr::decode_pr_out(&req.cdb, &req.parameters, &req.initiator) {
+                Ok(op) => volume_pr_out(State(st), Path(id), Json(op))
+                    .await
+                    .into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            }
+        }
+        Some(&scsi_pr::OP_PERSISTENT_RESERVE_IN) => {
+            let index = st.meta.status().await.commit_index;
+            if st.meta.linearizable_barrier(index).await.is_err() {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let state = block::PrIn {
+                generation: v.persistent_reservation.generation,
+                registrations: v.persistent_reservation.registrations,
+                reservation: v.persistent_reservation.reservation,
+            };
+            match scsi_pr::encode_pr_in(&req.cdb, &state) {
+                Ok(bytes) => (
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            }
+        }
+        _ => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
 /// Implements the gc delete in step and keeps its validation and state transitions visible at the call site.
 async fn gc_delete_in(
     State(st): State<V6State>,
@@ -3451,6 +3477,39 @@ async fn main() -> Result<()> {
                     });
                 }
             }
+            if let Some(s3_config) = &cfg.s3 {
+                let router = s3::router(v6.clone(), s3_config.clone())?;
+                let address: std::net::SocketAddr = s3_config.listen.parse()?;
+                if let Some(tls_config) = &cfg.tls {
+                    let tls = tls::server_config(
+                        &tls_config.cert,
+                        &tls_config.key,
+                        tls_config.allow_tls12,
+                    )?;
+                    tokio::spawn(async move {
+                        if let Err(error) = axum_server::bind_rustls(
+                            address,
+                            axum_server::tls_rustls::RustlsConfig::from_config(tls),
+                        )
+                        .serve(router.into_make_service())
+                        .await
+                        {
+                            eprintln!("S3 listener stopped: {error}");
+                        }
+                    });
+                } else {
+                    anyhow::ensure!(
+                        address.ip().is_loopback(),
+                        "S3 requires TLS unless bound to loopback"
+                    );
+                    let listener = TcpListener::bind(address).await?;
+                    tokio::spawn(async move {
+                        if let Err(error) = axum::serve(listener, router).await {
+                            eprintln!("S3 listener stopped: {error}");
+                        }
+                    });
+                }
+            }
             let public = Router::new()
                 .route("/v1/monitor/events", get(runtime_security::history))
                 .route("/v1/monitor/stream", get(runtime_security::stream))
@@ -3525,6 +3584,12 @@ async fn main() -> Result<()> {
                 .route("/internal/v1/ui/telemetry", get(internal_ui_telemetry))
                 .route("/internal/v1/ui/logs", get(internal_ui_logs))
                 .with_state(v6.clone());
+            #[cfg(feature = "scsi-target")]
+            let public = public.merge(
+                Router::new()
+                    .route("/v1/volumes/:id/pr/cdb", axum::routing::post(volume_pr_cdb))
+                    .with_state(v6.clone()),
+            );
             let maintenance = Router::new()
                 .route("/v1/repair/*key", put(user_repair))
                 .route("/v1/scrub/*key", get(user_scrub))
