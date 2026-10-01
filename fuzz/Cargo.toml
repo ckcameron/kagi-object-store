@@ -29,3 +29,6 @@ bench = false
 
 [workspace]
 members = ["."]
+
+[patch.crates-io]
+reed-solomon-erasure = { path = "../vendor/reed-solomon-erasure" }
