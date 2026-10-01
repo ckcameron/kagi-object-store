@@ -4,12 +4,13 @@ use crate::runtime_security;
 use crate::*;
 
 /// Use a real HTTP router and isolated metadata store without starting a cluster.
-async fn fixture() -> (V6State, PathBuf) {
+pub(crate) async fn fixture() -> (V6State, PathBuf) {
     let root = std::env::temp_dir().join(format!("kagi-security-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let mut cfg: NodeConfig =
         serde_yaml::from_str(include_str!("../examples/node-v6.example.yaml")).unwrap();
     cfg.data_root = root.clone();
+    cfg.cluster.metadata_key_b64 = Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0x5au8; 32]));
     // This fixture exercises the HTTP security gate only. Keep its transport local so
     // feature-enabled test builds do not attempt to initialize the example QUIC peer
     // with the documentation-only /etc/kagi PKI paths.

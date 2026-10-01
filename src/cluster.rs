@@ -123,6 +123,12 @@ pub struct ClusterConfig {
     /// Base64 32-byte at-rest root key. Domain-separated subkeys protect metadata and fragments.
     #[serde(default)]
     pub metadata_key_b64: Option<String>,
+    /// Active nonzero key generation for new writes. None writes the legacy format.
+    #[serde(default)]
+    pub active_key_id: Option<u64>,
+    /// Retained generation -> base64 32-byte root keys. Distribute before activation.
+    #[serde(default)]
+    pub at_rest_keys: BTreeMap<u64, String>,
     /// Optional stored verifier/hash representation of the cluster join key.
     #[serde(default)]
     pub join_key_hash_hex: Option<String>,
@@ -223,6 +229,9 @@ pub struct ChunkMetadata {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedMetadata {
+    /// None identifies legacy ciphertext protected by metadata_key_b64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<u64>,
     pub algorithm: String,
     pub nonce_b64: String,
     pub ciphertext_b64: String,
@@ -499,6 +508,118 @@ fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     }
     Ok(v.try_into().unwrap())
 }
+/// Select exactly one generation, never trial-decrypt with other keys. The ID is
+/// cryptographically bound by domain separation, including when roots are reused.
+fn key_generation(cfg: &ClusterConfig, id: Option<u64>) -> Result<ClusterConfig> {
+    let mut selected = cfg.clone();
+    if let Some(id) = id {
+        if id == 0 {
+            bail!("at-rest key generation zero is reserved")
+        }
+        let encoded = cfg
+            .at_rest_keys
+            .get(&id)
+            .context("unknown at-rest key generation")?;
+        let root = B64.decode(encoded).context("at-rest key must be base64")?;
+        if root.len() != 32 {
+            bail!("at-rest key must contain exactly 32 bytes")
+        }
+        let mut material = root;
+        material.extend_from_slice(&id.to_be_bytes());
+        selected.metadata_key_b64 = Some(B64.encode(blake3::derive_key(
+            "Kagi at-rest key generation v3",
+            &material,
+        )));
+    }
+    selected.active_key_id = None;
+    Ok(selected)
+}
+
+/// Validate configured roots before serving requests. Generation IDs are stable
+/// identifiers; historical entries remain available independently of activation.
+pub fn validate_at_rest_keys(cfg: &ClusterConfig) -> Result<()> {
+    if cfg.metadata_key_b64.is_some() {
+        metadata_key(cfg)?;
+    }
+    for id in cfg.at_rest_keys.keys() {
+        key_generation(cfg, Some(*id))?;
+    }
+    metadata_key(&key_generation(cfg, cfg.active_key_id)?)?;
+    Ok(())
+}
+
+const GENERATION_MAGIC: &[u8; 8] = b"KAGIFR3\0";
+const GENERATION_PREFIX_BYTES: usize = 16;
+
+fn protect_fragment_at_rest(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    let selected = key_generation(cfg, cfg.active_key_id)?;
+    let mut envelope = Vec::new();
+    if let Some(id) = cfg.active_key_id {
+        envelope.extend_from_slice(GENERATION_MAGIC);
+        envelope.extend_from_slice(&id.to_be_bytes());
+    }
+    envelope.extend_from_slice(&protect_fragment_generation(
+        &selected, object, version, fragment, disk, plaintext,
+    )?);
+    Ok(envelope)
+}
+
+fn unprotect_fragment_at_rest(
+    cfg: &ClusterConfig,
+    object: &str,
+    version: u64,
+    fragment: u32,
+    disk: &str,
+    envelope: &[u8],
+) -> Result<Vec<u8>> {
+    let (id, offset) = if envelope.starts_with(GENERATION_MAGIC) {
+        if envelope.len() < GENERATION_PREFIX_BYTES {
+            bail!("truncated key generation")
+        }
+        (
+            Some(u64::from_be_bytes(envelope[8..16].try_into()?)),
+            GENERATION_PREFIX_BYTES,
+        )
+    } else {
+        (None, 0)
+    };
+    unprotect_fragment_generation(
+        &key_generation(cfg, id)?,
+        object,
+        version,
+        fragment,
+        disk,
+        &envelope[offset..],
+    )
+}
+
+/// Reads only the fixed generation prefix and the existing chunk header.
+async fn read_generation_header(
+    file: &mut tokio::fs::File,
+    cfg: &ClusterConfig,
+) -> Result<(ClusterConfig, usize, [u8; FRAGMENT_HEADER_BYTES])> {
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic).await?;
+    let (id, offset) = if &magic == GENERATION_MAGIC {
+        let mut id = [0u8; 8];
+        file.read_exact(&mut id).await?;
+        (Some(u64::from_be_bytes(id)), GENERATION_PREFIX_BYTES)
+    } else {
+        (None, 0)
+    };
+    file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+    let mut header = [0u8; FRAGMENT_HEADER_BYTES];
+    file.read_exact(&mut header).await?;
+    Ok((key_generation(cfg, id)?, offset, header))
+}
+
 const PQ_METADATA_SUITE: &str = "XChaCha20-Poly1305-PQ128+BLAKE3-KDF+AAD+JSON+base64";
 const FRAGMENT_ENVELOPE_MAGIC: &[u8; 8] = b"KAGIFR2\0";
 const FRAGMENT_HEADER_BYTES: usize = 8 + 4 + 8 + 16;
@@ -560,8 +681,9 @@ fn decode_fragment_header(bytes: &[u8]) -> Result<FragmentEnvelopeHeader> {
         bail!("fragment is not a Kagi chunked encrypted-at-rest envelope")
     }
     let chunk_bytes = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let plaintext_bytes = u64::from_be_bytes(bytes[12..20].try_into().unwrap()) as usize;
-    if chunk_bytes == 0 {
+    let plaintext_bytes = usize::try_from(u64::from_be_bytes(bytes[12..20].try_into()?))
+        .context("fragment length exceeds address space")?;
+    if chunk_bytes == 0 || chunk_bytes > FRAGMENT_AEAD_CHUNK_BYTES {
         bail!("invalid encrypted fragment chunk size")
     }
     let mut nonce_prefix = [0u8; FRAGMENT_NONCE_PREFIX_BYTES];
@@ -630,7 +752,7 @@ fn fragment_chunk_aad(
     Ok(aad)
 }
 
-fn protect_fragment_at_rest(
+fn protect_fragment_generation(
     cfg: &ClusterConfig,
     object: &str,
     version: u64,
@@ -678,7 +800,7 @@ fn protect_fragment_at_rest(
     Ok(envelope)
 }
 
-fn unprotect_fragment_at_rest(
+fn unprotect_fragment_generation(
     cfg: &ClusterConfig,
     object: &str,
     version: u64,
@@ -695,7 +817,11 @@ fn unprotect_fragment_at_rest(
     let chunks = fragment_chunk_count(header);
     let expected = FRAGMENT_HEADER_BYTES
         .checked_add(header.plaintext_bytes)
-        .and_then(|value| value.checked_add(chunks * FRAGMENT_TAG_BYTES))
+        .and_then(|value| {
+            chunks
+                .checked_mul(FRAGMENT_TAG_BYTES)
+                .and_then(|tags| value.checked_add(tags))
+        })
         .context("encrypted fragment length overflow")?;
     if envelope.len() != expected {
         bail!("encrypted fragment length mismatch")
@@ -781,8 +907,8 @@ async fn read_fragment_range_at_rest(
         disk,
     } = fragment_ref;
     let mut file = tokio::fs::File::open(path).await?;
-    let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
-    file.read_exact(&mut raw_header).await?;
+    let (selected, envelope_offset, raw_header) = read_generation_header(&mut file, cfg).await?;
+    let cfg = &selected;
     let header = decode_fragment_header(&raw_header)?;
     let range_end = range_start
         .checked_add(range_len)
@@ -790,13 +916,14 @@ async fn read_fragment_range_at_rest(
     if range_end > header.plaintext_bytes {
         bail!("fragment plaintext range out of bounds")
     }
-    if range_len == 0 {
-        return Ok(Vec::new());
-    }
     let chunks = fragment_chunk_count(header);
-    let expected_file_len = FRAGMENT_HEADER_BYTES
+    let expected_file_len = (envelope_offset + FRAGMENT_HEADER_BYTES)
         .checked_add(header.plaintext_bytes)
-        .and_then(|value| value.checked_add(chunks * FRAGMENT_TAG_BYTES))
+        .and_then(|value| {
+            chunks
+                .checked_mul(FRAGMENT_TAG_BYTES)
+                .and_then(|tags| value.checked_add(tags))
+        })
         .context("encrypted fragment length overflow")?;
     if file.metadata().await?.len() != expected_file_len as u64 {
         bail!("encrypted fragment length mismatch")
@@ -804,13 +931,15 @@ async fn read_fragment_range_at_rest(
 
     let key = fragment_at_rest_key(cfg, object, version, fragment, disk)?;
     let cipher = XChaCha20Poly1305::new((&key).into());
-    let first_chunk = range_start / header.chunk_bytes;
-    let last_chunk = (range_end - 1) / header.chunk_bytes;
+    let first_chunk =
+        range_start.min(header.plaintext_bytes.saturating_sub(1)) / header.chunk_bytes;
+    let last_chunk = range_end.saturating_sub(1) / header.chunk_bytes;
     let mut out = Vec::with_capacity(range_len);
 
     for index in first_chunk..=last_chunk {
         let plain_len = fragment_chunk_plaintext_len(header, index)?;
-        let cipher_offset = FRAGMENT_HEADER_BYTES
+        let cipher_offset = envelope_offset
+            + FRAGMENT_HEADER_BYTES
             + index
                 .checked_mul(header.chunk_bytes + FRAGMENT_TAG_BYTES)
                 .context("encrypted fragment offset overflow")?;
@@ -853,8 +982,7 @@ async fn read_subchunks_at_rest(
         bail!("subchunk request requires alpha>0 and at least one index")
     }
     let mut file = tokio::fs::File::open(fragment_ref.path).await?;
-    let mut raw_header = [0u8; FRAGMENT_HEADER_BYTES];
-    file.read_exact(&mut raw_header).await?;
+    let (_, _, raw_header) = read_generation_header(&mut file, fragment_ref.cfg).await?;
     let header = decode_fragment_header(&raw_header)?;
     if header.plaintext_bytes == 0 || !header.plaintext_bytes.is_multiple_of(alpha) {
         bail!(
@@ -877,7 +1005,7 @@ async fn read_subchunks_at_rest(
 }
 // ---- Protected metadata envelopes ----------------------------------------------
 fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<EncryptedMetadata> {
-    let root = metadata_key(cfg)?;
+    let root = metadata_key(&key_generation(cfg, cfg.active_key_id)?)?;
     let mut salt = [0u8; 32];
     let mut nonce = [0u8; 24];
     rand::thread_rng().fill_bytes(&mut salt);
@@ -905,6 +1033,7 @@ fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<
         )
         .map_err(|_| anyhow::anyhow!("metadata encryption failed"))?;
     Ok(EncryptedMetadata {
+        key_id: cfg.active_key_id,
         algorithm: PQ_METADATA_SUITE.into(),
         nonce_b64: B64.encode(nonce),
         ciphertext_b64: B64.encode(ct),
@@ -916,7 +1045,7 @@ pub fn unprotect_metadata(
     cfg: &ClusterConfig,
     e: &EncryptedMetadata,
 ) -> Result<ProtectedObjectMetadata> {
-    let root = metadata_key(cfg)?;
+    let root = metadata_key(&key_generation(cfg, e.key_id)?)?;
     let nonce = B64.decode(&e.nonce_b64)?;
     let ct = B64.decode(&e.ciphertext_b64)?;
     if nonce.len() != 24 {
@@ -1326,7 +1455,13 @@ async fn put_object_inner(
         health,
     )
     .await?;
-    let required = if ec.is_some() { k } else { st.cfg.write_quorum };
+    let required = if scheme == ErasureScheme::Lrc {
+        payloads.len()
+    } else if ec.is_some() {
+        k
+    } else {
+        st.cfg.write_quorum
+    };
     let mut chunks = Vec::new();
     let mut flat = Vec::new();
     let mut successful_chunks = 0;
@@ -1537,6 +1672,28 @@ async fn replica_usable(
     };
     hm.usable(host, &r.disk).await
 }
+/// Repair must verify the immutable replica, not infer presence from disk health.
+async fn replica_valid(
+    st: &ClusterState,
+    m: &ObjectManifest,
+    c: &ChunkMetadata,
+    r: &FragmentReplica,
+    health: Option<&HealthMap>,
+) -> bool {
+    if !replica_usable(st, r, health).await {
+        return false;
+    }
+    let loc = FragmentLocation {
+        fragment: c.chunk,
+        host: r.host.clone(),
+        disk: r.disk.clone(),
+        checksum: r.checksum.clone(),
+    };
+    rpc_get(st, &loc, m)
+        .await
+        .map(|data| blake3::hash(&data).to_hex().as_str() == c.checksum)
+        .unwrap_or(false)
+}
 /// Implements the read valid chunk step and keeps its validation and state transitions visible at the call site.
 async fn read_valid_chunk(
     st: &ClusterState,
@@ -1571,7 +1728,12 @@ async fn try_exact_repair(
     m: &ObjectManifest,
     health: Option<&HealthMap>,
 ) -> Result<Option<(usize, Vec<u8>)>> {
-    if m.data_shards == 0 || !matches!(m.erasure_scheme, ErasureScheme::Msr | ErasureScheme::Clay) {
+    if m.data_shards == 0
+        || !matches!(
+            m.erasure_scheme,
+            ErasureScheme::Msr | ErasureScheme::Clay | ErasureScheme::Lrc
+        )
+    {
         return Ok(None);
     }
     let n = m.data_shards as usize + m.parity_shards as usize;
@@ -1587,7 +1749,7 @@ async fn try_exact_repair(
         };
         let mut any = false;
         for r in &c.replicas {
-            if replica_usable(st, r, health).await {
+            if replica_valid(st, m, c, r, health).await {
                 any = true;
                 break;
             }
@@ -1707,7 +1869,7 @@ async fn repair_object_inner(
             };
             let mut any = false;
             for r in &c.replicas {
-                if replica_usable(st, r, health).await {
+                if replica_valid(st, &old, c, r, health).await {
                     any = true;
                     break;
                 }
@@ -1756,7 +1918,7 @@ async fn repair_object_inner(
                     .find(|r| r.host == target.host && r.disk == target.disk)
             });
             let keep = if let Some(r) = existing {
-                replica_usable(st, r, health).await
+                replica_valid(st, &old, oldc.as_ref().unwrap(), r, health).await
             } else {
                 false
             };
@@ -2367,9 +2529,153 @@ mod at_rest_encryption_tests {
             chunk_replicas: 1,
             erasure: None,
             metadata_key_b64: Some(B64.encode([0x5au8; 32])),
+            active_key_id: None,
+            at_rest_keys: BTreeMap::new(),
             join_key_hash_hex: None,
             transport: DataTransportConfig::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn persisted_lrc_object_reads_and_repairs_a_missing_fragment() {
+        let (mut state, root) = crate::security_integration_tests::fixture().await;
+        let mut cfg = (*state.data.cfg).clone();
+        cfg.hosts.truncate(1);
+        cfg.hosts[0].id = state.data.local_host.clone();
+        let disk = cfg.hosts[0].disks[0].clone();
+        cfg.hosts[0].disks = (0..9)
+            .map(|i| {
+                let mut disk = disk.clone();
+                disk.id = format!("disk-{i}");
+                disk
+            })
+            .collect();
+        cfg.chunk_replicas = 1;
+        let erasure = crate::erasure::ErasureConfig {
+            scheme: ErasureScheme::Lrc,
+            data_shards: 6,
+            parity_shards: 3,
+            backend: crate::erasure::BackendKind::Cpu,
+            ..Default::default()
+        };
+        cfg.erasure = Some(erasure.clone());
+        state.data.cfg = Arc::new(cfg);
+        state.data.erasure = Arc::new(crate::erasure::AdaptiveBackend::new(erasure));
+        let data: Vec<_> = (0..131071).map(|i| (i % 251) as u8).collect();
+        let manifest = put_object(&state.data, "lrc/test", &data).await.unwrap();
+        assert_eq!(manifest.erasure_scheme, ErasureScheme::Lrc);
+        let restored: ObjectManifest =
+            serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let victim = &restored.chunks[0];
+        let replica = &victim.replicas[0];
+        let path = fragment_path(
+            &state.data.root,
+            &replica.disk,
+            &restored.object_id,
+            restored.version,
+            victim.chunk,
+        );
+        tokio::fs::remove_file(&path).await.unwrap();
+        assert_eq!(
+            get_object_version(&state.data, &restored).await.unwrap(),
+            data
+        );
+        let repaired = repair_object(&state.data, "lrc/test").await.unwrap();
+        assert_eq!(
+            get_object_version(&state.data, &repaired).await.unwrap(),
+            data
+        );
+        assert!(scrub_object(&state.data, "lrc/test")
+            .await
+            .unwrap()
+            .values()
+            .all(|ok| *ok));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn metadata_rotation_binds_generation_and_keeps_legacy_readable() {
+        let mut cfg = encrypted_config();
+        let metadata: ProtectedObjectMetadata = serde_json::from_value(serde_json::json!({
+            "object_id":"test", "version":1, "bytes":0, "checksum":"empty",
+            "data_shards":1, "parity_shards":0, "chunks":[]
+        }))
+        .unwrap();
+        let legacy = protect_metadata(&cfg, &metadata).unwrap();
+        cfg.at_rest_keys.insert(7, B64.encode([42u8; 32]));
+        cfg.active_key_id = Some(7);
+        validate_at_rest_keys(&cfg).unwrap();
+        let envelope = protect_metadata(&cfg, &metadata).unwrap();
+        assert_eq!(envelope.key_id, Some(7));
+        assert_eq!(unprotect_metadata(&cfg, &legacy).unwrap().object_id, "test");
+        assert_eq!(
+            unprotect_metadata(&cfg, &envelope).unwrap().object_id,
+            "test"
+        );
+        let mut tampered = envelope.clone();
+        tampered.key_id = None;
+        assert!(unprotect_metadata(&cfg, &tampered).is_err());
+        cfg.at_rest_keys.insert(8, cfg.at_rest_keys[&7].clone());
+        tampered.key_id = Some(8);
+        assert!(unprotect_metadata(&cfg, &tampered).is_err());
+        cfg.at_rest_keys.remove(&7);
+        assert!(validate_at_rest_keys(&cfg).is_err());
+        assert!(unprotect_metadata(&cfg, &envelope).is_err());
+    }
+
+    #[tokio::test]
+    async fn rotation_preserves_legacy_and_authenticated_ranges() {
+        let mut cfg = encrypted_config();
+        let data = vec![0x37; FRAGMENT_AEAD_CHUNK_BYTES + 31];
+        let legacy = protect_fragment_at_rest(&cfg, "o", 1, 0, "d", &data).unwrap();
+        cfg.at_rest_keys.insert(1, B64.encode([11u8; 32]));
+        cfg.active_key_id = Some(1);
+        let first = protect_fragment_at_rest(&cfg, "o", 1, 0, "d", &data).unwrap();
+        cfg.at_rest_keys.insert(2, B64.encode([22u8; 32]));
+        cfg.active_key_id = Some(2);
+        let second = protect_fragment_at_rest(&cfg, "o", 1, 0, "d", &data).unwrap();
+        for envelope in [&legacy, &first, &second] {
+            assert_eq!(
+                unprotect_fragment_at_rest(&cfg, "o", 1, 0, "d", envelope).unwrap(),
+                data
+            );
+            let path = std::env::temp_dir().join(format!("kagi-rotation-{}", uuid::Uuid::new_v4()));
+            tokio::fs::write(&path, envelope).await.unwrap();
+            let reference = FragmentAtRestRef {
+                cfg: &cfg,
+                path: &path,
+                object: "o",
+                version: 1,
+                fragment: 0,
+                disk: "d",
+            };
+            let start = FRAGMENT_AEAD_CHUNK_BYTES - 17;
+            assert_eq!(
+                read_fragment_range_at_rest(reference, start, 32)
+                    .await
+                    .unwrap(),
+                data[start..start + 32]
+            );
+            assert!(read_fragment_range_at_rest(reference, data.len(), 0)
+                .await
+                .unwrap()
+                .is_empty());
+            tokio::fs::remove_file(path).await.unwrap();
+        }
+        let mut changed_id = first.clone();
+        changed_id[15] = 2;
+        assert!(unprotect_fragment_at_rest(&cfg, "o", 1, 0, "d", &changed_id).is_err());
+        // Reusing key material still cannot make a forged generation authenticate.
+        cfg.at_rest_keys.insert(2, cfg.at_rest_keys[&1].clone());
+        assert!(unprotect_fragment_at_rest(&cfg, "o", 1, 0, "d", &changed_id).is_err());
+        cfg.at_rest_keys.remove(&1);
+        assert!(unprotect_fragment_at_rest(&cfg, "o", 1, 0, "d", &first).is_err());
+        assert_eq!(
+            unprotect_fragment_at_rest(&cfg, "o", 1, 0, "d", &legacy).unwrap(),
+            data
+        );
+        cfg.active_key_id = Some(99);
+        assert!(protect_fragment_at_rest(&cfg, "o", 1, 0, "d", &data).is_err());
     }
 
     #[test]
