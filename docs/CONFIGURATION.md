@@ -17,6 +17,10 @@ important defaults are:
 | Parameter | Default | Meaning |
 | --- | ---: | --- |
 | `listen` | `0.0.0.0:7400` | TCP API/web listener |
+| `s3` | absent | disabled; see [S3 configuration](S3.md) |
+| `s3.max_object_bytes` | 67,108,864 | bound for objects, parts and assembled multipart uploads |
+| `cluster.active_key_id` | null | nonzero key generation for new writes; null selects legacy |
+| `cluster.at_rest_keys` | empty map | retained generation roots; see [rotation](AT-REST-ROTATION.md) |
 | `cluster.replication` | 3 | replication copies |
 | `cluster.write_quorum` | 2 | acknowledgements required |
 | `cluster.chunk_replicas` | 1 | copies per encoded fragment |
@@ -303,3 +307,14 @@ Bucket records are replicated Raft metadata and contain `name`, `created_at_unix
 See [security policy and monitoring](SECURITY-POLICY.md) for node YAML rules, the
 optional BPF build, privileged metadata, authenticated REST/SSE endpoints, the
 audit CLI and deployment boundaries.
+
+## New runtime boundaries
+
+`scheme: lrc` uses the fixed [LRC v1 geometry](LRC.md), not arbitrary planner LRC
+parameters. Native directory lookup and S3 `directory_user` mapping are described
+in [DIRECTORY-IDENTITY.md](DIRECTORY-IDENTITY.md). At-rest keys are validated before
+serving; never activate a generation until every node has its keyring entry.
+With `scsi-target`, administrator-authenticated `POST /v1/volumes/:id/pr/cdb`
+accepts `{cdb: [bytes], parameters: [bytes], initiator: string}` and dispatches PR
+IN/OUT through the existing replicated reservation state. This is a target bridge,
+not a native iSCSI/FC target daemon.

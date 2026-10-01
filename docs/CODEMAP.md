@@ -10,13 +10,15 @@ The source files carry module-level comments; this document provides an addition
 | `src/bin/kagi-cluster-host.rs` | Full distributed node daemon, REST/admin CLI, Raft wiring, snapshots, maintenance, topology/capacity operations, filesystem namespace, block volumes, and SCSI PR administrative paths. |
 | `src/bin/kagi-host.rs` | Simpler host-local object endpoint and deterministic local-disk routing. |
 | `src/bin/kagi-volume-nbd.rs` | NBD protocol frontend translating block operations into Kagi volume requests. |
+| `src/s3.rs` | Authenticated S3 protocol adapter, bucket allowlists, multipart Raft state and bounded object operations. |
+| `src/identity.rs` | Native NSS user/group lookup, bounded winbind SID resolution and provider execution tests. |
 | `src/cluster.rs` | Object manifests, immutable versions, fragment placement/RPC, erasure-code data path, metadata encryption, repair and scrub. |
 | `src/raftmeta.rs` | Persistent Raft term/log/state machine, linearizable commit barriers, joint-consensus membership, snapshot/GC/topology/volume metadata. |
 | `src/recovery.rs` | Resource health states, heartbeat processing, failure-domain inference, quarantine/reinclusion, repair risk. |
 | `src/maintenance.rs` | Schedules, network/CPU/memory/concurrency budgets, and maintenance-vs-foreground priority. |
 | `src/pq.rs` | ML-DSA identities, signed request envelopes, key IDs, Raft-fed keyring, nonce replay cache, persistent session epoch/sequence anti-replay. |
 | `src/tls.rs` | rustls TLS/mTLS provider and certificate/key loading. |
-| `src/erasure.rs` | Reed-Solomon, canonical product-matrix MSR, CLAY reference/linearized transforms, exact-repair plans, CPU/GPU adaptive dispatch and metrics. |
+| `src/erasure.rs` | Reed-Solomon, canonical product-matrix MSR, CLAY reference/linearized transforms, LRC rank reconstruction/local repair, exact-repair plans, CPU/GPU adaptive dispatch and metrics. |
 | `src/storage.rs` | NVMe/SATA/SAS/FC device type detection, SMART/SCSI health normalization and identity matching. |
 | `src/filesystem.rs` | File/directory metadata, NFSv4-like ACL evaluation, local overlay index and bottom-up tree reconstruction. |
 | `src/block.rs` | Sparse object-backed zvol-like volume extents, SCSI identity, UNMAP, SCSI-3 PR state/semantics. |
@@ -34,7 +36,7 @@ For placement work start with `src/main.rs`, then `src/cluster.rs`. For consiste
 2. **Failure simulation and placement** — capacity-weighted rendezvous placement, site/rack/host/disk/network failure sampling, correlated events, importance sampling, repair trajectories, and explicit slot maps.
 3. **Protection-geometry optimization** — topology-bounded Reed-Solomon/LRC/MSR/CLAY candidate generation, per-policy isolated Monte Carlo scoring, deterministic failure-tolerance validation, per-schema reporting, and optional automatic policy selection.
 
-The planner and runtime codec remain separate layers. Runtime support exists for Reed-Solomon, product-matrix MSR and CLAY; LRC remains planner-only. Monte Carlo output still describes policy geometry and placement rather than directly mutating a running cluster.
+The planner and runtime codec remain separate layers. Runtime support exists for Reed-Solomon, product-matrix MSR, CLAY and the documented LRC v1 geometry. The planner can model broader LRC geometries than the runtime codec. Monte Carlo output still describes policy geometry and placement rather than directly mutating a running cluster.
 
 ## Monte Carlo progress subsystem
 

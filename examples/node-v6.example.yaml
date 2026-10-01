@@ -24,6 +24,11 @@ cluster:
   join_key_hash_hex: "REPLACE_WITH_HASH_FROM_KAGI_GENERATED_YAML"
   # Optional, default: null. Independent 32-byte metadata-encryption key, base64.
   metadata_key_b64: "REPLACE_WITH_BASE64_32_BYTE_KEY"
+  # New writes use this nonzero u64 generation; null retains legacy writes.
+  # Retain the legacy key and historical generation keys for old ciphertext.
+  active_key_id: null
+  # Map stable generation IDs to independent base64 32-byte random root keys.
+  at_rest_keys: {}
 
   # Omitting transport uses all defaults shown here.
   transport:
@@ -44,7 +49,7 @@ cluster:
     # Default: auto. auto | cpu | cuda | hip | opencl.
     backend: auto
     # Default for new runtime EC configuration: clay. clay | msr | reed_solomon.
-    scheme: clay
+    scheme: clay  # Also reed_solomon, msr, or lrc (see docs/LRC.md).
     # Default: 6. Data shards (k).
     data_shards: 6
     # Default: 3. Parity shards (m).
@@ -280,3 +285,18 @@ security:
     # stop_subject:
     #   type: signal
     #   signal: 15
+
+# Optional separately authenticated path-style S3 listener. Disabled by default.
+# TLS uses node TLS configuration; plaintext binding is restricted to loopback.
+# s3:
+#   listen: "127.0.0.1:7480"
+#   max_object_bytes: 67108864  # Positive in-memory object/part/completion bound.
+#   credentials:
+#     MY_ACCESS_KEY:
+#       secret_key: "REPLACE_WITH_AT_LEAST_32_RANDOM_SECRET_BYTES"
+#       uid: 1000              # Exactly one of uid or directory_user is required.
+#       directory_user: null   # NSS/SSSD/winbind name; failed resolution denies.
+#       gids: [1000]           # Used with fixed uid only; default [].
+#       buckets: [example-bucket]  # Required explicit, nonempty allowlist.
+#       read_only: false
+s3: null
