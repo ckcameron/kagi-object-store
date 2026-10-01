@@ -1328,7 +1328,20 @@ mod tests {
 
     /// curl's SigV4 implementation is independent of the server's s3s verifier.
     async fn signed(base: &str, method: &str, path: &str, body: &[u8]) -> (u16, String) {
-        let mut child = tokio::process::Command::new("curl")
+        signed_headers(base, method, path, body, &[]).await
+    }
+    async fn signed_headers(
+        base: &str,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        headers: &[&str],
+    ) -> (u16, String) {
+        let mut command = tokio::process::Command::new("curl");
+        for header in headers {
+            command.arg("--header").arg(header);
+        }
+        let mut child = command
             .args([
                 "--silent",
                 "--show-error",
@@ -1430,6 +1443,70 @@ mod tests {
             signed(&base, "GET", "/allowed/a%2Bb%20%25/x", b"").await,
             (200, "hello".into())
         );
+        assert_eq!(
+            signed_headers(
+                &base,
+                "GET",
+                "/allowed/a%2Bb%20%25/x",
+                b"",
+                &["Range: bytes=1-3"]
+            )
+            .await,
+            (206, "ell".into())
+        );
+        assert_eq!(
+            signed_headers(
+                &base,
+                "GET",
+                "/allowed/a%2Bb%20%25/x",
+                b"",
+                &["Range: bytes=10-20"]
+            )
+            .await
+            .0,
+            416
+        );
+        assert_eq!(
+            signed_headers(
+                &base,
+                "PUT",
+                "/allowed/a%2Bb%20%25/x",
+                b"overwrite",
+                &["If-None-Match: *"]
+            )
+            .await
+            .0,
+            412
+        );
+        assert_eq!(
+            signed_headers(
+                &base,
+                "PUT",
+                "/allowed/rejected",
+                b"hello",
+                &["Content-MD5: AAAAAAAAAAAAAAAAAAAAAA=="]
+            )
+            .await
+            .0,
+            400
+        );
+        assert_eq!(signed(&base, "GET", "/allowed/rejected", b"").await.0, 404);
+        assert_eq!(
+            signed_headers(
+                &base,
+                "PUT",
+                "/allowed/rejected",
+                b"hello",
+                &["x-amz-acl: public-read"]
+            )
+            .await
+            .0,
+            501
+        );
+        assert_eq!(
+            signed(&base, "GET", "/allowed/a%2Bb%20%25/x", b"").await,
+            (200, "hello".into())
+        );
         assert_eq!(signed(&base, "DELETE", "/allowed", b"").await.0, 409);
         let (code, listing) = signed(&base, "GET", "/allowed?list-type=2&max-keys=1", b"").await;
         assert_eq!(code, 200);
@@ -1448,6 +1525,13 @@ mod tests {
             .0,
             200
         );
+        let (status, parts) =
+            signed(&base, "GET", &format!("/allowed/multi?uploadId={id}"), b"").await;
+        assert_eq!(status, 200);
+        assert!(parts.contains("<PartNumber>1</PartNumber>"));
+        let (status, uploads) = signed(&base, "GET", "/allowed?uploads", b"").await;
+        assert_eq!(status, 200);
+        assert!(uploads.contains(id));
         let reopened = MetadataStore::open(root.join("metadata")).await.unwrap();
         let saved = reopened.state().await;
         let upload = &saved.s3_uploads[id];

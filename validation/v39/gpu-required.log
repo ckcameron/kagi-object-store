@@ -1,0 +1,35 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running unittests src/lib.rs (../target/debug/deps/kagi_object_store-2ccb4b6a4501d169)
+
+running 3 tests
+test erasure::tests::gpu_product_matrix_matches_cpu_reference ... FAILED
+test erasure::tests::gpu_exact_repair_matches_persisted_chunks ... FAILED
+test erasure::tests::gpu_clay_matches_reference_and_reconstructs ... FAILED
+
+failures:
+
+---- erasure::tests::gpu_product_matrix_matches_cpu_reference stdout ----
+
+thread 'erasure::tests::gpu_product_matrix_matches_cpu_reference' (48) panicked at src/erasure.rs:2497:13:
+GPU execution required but no compiled backend has an available device
+
+---- erasure::tests::gpu_exact_repair_matches_persisted_chunks stdout ----
+
+thread 'erasure::tests::gpu_exact_repair_matches_persisted_chunks' (47) panicked at src/erasure.rs:2589:13:
+GPU execution required but no compiled backend has an available device
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- erasure::tests::gpu_clay_matches_reference_and_reconstructs stdout ----
+
+thread 'erasure::tests::gpu_clay_matches_reference_and_reconstructs' (46) panicked at src/erasure.rs:2548:13:
+GPU execution required but no compiled backend has an available device
+
+
+failures:
+    erasure::tests::gpu_clay_matches_reference_and_reconstructs
+    erasure::tests::gpu_exact_repair_matches_persisted_chunks
+    erasure::tests::gpu_product_matrix_matches_cpu_reference
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `--lib`

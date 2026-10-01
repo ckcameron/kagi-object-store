@@ -137,7 +137,7 @@ Validated locally on x86-64 Linux with Rust/Cargo 1.99.0-beta.7:
 | `cargo test --all-targets --all-features` | 140 reported passed; two ignored provider/kernel tests; accelerator fallback is not execution evidence |
 | `cargo audit` | Passed with no advisory warnings |
 | `cargo deny check advisories sources` | Passed without advisory exceptions |
-| Repository CI/security workflow | Pending review-branch execution |
+| Repository CI/security workflow | Miri, ASan and supply-chain jobs passed on initial PR revision; fuzz and final CI still pending |
 
 The S3 integration test uses curl's independent SigV4 implementation against the
 actual HTTP service, including bucket/object operations, multipart completion,
@@ -156,3 +156,10 @@ execution is claimed by fallback or ignored tests. RDMA remains unavailable,
 with a configuration audit finding and HTTPS/QUIC transport as the fallback.
 Native LDAP binds/Kerberos authentication, full S3 SDK conformance, and VM-level
 block persistence tests remain integration boundaries or further validation work.
+
+Raw local logs are retained under `validation/v39/`. The required-execution probes
+correctly fail for unavailable GPU devices, ISA-L and IPP in this environment;
+AOCL's copy test executed and passed. These are explicit environment limitations,
+not waived passing hardware results. The expanded signed S3 test also verifies
+206/416 ranges, failed conditional writes, checksum rejection with no object
+published, unsupported ACL rejection, and multipart listings.
