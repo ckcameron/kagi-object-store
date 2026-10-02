@@ -539,10 +539,18 @@ where
         .next()
         .context("no Reed-Solomon shards available")?
         .len();
-    if shard_len == 0 || shards.iter().flatten().any(|shard| shard.len() != shard_len) {
+    if shard_len == 0
+        || shards
+            .iter()
+            .flatten()
+            .any(|shard| shard.len() != shard_len)
+    {
         bail!("Reed-Solomon shard length mismatch")
     }
-    if original_len > k.checked_mul(shard_len).context("Reed-Solomon size overflow")? {
+    if original_len
+        > k.checked_mul(shard_len)
+            .context("Reed-Solomon size overflow")?
+    {
         bail!("Reed-Solomon original length exceeds data capacity")
     }
 
@@ -595,11 +603,7 @@ fn lrc_matrix(layout: &ErasureLayout) -> Vec<u8> {
     matrix
 }
 
-fn lrc_encode_with<F>(
-    data: &[u8],
-    layout: &ErasureLayout,
-    apply: &F,
-) -> Result<EncodedShards>
+fn lrc_encode_with<F>(data: &[u8], layout: &ErasureLayout, apply: &F) -> Result<EncodedShards>
 where
     F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
 {
@@ -2022,23 +2026,16 @@ impl ErasureBackend for AdaptiveBackend {
                         let shard_len = data.len().div_ceil(k).max(1);
                         let input = pack_source_rows(data, k, shard_len);
                         let matrix = rs_generator_matrix(k, m)?;
-                        gpu::matrix_apply(
-                            self.cfg.backend,
-                            &input,
-                            k,
-                            &matrix,
-                            k + m,
-                            shard_len,
-                        )
-                        .map(|rows| EncodedShards {
-                            original_len: data.len() as u64,
-                            data_shards: k as u16,
-                            parity_shards: m as u16,
-                            scheme: ErasureScheme::ReedSolomon,
-                            repair_helpers: None,
-                            sub_chunk_no: 1,
-                            shards: rows.chunks_exact(shard_len).map(|x| x.to_vec()).collect(),
-                        })
+                        gpu::matrix_apply(self.cfg.backend, &input, k, &matrix, k + m, shard_len)
+                            .map(|rows| EncodedShards {
+                                original_len: data.len() as u64,
+                                data_shards: k as u16,
+                                parity_shards: m as u16,
+                                scheme: ErasureScheme::ReedSolomon,
+                                repair_helpers: None,
+                                sub_chunk_no: 1,
+                                shards: rows.chunks_exact(shard_len).map(|x| x.to_vec()).collect(),
+                            })
                     }
                     ErasureScheme::Msr => {
                         let p = pm_layout(layout.data_shards, layout.parity_shards)?;
@@ -2266,13 +2263,7 @@ impl ErasureBackend for AdaptiveBackend {
                     let input: Vec<_> = plan
                         .fetches
                         .iter()
-                        .flat_map(|fetch| {
-                            shards[fetch.shard()]
-                                .as_ref()
-                                .unwrap()
-                                .iter()
-                                .copied()
-                        })
+                        .flat_map(|fetch| shards[fetch.shard()].as_ref().unwrap().iter().copied())
                         .collect();
                     gpu::matrix_apply(
                         self.cfg.backend,
