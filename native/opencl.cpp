@@ -166,6 +166,8 @@ extern "C" int kagi_mc_readability_opencl(const uint8_t *alive, uint8_t *lost,
   if (!alive || !lost || !trials || !fragments ||
       trials > SIZE_MAX / fragments || mode > 2)
     return 1;
+  if (mode == 1 && k > fragments)
+    return 1;
   if (mode == 2 &&
       (!groups || k % groups ||
        uint64_t(k) + uint64_t(groups) * local_parity + global_parity !=
