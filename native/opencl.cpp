@@ -111,7 +111,7 @@ extern "C" int kagi_opencl_available() { return runtime().program != nullptr; }
 extern "C" int kagi_opencl_matrix_apply(const uint8_t *input, size_t inputs,
                                         const uint8_t *coeff, size_t outputs,
                                         size_t width, uint8_t *output) {
-  if (!inputs || !outputs || !width)
+  if (!input || !coeff || !output || !inputs || !outputs || !width)
     return 1;
   if (inputs > SIZE_MAX / width || outputs > SIZE_MAX / width ||
       inputs > SIZE_MAX / outputs)
@@ -163,7 +163,8 @@ extern "C" int kagi_mc_readability_opencl(const uint8_t *alive, uint8_t *lost,
                                           uint32_t groups,
                                           uint32_t local_parity,
                                           uint32_t global_parity) {
-  if (!trials || !fragments || trials > SIZE_MAX / fragments || mode > 2)
+  if (!alive || !lost || !trials || !fragments ||
+      trials > SIZE_MAX / fragments || mode > 2)
     return 1;
   if (mode == 2 &&
       (!groups || k % groups ||
