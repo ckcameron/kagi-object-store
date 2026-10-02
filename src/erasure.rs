@@ -2282,13 +2282,20 @@ impl ErasureBackend for AdaptiveBackend {
                     owned[lost] = None;
                     rs_reconstruct_with(
                         &mut owned,
-                        (layout.data_shards
-                            * shards
-                                .iter()
-                                .flatten()
-                                .next()
-                                .context("no Reed-Solomon helpers")?
-                                .len()) as u64,
+                        u64::try_from(
+                            layout
+                                .data_shards
+                                .checked_mul(
+                                    shards
+                                        .iter()
+                                        .flatten()
+                                        .next()
+                                        .context("no Reed-Solomon helpers")?
+                                        .len(),
+                                )
+                                .context("Reed-Solomon repair size overflow")?,
+                        )
+                        .context("Reed-Solomon repair size exceeds u64")?,
                         layout,
                         &|input, in_rows, coeff, out_rows, row_len| {
                             gpu::matrix_apply(
@@ -2857,6 +2864,73 @@ mod tests {
             src
         );
     }
+    #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+    #[tokio::test]
+    async fn gpu_reed_solomon_and_lrc_match_cpu_reference() {
+        let Some(kind) = gpu_test_backend() else {
+            return;
+        };
+        let src: Vec<u8> = (0..2_000_021).map(|x| (x * 53 + 9) as u8).collect();
+        for layout in [
+            ErasureLayout {
+                scheme: ErasureScheme::ReedSolomon,
+                data_shards: 6,
+                parity_shards: 3,
+                repair_helpers: None,
+            },
+            ErasureLayout {
+                scheme: ErasureScheme::Lrc,
+                data_shards: 6,
+                parity_shards: 3,
+                repair_helpers: None,
+            },
+        ] {
+            let cpu = AdaptiveBackend::new(ErasureConfig {
+                backend: BackendKind::Cpu,
+                scheme: layout.scheme,
+                data_shards: layout.data_shards,
+                parity_shards: layout.parity_shards,
+                repair_helpers: layout.repair_helpers,
+                gpu_threshold_bytes: 0,
+                ..Default::default()
+            });
+            let accelerated = AdaptiveBackend::new(ErasureConfig {
+                backend: kind,
+                scheme: layout.scheme,
+                data_shards: layout.data_shards,
+                parity_shards: layout.parity_shards,
+                repair_helpers: layout.repair_helpers,
+                gpu_threshold_bytes: 0,
+                ..Default::default()
+            });
+            let expected = cpu.encode_layout(&src, &layout).await.unwrap();
+            let encoded = accelerated.encode_layout(&src, &layout).await.unwrap();
+            assert_eq!(
+                encoded.shards, expected.shards,
+                "{:?} accelerator changed persisted shard bytes",
+                layout.scheme
+            );
+            assert!(accelerated.metrics.gpu_bytes.load(Ordering::Relaxed) > 0);
+            assert_eq!(accelerated.metrics.gpu_fallbacks.load(Ordering::Relaxed), 0);
+
+            let mut shards = encoded.shards.into_iter().map(Some).collect::<Vec<_>>();
+            shards[0] = None;
+            shards[layout.n() - 1] = None;
+            assert_eq!(
+                accelerated
+                    .reconstruct_layout(&mut shards, src.len() as u64, &layout)
+                    .await
+                    .unwrap(),
+                src
+            );
+            assert_eq!(
+                shards.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+                expected.shards
+            );
+            assert_eq!(accelerated.metrics.gpu_fallbacks.load(Ordering::Relaxed), 0);
+        }
+    }
+
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
     #[tokio::test]
     async fn gpu_exact_repair_matches_persisted_chunks() {
