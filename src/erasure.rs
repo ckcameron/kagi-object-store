@@ -2008,7 +2008,7 @@ impl ErasureBackend for AdaptiveBackend {
             {
                 let r: Result<EncodedShards> = (|| {
                     match layout.scheme {
-                    ErasureScheme::Lrc => lrc_encode_with(
+                        ErasureScheme::Lrc => lrc_encode_with(
                         data,
                         layout,
                         &|input, in_rows, coeff, out_rows, row_len| {
@@ -2022,7 +2022,7 @@ impl ErasureBackend for AdaptiveBackend {
                             )
                         },
                     ),
-                    ErasureScheme::ReedSolomon => {
+                        ErasureScheme::ReedSolomon => {
                         let (k, m) = (layout.data_shards, layout.parity_shards);
                         let shard_len = data.len().div_ceil(k).max(1);
                         let input = pack_source_rows(data, k, shard_len);
@@ -2038,7 +2038,7 @@ impl ErasureBackend for AdaptiveBackend {
                                 shards: rows.chunks_exact(shard_len).map(|x| x.to_vec()).collect(),
                             })
                     }
-                    ErasureScheme::Msr => {
+                        ErasureScheme::Msr => {
                         let p = pm_layout(layout.data_shards, layout.parity_shards)?;
                         pm_encode_with(data, &p, |input, in_rows, coeff, out_rows, row_len| {
                             gpu::matrix_apply(
@@ -2051,7 +2051,7 @@ impl ErasureBackend for AdaptiveBackend {
                             )
                         })
                     }
-                    ErasureScheme::Clay => clay_encode_linearized_with(
+                        ErasureScheme::Clay => clay_encode_linearized_with(
                         data,
                         layout,
                         self.cfg.max_matrix_cache_bytes,
@@ -2067,7 +2067,8 @@ impl ErasureBackend for AdaptiveBackend {
                         },
                     ),
                     }
-                })();                self.release_gpu_slot();
+                })();
+                self.release_gpu_slot();
                 if let Ok(v) = r {
                     self.metrics
                         .gpu_bytes
@@ -2249,7 +2250,7 @@ impl ErasureBackend for AdaptiveBackend {
         if self.can_gpu(shard_bytes) && self.try_gpu_slot() {
             let r: Result<Vec<u8>> = (|| {
                 match layout.scheme {
-                ErasureScheme::Lrc => {
+                    ErasureScheme::Lrc => {
                     let size = shards
                         .iter()
                         .flatten()
@@ -2276,7 +2277,7 @@ impl ErasureBackend for AdaptiveBackend {
                         plan.row_len,
                     )
                 }
-                ErasureScheme::ReedSolomon => {
+                    ErasureScheme::ReedSolomon => {
                     let mut owned = shards.to_vec();
                     if lost >= owned.len() {
                         bail!("lost shard out of range")
@@ -2314,7 +2315,7 @@ impl ErasureBackend for AdaptiveBackend {
                         .take()
                         .context("Reed-Solomon GPU repair did not reconstruct shard")
                 }
-                ErasureScheme::Msr => {
+                    ErasureScheme::Msr => {
                     let p = pm_layout(layout.data_shards, layout.parity_shards)?;
                     pm_repair_with(
                         shards,
@@ -2332,7 +2333,7 @@ impl ErasureBackend for AdaptiveBackend {
                         },
                     )
                 }
-                ErasureScheme::Clay => clay_repair_with(
+                    ErasureScheme::Clay => clay_repair_with(
                     shards,
                     lost,
                     layout,
@@ -2349,7 +2350,8 @@ impl ErasureBackend for AdaptiveBackend {
                     },
                 ),
                 }
-            })();            self.release_gpu_slot();
+            })();
+            self.release_gpu_slot();
             if let Ok(v) = r {
                 self.metrics.gpu_repairs.fetch_add(1, Ordering::Relaxed);
                 return Ok(v);
