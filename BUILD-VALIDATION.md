@@ -186,3 +186,28 @@ above describe the completion-series baseline. Local follow-up validation passed
 tests, 141 reported all-feature tests, strict default/all-feature Clippy, and
 dependency advisory/source checks. Hardware/provider limitations above still
 apply. Repository execution is tracked on the GC replica-fence follow-up PR.
+
+### Hardware-acceleration integration follow-up (2026-10-02)
+
+The acceleration audit found and closed several software-integration gaps after the
+initial 0.39 completion merge. CUDA, HIP and OpenCL now share the same GF(256)
+matrix boundary across Reed-Solomon, LRC, product-matrix MSR and CLAY
+encode/reconstruct/repair paths. Reed-Solomon reconstruction and LRC runtime
+operations are no longer CPU-only exceptions.
+
+Hardware validation is backend-specific. The manual hardware workflow selects
+exactly one CUDA/HIP/OpenCL provider, requires that provider to be available,
+compares the separate planner readability kernel against the CPU reference, and
+runs all four runtime codec families with `kagi-bench --require-acceleration`.
+A missing device or any GPU fallback fails the hardware-validation run. ISA-L,
+IPP and AOCL expose runtime availability and execution counters, and their
+hardware jobs require Kagi's actual matrix/XOR/packing hot path to increment the
+matching counter. AVX2 and AVX-512 jobs likewise fail if the requested ISA is not
+present and executed.
+
+CUDA/HIP launch dimensions now use checked arithmetic and reject unrepresentable
+grids rather than relying on narrowing casts. These changes establish software
+integration and positive-execution gates; they do **not** claim that a particular
+GPU, CPU library, or SIMD implementation has executed on a matching runner until
+the corresponding `hardware-execution` workflow artifact exists for this
+revision.

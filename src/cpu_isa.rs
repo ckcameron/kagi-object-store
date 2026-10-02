@@ -104,11 +104,21 @@ mod tests {
         }
     }
     #[cfg(target_arch = "x86_64")]
+    fn require_isa(name: &str) {
+        assert_ne!(
+            std::env::var("KAGI_REQUIRE_CPU_ISA_TESTS").ok().as_deref(),
+            Some(name),
+            "required {name} execution is unavailable on this runner"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx2_all_coefficients_match_reference() {
         if std::is_x86_feature_detected!("avx2") {
             check_vector(avx2_multiply_add);
         } else {
+            require_isa("avx2");
             eprintln!("AVX2 execution unavailable");
         }
     }
@@ -118,6 +128,7 @@ mod tests {
         if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
             check_vector(avx512_multiply_add);
         } else {
+            require_isa("avx512");
             eprintln!("AVX-512 execution unavailable");
         }
     }

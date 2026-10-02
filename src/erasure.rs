@@ -272,6 +272,15 @@ pub trait ErasureBackend: Send + Sync {
         lost: usize,
         layout: &ErasureLayout,
     ) -> Result<Vec<u8>>;
+    /// Runtime acceleration/provider state when this backend exposes it.
+    fn acceleration_status(&self) -> Option<AccelerationStatus> {
+        None
+    }
+    /// Runtime dispatch counters when this backend exposes them.
+    fn metrics_snapshot(&self) -> Option<ErasureMetricsSnapshot> {
+        None
+    }
+
     /// Return a bandwidth-optimal repair plan when the selected codec supports
     /// exact single-node repair. Reed-Solomon returns `None`.
     fn exact_repair_plan(
@@ -498,6 +507,97 @@ fn gf_matrix_apply_cpu(
     }
     Ok(out)
 }
+#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+fn rs_generator_matrix(k: usize, m: usize) -> Result<Vec<u8>> {
+    validate_common(k, m)?;
+    let rs = ReedSolomon::new(k, m)?;
+    let mut matrix = vec![0u8; (k + m) * k];
+    for i in 0..k {
+        matrix[i * k + i] = 1;
+    }
+    for data_row in 0..k {
+        let mut basis = vec![vec![0u8; 1]; k + m];
+        basis[data_row][0] = 1;
+        rs.encode(&mut basis)?;
+        for parity_row in 0..m {
+            matrix[(k + parity_row) * k + data_row] = basis[k + parity_row][0];
+        }
+    }
+    Ok(matrix)
+}
+
+#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+fn rs_reconstruct_with<F>(
+    shards: &mut [Option<Vec<u8>>],
+    original_len: u64,
+    layout: &ErasureLayout,
+    apply: &F,
+) -> Result<Vec<u8>>
+where
+    F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
+{
+    let k = layout.data_shards;
+    let m = layout.parity_shards;
+    let n = k + m;
+    if shards.len() != n {
+        bail!("Reed-Solomon shard count mismatch")
+    }
+    let original_len =
+        usize::try_from(original_len).context("Reed-Solomon object exceeds address space")?;
+    let shard_len = shards
+        .iter()
+        .flatten()
+        .next()
+        .context("no Reed-Solomon shards available")?
+        .len();
+    if shard_len == 0
+        || shards
+            .iter()
+            .flatten()
+            .any(|shard| shard.len() != shard_len)
+    {
+        bail!("Reed-Solomon shard length mismatch")
+    }
+    if original_len
+        > k.checked_mul(shard_len)
+            .context("Reed-Solomon size overflow")?
+    {
+        bail!("Reed-Solomon original length exceeds data capacity")
+    }
+
+    let generator = rs_generator_matrix(k, m)?;
+    let available = shards
+        .iter()
+        .enumerate()
+        .filter_map(|(index, shard)| shard.as_ref().map(|_| index))
+        .take(k)
+        .collect::<Vec<_>>();
+    if available.len() != k {
+        bail!("insufficient Reed-Solomon shards")
+    }
+    let survivor_rows = available
+        .iter()
+        .flat_map(|index| generator[index * k..(index + 1) * k].iter().copied())
+        .collect::<Vec<_>>();
+    let inverse = gf_matrix_inverse(&survivor_rows, k)?;
+    let input = available
+        .iter()
+        .flat_map(|index| shards[*index].as_ref().unwrap().iter().copied())
+        .collect::<Vec<_>>();
+    let data_rows = apply(&input, k, &inverse, k, shard_len)?;
+    let rebuilt = apply(&data_rows, k, &generator, n, shard_len)?;
+
+    for (index, shard) in shards.iter_mut().enumerate() {
+        if shard.is_none() {
+            *shard = Some(rebuilt[index * shard_len..(index + 1) * shard_len].to_vec());
+        }
+    }
+
+    let mut data = data_rows;
+    data.truncate(original_len);
+    Ok(data)
+}
+
 /// LRC v1 uses m-1 disjoint local XOR groups (data index modulo m-1),
 /// followed by a GF(256) global row with distinct nonzero coefficients. The
 /// persisted scheme/k/m completely determine the code; no runtime policy leaks
@@ -514,11 +614,14 @@ fn lrc_matrix(layout: &ErasureLayout) -> Vec<u8> {
     matrix
 }
 
-fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
+fn lrc_encode_with<F>(data: &[u8], layout: &ErasureLayout, apply: &F) -> Result<EncodedShards>
+where
+    F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
+{
     let k = layout.data_shards;
     let size = data.len().div_ceil(k).max(1);
     let packed = pack_source_rows(data, k, size);
-    let output = gf_matrix_apply_cpu(&packed, k, &lrc_matrix(layout), layout.n(), size)?;
+    let output = apply(&packed, k, &lrc_matrix(layout), layout.n(), size)?;
     Ok(EncodedShards {
         original_len: data.len() as u64,
         data_shards: k as u16,
@@ -528,6 +631,10 @@ fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
         sub_chunk_no: 1,
         shards: output.chunks_exact(size).map(<[u8]>::to_vec).collect(),
     })
+}
+
+fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
+    lrc_encode_with(data, layout, &gf_matrix_apply_cpu)
 }
 
 /// Select a basis by elimination, rather than assuming any k surviving rows
@@ -640,11 +747,15 @@ fn lrc_plan(
     })
 }
 
-fn lrc_reconstruct(
+fn lrc_reconstruct_with<F>(
     shards: &mut [Option<Vec<u8>>],
     original_len: u64,
     layout: &ErasureLayout,
-) -> Result<Vec<u8>> {
+    apply: &F,
+) -> Result<Vec<u8>>
+where
+    F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
+{
     if shards.len() != layout.n() {
         bail!("LRC shard count mismatch")
     }
@@ -669,15 +780,23 @@ fn lrc_reconstruct(
         .iter()
         .flat_map(|i| shards[*i].as_ref().unwrap().iter().copied())
         .collect();
-    let mut data = gf_matrix_apply_cpu(&input, k, &gf_matrix_inverse(&rows, k)?, k, size)?;
+    let mut data = apply(&input, k, &gf_matrix_inverse(&rows, k)?, k, size)?;
     data.truncate(original_len);
-    let encoded = lrc_encode(&data, layout)?;
+    let encoded = lrc_encode_with(&data, layout, apply)?;
     for (target, recovered) in shards.iter_mut().zip(encoded.shards) {
         if target.is_none() {
             *target = Some(recovered);
         }
     }
     Ok(data)
+}
+
+fn lrc_reconstruct(
+    shards: &mut [Option<Vec<u8>>],
+    original_len: u64,
+    layout: &ErasureLayout,
+) -> Result<Vec<u8>> {
+    lrc_reconstruct_with(shards, original_len, layout, &gf_matrix_apply_cpu)
 }
 
 /// Implements the pack source rows step and keeps its validation and state transitions visible at the call site.
@@ -1527,26 +1646,30 @@ mod gpu {
             output: *mut u8,
         ) -> c_int;
     }
-    pub fn available(kind: BackendKind) -> bool {
+    pub fn selected(kind: BackendKind) -> Option<BackendKind> {
         #[cfg(feature = "cuda")]
         if matches!(kind, BackendKind::Auto | BackendKind::Cuda)
             && unsafe { keyspace_cuda_available() != 0 }
         {
-            return true;
+            return Some(BackendKind::Cuda);
         }
         #[cfg(feature = "hip")]
         if matches!(kind, BackendKind::Auto | BackendKind::Hip)
             && unsafe { kagi_hip_available() != 0 }
         {
-            return true;
+            return Some(BackendKind::Hip);
         }
         #[cfg(feature = "opencl")]
         if matches!(kind, BackendKind::Auto | BackendKind::Opencl)
             && unsafe { kagi_opencl_available() != 0 }
         {
-            return true;
+            return Some(BackendKind::Opencl);
         }
-        false
+        None
+    }
+
+    pub fn available(kind: BackendKind) -> bool {
+        selected(kind).is_some()
     }
     pub fn matrix_apply(
         kind: BackendKind,
@@ -1633,12 +1756,22 @@ pub struct ErasureMetricsSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct AccelerationStatus {
     pub requested: BackendKind,
+    pub selected_gpu: Option<BackendKind>,
     pub cuda_compiled: bool,
+    pub cuda_available: bool,
     pub hip_compiled: bool,
+    pub hip_available: bool,
     pub opencl_compiled: bool,
+    pub opencl_available: bool,
     pub isa_l_compiled: bool,
+    pub isa_l_available: bool,
+    pub isa_l_calls: u64,
     pub ipp_compiled: bool,
+    pub ipp_available: bool,
+    pub ipp_calls: u64,
     pub aocl_compiled: bool,
+    pub aocl_available: bool,
+    pub aocl_calls: u64,
     pub selected_gpu_available: bool,
     pub avx2: bool,
     pub avx512f: bool,
@@ -1668,6 +1801,25 @@ fn cpu_feature_avx512bw() -> bool {
 #[cfg(not(target_arch = "x86_64"))]
 fn cpu_feature_avx512bw() -> bool {
     false
+}
+
+fn cpu_library_status() -> (bool, u64, bool, u64, bool, u64) {
+    #[cfg(all(unix, feature = "isa-l"))]
+    let isa_l = (cpu_libraries::isal_available(), cpu_libraries::isal_calls());
+    #[cfg(not(all(unix, feature = "isa-l")))]
+    let isa_l = (false, 0);
+
+    #[cfg(all(unix, feature = "ipp"))]
+    let ipp = (cpu_libraries::ipp_available(), cpu_libraries::ipp_calls());
+    #[cfg(not(all(unix, feature = "ipp")))]
+    let ipp = (false, 0);
+
+    #[cfg(all(unix, feature = "aocl"))]
+    let aocl = (cpu_libraries::aocl_available(), cpu_libraries::aocl_calls());
+    #[cfg(not(all(unix, feature = "aocl")))]
+    let aocl = (false, 0);
+
+    (isa_l.0, isa_l.1, ipp.0, ipp.1, aocl.0, aocl.1)
 }
 
 #[derive(Default)]
@@ -1720,19 +1872,45 @@ impl AdaptiveBackend {
 
     pub fn acceleration_status(&self) -> AccelerationStatus {
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-        let selected_gpu_available = gpu::available(self.cfg.backend);
+        let selected_gpu = gpu::selected(self.cfg.backend);
         #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
-        let selected_gpu_available = false;
+        let selected_gpu = None;
+
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let cuda_available = gpu::available(BackendKind::Cuda);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let cuda_available = false;
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let hip_available = gpu::available(BackendKind::Hip);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let hip_available = false;
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let opencl_available = gpu::available(BackendKind::Opencl);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let opencl_available = false;
+
+        let (isa_l_available, isa_l_calls, ipp_available, ipp_calls, aocl_available, aocl_calls) =
+            cpu_library_status();
 
         AccelerationStatus {
             requested: self.cfg.backend,
+            selected_gpu,
             cuda_compiled: cfg!(feature = "cuda"),
+            cuda_available,
             hip_compiled: cfg!(feature = "hip"),
+            hip_available,
             opencl_compiled: cfg!(feature = "opencl"),
+            opencl_available,
             isa_l_compiled: cfg!(feature = "isa-l"),
+            isa_l_available,
+            isa_l_calls,
             ipp_compiled: cfg!(feature = "ipp"),
+            ipp_available,
+            ipp_calls,
             aocl_compiled: cfg!(feature = "aocl"),
-            selected_gpu_available,
+            aocl_available,
+            aocl_calls,
+            selected_gpu_available: selected_gpu.is_some(),
             avx2: cpu_feature_avx2(),
             avx512f: cpu_feature_avx512f(),
             avx512bw: cpu_feature_avx512bw(),
@@ -1776,6 +1954,14 @@ impl AdaptiveBackend {
 }
 #[async_trait]
 impl ErasureBackend for AdaptiveBackend {
+    fn acceleration_status(&self) -> Option<AccelerationStatus> {
+        Some(AdaptiveBackend::acceleration_status(self))
+    }
+
+    fn metrics_snapshot(&self) -> Option<ErasureMetricsSnapshot> {
+        Some(AdaptiveBackend::metrics_snapshot(self))
+    }
+
     fn default_layout(&self, k: usize, m: usize) -> Result<ErasureLayout> {
         self.configured_layout(k, m)
     }
@@ -1835,50 +2021,40 @@ impl ErasureBackend for AdaptiveBackend {
     }
     async fn encode_layout(&self, data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
         layout.validate()?;
-        let use_gpu =
-            layout.scheme != ErasureScheme::Lrc && self.can_gpu(data.len()) && self.try_gpu_slot();
+        let use_gpu = self.can_gpu(data.len()) && self.try_gpu_slot();
         if use_gpu {
             #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
             {
-                let r = match layout.scheme {
-                    ErasureScheme::Lrc => lrc_encode(data, layout),
+                let r: Result<EncodedShards> = (|| match layout.scheme {
+                    ErasureScheme::Lrc => lrc_encode_with(
+                        data,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    ),
                     ErasureScheme::ReedSolomon => {
-                        // Reuse the RS generator by encoding basis bytes; this preserves byte-for-byte compatibility.
                         let (k, m) = (layout.data_shards, layout.parity_shards);
-                        let rs = ReedSolomon::new(k, m)?;
-                        let mut coeff = vec![0u8; k * m];
-                        for d in 0..k {
-                            let mut basis = vec![vec![0u8; 1]; k + m];
-                            basis[d][0] = 1;
-                            rs.encode(&mut basis)?;
-                            for p in 0..m {
-                                coeff[p * k + d] = basis[k + p][0];
-                            }
-                        }
                         let shard_len = data.len().div_ceil(k).max(1);
                         let input = pack_source_rows(data, k, shard_len);
-                        let mut full_coeff = vec![0u8; (k + m) * k];
-                        for i in 0..k {
-                            full_coeff[i * k + i] = 1;
-                        }
-                        full_coeff[k * k..].copy_from_slice(&coeff);
-                        gpu::matrix_apply(
-                            self.cfg.backend,
-                            &input,
-                            k,
-                            &full_coeff,
-                            k + m,
-                            shard_len,
-                        )
-                        .map(|rows| EncodedShards {
-                            original_len: data.len() as u64,
-                            data_shards: k as u16,
-                            parity_shards: m as u16,
-                            scheme: ErasureScheme::ReedSolomon,
-                            repair_helpers: None,
-                            sub_chunk_no: 1,
-                            shards: rows.chunks_exact(shard_len).map(|x| x.to_vec()).collect(),
-                        })
+                        let matrix = rs_generator_matrix(k, m)?;
+                        gpu::matrix_apply(self.cfg.backend, &input, k, &matrix, k + m, shard_len)
+                            .map(|rows| EncodedShards {
+                                original_len: data.len() as u64,
+                                data_shards: k as u16,
+                                parity_shards: m as u16,
+                                scheme: ErasureScheme::ReedSolomon,
+                                repair_helpers: None,
+                                sub_chunk_no: 1,
+                                shards: rows.chunks_exact(shard_len).map(|x| x.to_vec()).collect(),
+                            })
                     }
                     ErasureScheme::Msr => {
                         let p = pm_layout(layout.data_shards, layout.parity_shards)?;
@@ -1908,7 +2084,7 @@ impl ErasureBackend for AdaptiveBackend {
                             )
                         },
                     ),
-                };
+                })();
                 self.release_gpu_slot();
                 if let Ok(v) = r {
                     self.metrics
@@ -1955,8 +2131,62 @@ impl ErasureBackend for AdaptiveBackend {
     ) -> Result<Vec<u8>> {
         layout.validate()?;
         match layout.scheme {
-            ErasureScheme::Lrc => lrc_reconstruct(shards, original_len, layout),
+            ErasureScheme::Lrc => {
+                #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+                if self.can_gpu(original_len as usize) && self.try_gpu_slot() {
+                    let r = lrc_reconstruct_with(
+                        shards,
+                        original_len,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    );
+                    self.release_gpu_slot();
+                    if let Ok(v) = r {
+                        self.metrics
+                            .gpu_bytes
+                            .fetch_add(original_len, Ordering::Relaxed);
+                        return Ok(v);
+                    }
+                    self.metrics.gpu_fallbacks.fetch_add(1, Ordering::Relaxed);
+                }
+                lrc_reconstruct(shards, original_len, layout)
+            }
             ErasureScheme::ReedSolomon => {
+                #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+                if self.can_gpu(original_len as usize) && self.try_gpu_slot() {
+                    let r = rs_reconstruct_with(
+                        shards,
+                        original_len,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    );
+                    self.release_gpu_slot();
+                    if let Ok(v) = r {
+                        self.metrics
+                            .gpu_bytes
+                            .fetch_add(original_len, Ordering::Relaxed);
+                        return Ok(v);
+                    }
+                    self.metrics.gpu_fallbacks.fetch_add(1, Ordering::Relaxed);
+                }
                 self.cpu_rs
                     .reconstruct_layout(shards, original_len, layout)
                     .await
@@ -2035,10 +2265,71 @@ impl ErasureBackend for AdaptiveBackend {
         let shard_bytes = shards.iter().flatten().next().map(|x| x.len()).unwrap_or(0);
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
         if self.can_gpu(shard_bytes) && self.try_gpu_slot() {
-            let r = match layout.scheme {
-                ErasureScheme::Lrc => Err(anyhow!("LRC uses CPU repair")),
+            let r: Result<Vec<u8>> = (|| match layout.scheme {
+                ErasureScheme::Lrc => {
+                    let size = shards
+                        .iter()
+                        .flatten()
+                        .next()
+                        .context("no LRC helpers")?
+                        .len();
+                    let available: Vec<_> = shards
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, shard)| shard.as_ref().map(|_| index))
+                        .collect();
+                    let plan = lrc_plan(layout, &available, lost, size)?;
+                    let input: Vec<_> = plan
+                        .fetches
+                        .iter()
+                        .flat_map(|fetch| shards[fetch.shard()].as_ref().unwrap().iter().copied())
+                        .collect();
+                    gpu::matrix_apply(
+                        self.cfg.backend,
+                        &input,
+                        plan.input_rows,
+                        &plan.recovery_coeff,
+                        plan.output_rows,
+                        plan.row_len,
+                    )
+                }
                 ErasureScheme::ReedSolomon => {
-                    Err(anyhow!("RS exact-repair CUDA path uses normal reconstruct"))
+                    let mut owned = shards.to_vec();
+                    if lost >= owned.len() {
+                        bail!("lost shard out of range")
+                    }
+                    owned[lost] = None;
+                    rs_reconstruct_with(
+                        &mut owned,
+                        u64::try_from(
+                            layout
+                                .data_shards
+                                .checked_mul(
+                                    shards
+                                        .iter()
+                                        .flatten()
+                                        .next()
+                                        .context("no Reed-Solomon helpers")?
+                                        .len(),
+                                )
+                                .context("Reed-Solomon repair size overflow")?,
+                        )
+                        .context("Reed-Solomon repair size exceeds u64")?,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    )?;
+                    owned[lost]
+                        .take()
+                        .context("Reed-Solomon GPU repair did not reconstruct shard")
                 }
                 ErasureScheme::Msr => {
                     let p = pm_layout(layout.data_shards, layout.parity_shards)?;
@@ -2074,7 +2365,7 @@ impl ErasureBackend for AdaptiveBackend {
                         )
                     },
                 ),
-            };
+            })();
             self.release_gpu_slot();
             if let Ok(v) = r {
                 self.metrics.gpu_repairs.fetch_add(1, Ordering::Relaxed);
@@ -2491,16 +2782,31 @@ mod tests {
         }
     }
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-    #[tokio::test]
-    async fn gpu_product_matrix_matches_cpu_reference() {
-        if !gpu::available(BackendKind::Auto) {
+    fn gpu_test_backend() -> Option<BackendKind> {
+        let requested = match std::env::var("KAGI_REQUIRE_GPU_BACKEND").ok().as_deref() {
+            Some("cuda") => BackendKind::Cuda,
+            Some("hip") => BackendKind::Hip,
+            Some("opencl") => BackendKind::Opencl,
+            Some(other) => panic!("unknown KAGI_REQUIRE_GPU_BACKEND={other}"),
+            None => BackendKind::Auto,
+        };
+        let selected = gpu::selected(requested);
+        if selected.is_none() {
             assert!(
                 std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
-                "GPU execution required but no compiled backend has an available device"
+                "GPU execution required but requested backend {requested:?} is unavailable"
             );
-            eprintln!("GPU execution skipped: no available device");
-            return;
+            eprintln!("GPU execution skipped: requested backend {requested:?} unavailable");
         }
+        selected
+    }
+
+    #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+    #[tokio::test]
+    async fn gpu_product_matrix_matches_cpu_reference() {
+        let Some(kind) = gpu_test_backend() else {
+            return;
+        };
         let l = ErasureLayout {
             scheme: ErasureScheme::Msr,
             data_shards: 4,
@@ -2518,7 +2824,7 @@ mod tests {
             ..Default::default()
         });
         let gpu = AdaptiveBackend::new(ErasureConfig {
-            backend: BackendKind::Auto,
+            backend: kind,
             scheme: ErasureScheme::Msr,
             data_shards: 4,
             parity_shards: 3,
@@ -2544,14 +2850,9 @@ mod tests {
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
     #[tokio::test]
     async fn gpu_clay_matches_reference_and_reconstructs() {
-        if !gpu::available(BackendKind::Auto) {
-            assert!(
-                std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
-                "GPU execution required but no compiled backend has an available device"
-            );
-            eprintln!("GPU execution skipped: no available device");
+        let Some(kind) = gpu_test_backend() else {
             return;
-        }
+        };
         let l = ErasureLayout {
             scheme: ErasureScheme::Clay,
             data_shards: 4,
@@ -2560,7 +2861,7 @@ mod tests {
         };
         let src: Vec<u8> = (0..2_000_011).map(|x| (x * 13) as u8).collect();
         let gpu = AdaptiveBackend::new(ErasureConfig {
-            backend: BackendKind::Auto,
+            backend: kind,
             scheme: ErasureScheme::Clay,
             data_shards: 4,
             parity_shards: 2,
@@ -2584,16 +2885,90 @@ mod tests {
     }
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
     #[tokio::test]
-    async fn gpu_exact_repair_matches_persisted_chunks() {
-        if !gpu::available(BackendKind::Auto) {
-            assert!(
-                std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
-                "GPU execution required but no compiled backend has an available device"
-            );
-            eprintln!("GPU execution skipped: no available device");
+    async fn gpu_reed_solomon_and_lrc_match_cpu_reference() {
+        let Some(kind) = gpu_test_backend() else {
             return;
+        };
+        let src: Vec<u8> = (0..2_000_021).map(|x| (x * 53 + 9) as u8).collect();
+        for layout in [
+            ErasureLayout {
+                scheme: ErasureScheme::ReedSolomon,
+                data_shards: 6,
+                parity_shards: 3,
+                repair_helpers: None,
+            },
+            ErasureLayout {
+                scheme: ErasureScheme::Lrc,
+                data_shards: 6,
+                parity_shards: 3,
+                repair_helpers: None,
+            },
+        ] {
+            let cpu = AdaptiveBackend::new(ErasureConfig {
+                backend: BackendKind::Cpu,
+                scheme: layout.scheme,
+                data_shards: layout.data_shards,
+                parity_shards: layout.parity_shards,
+                repair_helpers: layout.repair_helpers,
+                gpu_threshold_bytes: 0,
+                ..Default::default()
+            });
+            let accelerated = AdaptiveBackend::new(ErasureConfig {
+                backend: kind,
+                scheme: layout.scheme,
+                data_shards: layout.data_shards,
+                parity_shards: layout.parity_shards,
+                repair_helpers: layout.repair_helpers,
+                gpu_threshold_bytes: 0,
+                ..Default::default()
+            });
+            let expected = cpu.encode_layout(&src, &layout).await.unwrap();
+            let encoded = accelerated.encode_layout(&src, &layout).await.unwrap();
+            assert_eq!(
+                encoded.shards, expected.shards,
+                "{:?} accelerator changed persisted shard bytes",
+                layout.scheme
+            );
+            assert!(accelerated.metrics.gpu_bytes.load(Ordering::Relaxed) > 0);
+            assert_eq!(accelerated.metrics.gpu_fallbacks.load(Ordering::Relaxed), 0);
+
+            let mut shards = encoded.shards.into_iter().map(Some).collect::<Vec<_>>();
+            shards[0] = None;
+            shards[layout.n() - 1] = None;
+            assert_eq!(
+                accelerated
+                    .reconstruct_layout(&mut shards, src.len() as u64, &layout)
+                    .await
+                    .unwrap(),
+                src
+            );
+            assert_eq!(
+                shards.into_iter().map(Option::unwrap).collect::<Vec<_>>(),
+                expected.shards
+            );
+            assert_eq!(accelerated.metrics.gpu_fallbacks.load(Ordering::Relaxed), 0);
         }
+    }
+
+    #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+    #[tokio::test]
+    async fn gpu_exact_repair_matches_persisted_chunks() {
+        let Some(kind) = gpu_test_backend() else {
+            return;
+        };
         let cases = [
+            ErasureLayout {
+                scheme: ErasureScheme::ReedSolomon,
+                data_shards: 4,
+                parity_shards: 2,
+                repair_helpers: None,
+            },
+            ErasureLayout {
+                scheme: ErasureScheme::Lrc,
+                data_shards: 6,
+                parity_shards: 3,
+                repair_helpers: None,
+            },
             ErasureLayout {
                 scheme: ErasureScheme::Msr,
                 data_shards: 4,
@@ -2609,7 +2984,7 @@ mod tests {
         ];
         for l in cases {
             let gpu = AdaptiveBackend::new(ErasureConfig {
-                backend: BackendKind::Auto,
+                backend: kind,
                 scheme: l.scheme,
                 data_shards: l.data_shards,
                 parity_shards: l.parity_shards,
@@ -2631,6 +3006,57 @@ mod tests {
             }
         }
     }
+    #[cfg(any(feature = "isa-l", feature = "ipp", feature = "aocl"))]
+    #[test]
+    fn cpu_library_provider_is_reached_from_kagi_hot_path() {
+        let Ok(required) = std::env::var("KAGI_REQUIRE_CPU_LIB_BACKEND") else {
+            return;
+        };
+        match required.as_str() {
+            "isa-l" => {
+                #[cfg(all(unix, feature = "isa-l"))]
+                {
+                    let before = cpu_libraries::isal_calls();
+                    let width = 8192;
+                    let input = vec![0x5au8; width * 3];
+                    let coeff = vec![1u8, 2, 3, 4, 5, 6];
+                    let output = gf_matrix_apply_cpu(&input, 3, &coeff, 2, width).unwrap();
+                    assert_eq!(output.len(), width * 2);
+                    assert!(cpu_libraries::isal_calls() > before);
+                }
+                #[cfg(not(all(unix, feature = "isa-l")))]
+                panic!("ISA-L execution was required but feature/platform support is absent");
+            }
+            "ipp" => {
+                #[cfg(all(unix, feature = "ipp"))]
+                {
+                    let before = cpu_libraries::ipp_calls();
+                    let width = 8192;
+                    let input = vec![0x33u8; width * 2];
+                    let coeff = vec![1u8, 1];
+                    let output = gf_matrix_apply_cpu(&input, 2, &coeff, 1, width).unwrap();
+                    assert_eq!(output, vec![0u8; width]);
+                    assert!(cpu_libraries::ipp_calls() > before);
+                }
+                #[cfg(not(all(unix, feature = "ipp")))]
+                panic!("IPP execution was required but feature/platform support is absent");
+            }
+            "aocl" => {
+                #[cfg(all(unix, feature = "aocl"))]
+                {
+                    let before = cpu_libraries::aocl_calls();
+                    let input = vec![0x7cu8; 2 * 1024 * 1024 + 17];
+                    let packed = pack_source_rows(&input, 3, input.len().div_ceil(3));
+                    assert_eq!(&packed[..input.len()], &input);
+                    assert!(cpu_libraries::aocl_calls() > before);
+                }
+                #[cfg(not(all(unix, feature = "aocl")))]
+                panic!("AOCL execution was required but feature/platform support is absent");
+            }
+            other => panic!("unknown KAGI_REQUIRE_CPU_LIB_BACKEND={other}"),
+        }
+    }
+
     #[tokio::test]
     async fn clay_exact_plan_fetches_only_minimum_subchunks() {
         let b = AdaptiveBackend::new(ErasureConfig {
