@@ -272,6 +272,15 @@ pub trait ErasureBackend: Send + Sync {
         lost: usize,
         layout: &ErasureLayout,
     ) -> Result<Vec<u8>>;
+    /// Runtime acceleration/provider state when this backend exposes it.
+    fn acceleration_status(&self) -> Option<AccelerationStatus> {
+        None
+    }
+    /// Runtime dispatch counters when this backend exposes them.
+    fn metrics_snapshot(&self) -> Option<ErasureMetricsSnapshot> {
+        None
+    }
+
     /// Return a bandwidth-optimal repair plan when the selected codec supports
     /// exact single-node repair. Reed-Solomon returns `None`.
     fn exact_repair_plan(
@@ -1943,6 +1952,14 @@ impl AdaptiveBackend {
 }
 #[async_trait]
 impl ErasureBackend for AdaptiveBackend {
+    fn acceleration_status(&self) -> Option<AccelerationStatus> {
+        Some(AdaptiveBackend::acceleration_status(self))
+    }
+
+    fn metrics_snapshot(&self) -> Option<ErasureMetricsSnapshot> {
+        Some(AdaptiveBackend::metrics_snapshot(self))
+    }
+
     fn default_layout(&self, k: usize, m: usize) -> Result<ErasureLayout> {
         self.configured_layout(k, m)
     }
