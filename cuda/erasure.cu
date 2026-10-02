@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: CC-BY-NC-SA-4.0
 // Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
-// CUDA GF(2^8) matrix engine shared by RS, product-matrix MSR, and CLAY.
+// CUDA GF(2^8) matrix engine shared by RS, LRC, product-matrix MSR, and CLAY.
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <limits.h>
 
 // GF(2^8), primitive polynomial x^8+x^4+x^3+x^2+1 (0x11d).
 __device__ __forceinline__ uint8_t gf_mul(uint8_t a, uint8_t b) {
@@ -99,9 +100,11 @@ extern "C" int keyspace_cuda_matrix_apply(
     uint8_t* output) {
     if (!input || !coeff || !output || !in_rows || !out_rows || !row_len) return 10;
     if (in_rows > SIZE_MAX / row_len || out_rows > SIZE_MAX / row_len || in_rows > SIZE_MAX / out_rows) return 16;
-    // CUDA grid.y is 65535 on the devices this backend targets. Larger CLAY
-    // transforms fail closed and are executed by the CPU reference path.
+    // CUDA grid.y is 65535 on the devices this backend targets. Larger transforms
+    // fail closed and are executed by the CPU reference path.
     if (out_rows > 65535) return 17;
+    const size_t blocks_x = row_len / 256 + (row_len % 256 != 0);
+    if (blocks_x == 0 || blocks_x > INT_MAX) return 18;
     const size_t input_bytes = in_rows * row_len;
     const size_t coeff_bytes = in_rows * out_rows;
     const size_t output_bytes = out_rows * row_len;
@@ -122,7 +125,7 @@ extern "C" int keyspace_cuda_matrix_apply(
         cudaMemcpyAsync(keyspace_scratch.coeff, coeff, coeff_bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess) return 13;
 
     const dim3 block(256, 1, 1);
-    const dim3 grid((unsigned)((row_len + block.x - 1) / block.x), (unsigned)out_rows, 1);
+    const dim3 grid((unsigned)blocks_x, (unsigned)out_rows, 1);
     gf_matrix_apply_kernel<<<grid, block, 0, stream>>>(keyspace_scratch.input, in_rows, keyspace_scratch.coeff, out_rows, row_len, keyspace_scratch.output);
     if (cudaGetLastError() != cudaSuccess) return 14;
     if (cudaMemcpyAsync(output, keyspace_scratch.output, output_bytes, cudaMemcpyDeviceToHost, stream) != cudaSuccess ||

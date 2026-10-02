@@ -17,6 +17,9 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo check --all-targets --features isa-l,ipp,aocl
+      - run: cargo test --all-targets --features isa-l,ipp,aocl
+      - run: cargo clippy --all-targets --features isa-l,ipp,aocl -- -D warnings
       - run: cargo check --all-targets --features quic
       - run: cargo test --all-targets --features quic
       - run: cargo clippy --all-targets --features quic -- -D warnings
@@ -26,3 +29,16 @@ jobs:
       - run: cargo test --all-targets --features quic,ebpf,scsi-target,rdma
       - run: cargo clippy --all-targets --features quic,ebpf,scsi-target,rdma -- -D warnings
       - run: cargo bench --bench erasure --no-run
+
+  opencl-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install OpenCL development headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ocl-icd-opencl-dev
+      - run: cargo check --all-targets --features opencl
+      - run: cargo test --all-targets --features opencl
+      - run: cargo clippy --all-targets --features opencl -- -D warnings

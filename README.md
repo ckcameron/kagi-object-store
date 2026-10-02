@@ -94,9 +94,9 @@ See `BUILD-VALIDATION.md` for the validation environment and known execution lim
 - CLAY as the default runtime erasure family.
 - Configurable `k`, parity count, and repair-helper fan-in.
 - CPU implementations for all normal runtime paths.
-- Optional CUDA GF(2^8) matrix acceleration.
-- CUDA-aware CLAY reconstruction and repair transforms.
-- Adaptive CPU/GPU dispatch with configurable GPU threshold and inflight limit.
+- Optional CUDA, HIP/ROCm, and OpenCL GF(2^8) matrix acceleration across Reed-Solomon, LRC, MSR, and CLAY encode/reconstruct/repair paths.
+- Accelerator-aware exact repair transforms, including CLAY subchunk and MSR projection recovery.
+- Adaptive CPU/GPU dispatch with configurable GPU threshold and inflight limit, runtime provider availability, execution counters, and fallback telemetry.
 - Bounded matrix caches to prevent unbounded memory growth from large subpacketization.
 - Backend fallback behavior that does not change the persisted object format.
 
@@ -392,7 +392,7 @@ cargo test --all-targets
 cargo clippy --all-targets
 ```
 
-Set `STRICT=1` to promote Clippy warnings to errors. CUDA checks/tests are added automatically when `nvcc` is available.
+Set `STRICT=1` to promote default-path Clippy warnings to errors. On Linux the suite also compiles/tests/clippies the runtime-loaded ISA-L, IPP, and AOCL integrations. CUDA, HIP/ROCm, and OpenCL feature checks are added automatically when their development toolchains are present; physical accelerator execution is verified separately by the `hardware-execution` workflow.
 
 The exact validation status of this packaged edition is recorded in `BUILD-VALIDATION.md`.
 

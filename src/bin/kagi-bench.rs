@@ -93,6 +93,10 @@ struct Args {
     /// Write the complete report to JSON as well as printing a concise table.
     #[arg(long)]
     json: Option<PathBuf>,
+
+    /// Fail unless the requested GPU backend is available, executes, and completes without fallback.
+    #[arg(long)]
+    require_acceleration: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -348,6 +352,33 @@ async fn main() -> Result<()> {
             )
             .await
             .with_context(|| format!("benchmark {:?} {bytes} bytes {k}+{m}", scheme))?;
+
+            if args.require_acceleration {
+                let status = backend.acceleration_status();
+                let metrics = backend.metrics_snapshot();
+                anyhow::ensure!(
+                    status.selected_gpu.is_some(),
+                    "requested acceleration is unavailable for {:?}",
+                    backend_kind
+                );
+                if backend_kind != BackendKind::Auto {
+                    anyhow::ensure!(
+                        status.selected_gpu == Some(backend_kind),
+                        "requested {:?} but selected {:?}",
+                        backend_kind,
+                        status.selected_gpu
+                    );
+                }
+                anyhow::ensure!(
+                    metrics.gpu_bytes > 0,
+                    "accelerator was selected but no GPU bytes were executed"
+                );
+                anyhow::ensure!(
+                    metrics.gpu_fallbacks == 0,
+                    "accelerator execution fell back {} time(s)",
+                    metrics.gpu_fallbacks
+                );
+            }
 
             println!(
                 "{:<14?} {:>10} {:>3}+{:<4} {:>14.1} {:>14.1} {:>12.3} {:>12.3}",
