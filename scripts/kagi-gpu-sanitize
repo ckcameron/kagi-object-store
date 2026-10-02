@@ -10,7 +10,7 @@ command -v compute-sanitizer >/dev/null 2>&1 || {
 }
 
 KAGI_CPU_TARGET=${KAGI_CPU_TARGET:-native} scripts/kagi-build --features cuda --bin kagi-bench
-args=(--backend cuda --scheme clay --sizes 8MiB --iterations 2)
+args=(--backend cuda --scheme all --sizes 8MiB --iterations 2 --gpu-threshold-bytes 0 --require-acceleration)
 
 echo "== CUDA memory access / API validation =="
 compute-sanitizer --tool memcheck target/release/kagi-bench "${args[@]}"
