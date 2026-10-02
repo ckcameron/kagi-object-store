@@ -1998,13 +1998,25 @@ impl ErasureBackend for AdaptiveBackend {
     }
     async fn encode_layout(&self, data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
         layout.validate()?;
-        let use_gpu =
-            layout.scheme != ErasureScheme::Lrc && self.can_gpu(data.len()) && self.try_gpu_slot();
+        let use_gpu = self.can_gpu(data.len()) && self.try_gpu_slot();
         if use_gpu {
             #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
             {
                 let r = match layout.scheme {
-                    ErasureScheme::Lrc => lrc_encode(data, layout),
+                    ErasureScheme::Lrc => lrc_encode_with(
+                        data,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    ),
                     ErasureScheme::ReedSolomon => {
                         let (k, m) = (layout.data_shards, layout.parity_shards);
                         let shard_len = data.len().div_ceil(k).max(1);
@@ -2103,8 +2115,62 @@ impl ErasureBackend for AdaptiveBackend {
     ) -> Result<Vec<u8>> {
         layout.validate()?;
         match layout.scheme {
-            ErasureScheme::Lrc => lrc_reconstruct(shards, original_len, layout),
+            ErasureScheme::Lrc => {
+                #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+                if self.can_gpu(original_len as usize) && self.try_gpu_slot() {
+                    let r = lrc_reconstruct_with(
+                        shards,
+                        original_len,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    );
+                    self.release_gpu_slot();
+                    if let Ok(v) = r {
+                        self.metrics
+                            .gpu_bytes
+                            .fetch_add(original_len, Ordering::Relaxed);
+                        return Ok(v);
+                    }
+                    self.metrics.gpu_fallbacks.fetch_add(1, Ordering::Relaxed);
+                }
+                lrc_reconstruct(shards, original_len, layout)
+            }
             ErasureScheme::ReedSolomon => {
+                #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+                if self.can_gpu(original_len as usize) && self.try_gpu_slot() {
+                    let r = rs_reconstruct_with(
+                        shards,
+                        original_len,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    );
+                    self.release_gpu_slot();
+                    if let Ok(v) = r {
+                        self.metrics
+                            .gpu_bytes
+                            .fetch_add(original_len, Ordering::Relaxed);
+                        return Ok(v);
+                    }
+                    self.metrics.gpu_fallbacks.fetch_add(1, Ordering::Relaxed);
+                }
                 self.cpu_rs
                     .reconstruct_layout(shards, original_len, layout)
                     .await
@@ -2184,9 +2250,69 @@ impl ErasureBackend for AdaptiveBackend {
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
         if self.can_gpu(shard_bytes) && self.try_gpu_slot() {
             let r = match layout.scheme {
-                ErasureScheme::Lrc => Err(anyhow!("LRC uses CPU repair")),
+                ErasureScheme::Lrc => {
+                    let size = shards
+                        .iter()
+                        .flatten()
+                        .next()
+                        .context("no LRC helpers")?
+                        .len();
+                    let available: Vec<_> = shards
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, shard)| shard.as_ref().map(|_| index))
+                        .collect();
+                    let plan = lrc_plan(layout, &available, lost, size)?;
+                    let input: Vec<_> = plan
+                        .fetches
+                        .iter()
+                        .flat_map(|fetch| {
+                            shards[fetch.shard()]
+                                .as_ref()
+                                .unwrap()
+                                .iter()
+                                .copied()
+                        })
+                        .collect();
+                    gpu::matrix_apply(
+                        self.cfg.backend,
+                        &input,
+                        plan.input_rows,
+                        &plan.recovery_coeff,
+                        plan.output_rows,
+                        plan.row_len,
+                    )
+                }
                 ErasureScheme::ReedSolomon => {
-                    Err(anyhow!("RS exact-repair CUDA path uses normal reconstruct"))
+                    let mut owned = shards.to_vec();
+                    if lost >= owned.len() {
+                        bail!("lost shard out of range")
+                    }
+                    owned[lost] = None;
+                    rs_reconstruct_with(
+                        &mut owned,
+                        (layout.data_shards
+                            * shards
+                                .iter()
+                                .flatten()
+                                .next()
+                                .context("no Reed-Solomon helpers")?
+                                .len()) as u64,
+                        layout,
+                        &|input, in_rows, coeff, out_rows, row_len| {
+                            gpu::matrix_apply(
+                                self.cfg.backend,
+                                input,
+                                in_rows,
+                                coeff,
+                                out_rows,
+                                row_len,
+                            )
+                        },
+                    )?;
+                    owned[lost]
+                        .take()
+                        .context("Reed-Solomon GPU repair did not reconstruct shard")
                 }
                 ErasureScheme::Msr => {
                     let p = pm_layout(layout.data_shards, layout.parity_shards)?;
