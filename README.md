@@ -392,7 +392,7 @@ cargo test --all-targets
 cargo clippy --all-targets
 ```
 
-Set `STRICT=1` to promote Clippy warnings to errors. CUDA checks/tests are added automatically when `nvcc` is available.
+Set `STRICT=1` to promote default-path Clippy warnings to errors. On Linux the suite also compiles/tests/clippies the runtime-loaded ISA-L, IPP, and AOCL integrations. CUDA, HIP/ROCm, and OpenCL feature checks are added automatically when their development toolchains are present; physical accelerator execution is verified separately by the `hardware-execution` workflow.
 
 The exact validation status of this packaged edition is recorded in `BUILD-VALIDATION.md`.
 
