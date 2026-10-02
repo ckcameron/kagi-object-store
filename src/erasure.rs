@@ -2264,7 +2264,7 @@ impl ErasureBackend for AdaptiveBackend {
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
         if self.can_gpu(shard_bytes) && self.try_gpu_slot() {
             let r: Result<Vec<u8>> = (|| match layout.scheme {
-                    ErasureScheme::Lrc => {
+                ErasureScheme::Lrc => {
                     let size = shards
                         .iter()
                         .flatten()
@@ -2291,7 +2291,7 @@ impl ErasureBackend for AdaptiveBackend {
                         plan.row_len,
                     )
                 }
-                    ErasureScheme::ReedSolomon => {
+                ErasureScheme::ReedSolomon => {
                     let mut owned = shards.to_vec();
                     if lost >= owned.len() {
                         bail!("lost shard out of range")
@@ -2329,7 +2329,7 @@ impl ErasureBackend for AdaptiveBackend {
                         .take()
                         .context("Reed-Solomon GPU repair did not reconstruct shard")
                 }
-                    ErasureScheme::Msr => {
+                ErasureScheme::Msr => {
                     let p = pm_layout(layout.data_shards, layout.parity_shards)?;
                     pm_repair_with(
                         shards,
@@ -2347,7 +2347,7 @@ impl ErasureBackend for AdaptiveBackend {
                         },
                     )
                 }
-                    ErasureScheme::Clay => clay_repair_with(
+                ErasureScheme::Clay => clay_repair_with(
                     shards,
                     lost,
                     layout,
