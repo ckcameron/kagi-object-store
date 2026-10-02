@@ -2324,6 +2324,16 @@ fn resolved_backend(requested: McBackend) -> McBackend {
     McBackend::Cpu
 }
 
+fn validate_requested_backend(requested: McBackend) -> Result<()> {
+    match requested {
+        McBackend::Auto | McBackend::Cpu => Ok(()),
+        explicit if resolved_backend(explicit) == explicit => Ok(()),
+        explicit => bail!(
+            "requested Monte Carlo backend {explicit:?} is not compiled or has no available device"
+        ),
+    }
+}
+
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
 /// Implements the cuda policy eval step and keeps its validation and state transitions visible at the call site.
 fn gpu_policy_batch(
@@ -3646,6 +3656,7 @@ fn main() -> Result<()> {
         bail!("trial/candidate/finalist counts must be positive");
     }
     validate_config(&cfg)?;
+    validate_requested_backend(args.mc_backend)?;
     if cli.resume.is_none() {
         let cwd = std::env::current_dir().context("resolve output directory")?;
         for path in [
@@ -4209,5 +4220,125 @@ mod tests {
         let clay = protection_summary(&Protection::Clay { k: 8, m: 4, d: 11 });
         assert!(clay.contains("clay"));
         assert!(clay.contains("d=11"));
+    }
+
+    #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+    #[test]
+    fn planner_gpu_readability_matches_reference() {
+        let requested = match std::env::var("KAGI_REQUIRE_GPU_BACKEND").ok().as_deref() {
+            Some("cuda") => McBackend::Cuda,
+            Some("hip") => McBackend::Hip,
+            Some("opencl") => McBackend::Opencl,
+            Some(other) => panic!("unknown KAGI_REQUIRE_GPU_BACKEND={other}"),
+            None => McBackend::Auto,
+        };
+        let backend = resolved_backend(requested);
+        if backend == McBackend::Cpu {
+            assert!(
+                std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
+                "planner GPU execution required but requested backend is unavailable"
+            );
+            eprintln!("planner GPU execution skipped: no available device");
+            return;
+        }
+
+        let cases = [
+            (
+                Protection::ReedSolomon { k: 4, m: 2 },
+                vec![
+                    vec![true, true, true, true, false, false],
+                    vec![true, true, true, false, false, false],
+                    vec![false, true, true, true, true, false],
+                    vec![false, false, true, true, true, true],
+                ],
+            ),
+            (
+                Protection::Lrc {
+                    k: 4,
+                    local_groups: 2,
+                    local_parity: 1,
+                    global_parity: 1,
+                },
+                vec![
+                    vec![true, true, true, true, true, true, true],
+                    vec![true, false, true, true, true, true, false],
+                    vec![false, false, true, true, true, true, true],
+                    vec![false, false, true, false, true, true, true],
+                ],
+            ),
+        ];
+
+        for (protection, rows) in cases {
+            let fragments = protection.fragments();
+            let trials = rows.len() as u64;
+            let alive = rows
+                .iter()
+                .flat_map(|row| row.iter().map(|value| u8::from(*value)))
+                .collect::<Vec<_>>();
+            let mut lost = vec![0u8; rows.len()];
+            let (mode, k, groups, local_parity, global_parity) = match protection {
+                Protection::Replication { .. } => (0, 1, 0, 0, 0),
+                Protection::ReedSolomon { k, .. }
+                | Protection::Msr { k, .. }
+                | Protection::Clay { k, .. } => (1, k, 0, 0, 0),
+                Protection::Lrc {
+                    k,
+                    local_groups,
+                    local_parity,
+                    global_parity,
+                } => (2, k, local_groups, local_parity, global_parity),
+            };
+            let rc = match backend {
+                #[cfg(feature = "cuda")]
+                McBackend::Cuda => unsafe {
+                    kagi_mc_readability_cuda(
+                        alive.as_ptr(),
+                        lost.as_mut_ptr(),
+                        trials,
+                        fragments as u32,
+                        mode,
+                        k as u32,
+                        groups as u32,
+                        local_parity as u32,
+                        global_parity as u32,
+                    )
+                },
+                #[cfg(feature = "hip")]
+                McBackend::Hip => unsafe {
+                    kagi_mc_readability_hip(
+                        alive.as_ptr(),
+                        lost.as_mut_ptr(),
+                        trials,
+                        fragments as u32,
+                        mode,
+                        k as u32,
+                        groups as u32,
+                        local_parity as u32,
+                        global_parity as u32,
+                    )
+                },
+                #[cfg(feature = "opencl")]
+                McBackend::Opencl => unsafe {
+                    kagi_mc_readability_opencl(
+                        alive.as_ptr(),
+                        lost.as_mut_ptr(),
+                        trials,
+                        fragments as u32,
+                        mode,
+                        k as u32,
+                        groups as u32,
+                        local_parity as u32,
+                        global_parity as u32,
+                    )
+                },
+                _ => unreachable!("resolved GPU backend must be compiled"),
+            };
+            assert_eq!(rc, 0, "planner {backend:?} kernel failed with code {rc}");
+            let expected = rows
+                .iter()
+                .map(|row| u8::from(!protection.readable(row)))
+                .collect::<Vec<_>>();
+            assert_eq!(lost, expected, "planner {backend:?} result mismatch");
+        }
     }
 }
