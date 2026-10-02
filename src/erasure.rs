@@ -507,6 +507,7 @@ fn gf_matrix_apply_cpu(
     }
     Ok(out)
 }
+#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
 fn rs_generator_matrix(k: usize, m: usize) -> Result<Vec<u8>> {
     validate_common(k, m)?;
     let rs = ReedSolomon::new(k, m)?;
@@ -525,6 +526,7 @@ fn rs_generator_matrix(k: usize, m: usize) -> Result<Vec<u8>> {
     Ok(matrix)
 }
 
+#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
 fn rs_reconstruct_with<F>(
     shards: &mut [Option<Vec<u8>>],
     original_len: u64,
