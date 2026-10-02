@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: CC-BY-NC-SA-4.0
 // Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
-// CUDA GF(2^8) matrix engine shared by RS, product-matrix MSR, and CLAY.
+// CUDA GF(2^8) matrix engine shared by RS, LRC, product-matrix MSR, and CLAY.
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -104,7 +104,7 @@ extern "C" int keyspace_cuda_matrix_apply(
     // fail closed and are executed by the CPU reference path.
     if (out_rows > 65535) return 17;
     const size_t blocks_x = row_len / 256 + (row_len % 256 != 0);
-    if (blocks_x == 0 || blocks_x > UINT_MAX) return 18;
+    if (blocks_x == 0 || blocks_x > INT_MAX) return 18;
     const size_t input_bytes = in_rows * row_len;
     const size_t coeff_bytes = in_rows * out_rows;
     const size_t output_bytes = out_rows * row_len;
