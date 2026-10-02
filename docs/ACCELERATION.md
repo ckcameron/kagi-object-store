@@ -22,9 +22,9 @@ validation target.
 
 | Cargo feature | Operation | Runtime behavior |
 | --- | --- | --- |
-| `cuda` | GF matrix transforms for encode/reconstruct/repair; planner readability batches | NVIDIA device; existing CUDA path remains preferred by automatic GPU selection |
-| `hip` / `rocm` | The same field transforms and planner batches | HIP runtime and AMD device; `ROCM_PATH` defaults to `/opt/rocm`; `KAGI_HIP_ARCH=gfx1103` builds for Radeon 780M |
-| `opencl` | The same field transforms and planner batches | An available GPU through the OpenCL ICD; this includes compatible Intel oneAPI OpenCL runtimes |
+| `cuda` | GF matrix transforms for Reed-Solomon, LRC, MSR and CLAY encode/reconstruct/repair; planner readability batches | NVIDIA device; CUDA remains preferred by automatic GPU selection |
+| `hip` / `rocm` | The same four runtime codec transforms and planner batches | HIP runtime and AMD device; `ROCM_PATH` defaults to `/opt/rocm`; `KAGI_HIP_ARCH=gfx1103` builds for Radeon 780M |
+| `opencl` | The same four runtime codec transforms and planner batches | An available GPU through the OpenCL ICD; this includes compatible Intel oneAPI OpenCL runtimes |
 | `isa-l` | Bulk CPU GF matrix transforms | Loads `libisal.so.2` or `libisal.so`; public ISA-L entry points dispatch CPU instructions |
 | `ipp` | Bulk CPU XOR rows | Loads `libipps.so` or `libipps.so.11`; IPP dispatches CPU instructions |
 | `aocl` | Large source-row packing copies | Loads AOCL LibMem's `memcpy` resolver from `libaocl-libmem.so` |
@@ -36,7 +36,10 @@ libraries use the built-in CPU implementation. GPU selection accepts `auto`,
 Automatic GPU preference is CUDA, then HIP, then OpenCL; this is a deterministic
 preference, not a claim that the first backend wins every benchmark. Existing
 transfer thresholds and inflight limits remain in force for erasure coding.
-Explicit GPU failure retains the CPU fallback. Planner GPU failures are reported.
+Runtime transform failures retain the CPU fallback and increment fallback
+telemetry. An explicit planner backend now fails startup when that backend is not
+compiled or has no device, rather than silently changing a requested CUDA/HIP/OpenCL
+run into a CPU run.
 
 AOCC is a compiler, not a runtime offload API. Select its installed compiler with
 `CXX=/opt/aocc/bin/clang++ scripts/kagi-build --features opencl` to compile the
@@ -64,6 +67,17 @@ operations are the implemented Intel library path. QAT is not integrated or
 hardware-tested.
 
 ## Verification
+
+`AccelerationStatus` distinguishes compile-time support from runtime availability
+for CUDA, HIP, OpenCL, ISA-L, IPP and AOCL. CPU-library execution counters and GPU
+byte/fallback counters allow benchmarks and CI to prove the provider was actually
+used rather than merely loaded.
+
+The manual `hardware-execution` workflow uses dedicated self-hosted runner labels
+for CUDA, HIP, OpenCL, ISA-L, IPP, AOCL, AVX2 and AVX-512. GPU validation selects
+one exact backend at a time, checks the independent Monte Carlo native kernel,
+then runs all runtime codec families through `kagi-bench --require-acceleration`.
+Any missing device or GPU fallback makes that validation fail.
 
 Run the ordinary suite with the desired feature combination. GPU tests without
 a device announce that execution was skipped. Require actual GPU execution with:
