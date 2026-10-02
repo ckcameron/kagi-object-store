@@ -4,6 +4,7 @@
 #include <hip/hip_runtime.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <limits.h>
 
 // GF(2^8), primitive polynomial x^8+x^4+x^3+x^2+1 (0x11d).
 __device__ __forceinline__ uint8_t hip_gf_mul(uint8_t a, uint8_t b) {
@@ -117,10 +118,13 @@ extern "C" int kagi_hip_matrix_apply(const uint8_t *input, size_t in_rows,
   if (in_rows > SIZE_MAX / row_len || out_rows > SIZE_MAX / row_len ||
       in_rows > SIZE_MAX / out_rows)
     return 16;
-  // HIP grid.y is 65535 on the devices this backend targets. Larger CLAY
-  // transforms fail closed and are executed by the CPU reference path.
+  // HIP grid.y is 65535 on the devices this backend targets. Larger transforms
+  // fail closed and are executed by the CPU reference path.
   if (out_rows > 65535)
     return 17;
+  const size_t blocks_x = row_len / 256 + (row_len % 256 != 0);
+  if (blocks_x == 0 || blocks_x > UINT_MAX)
+    return 18;
   const size_t input_bytes = in_rows * row_len;
   const size_t coeff_bytes = in_rows * out_rows;
   const size_t output_bytes = out_rows * row_len;
@@ -153,8 +157,7 @@ extern "C" int kagi_hip_matrix_apply(const uint8_t *input, size_t in_rows,
     return 13;
 
   const dim3 block(256, 1, 1);
-  const dim3 grid((unsigned)((row_len + block.x - 1) / block.x),
-                  (unsigned)out_rows, 1);
+  const dim3 grid((unsigned)blocks_x, (unsigned)out_rows, 1);
   kagi_hip_matrix_kernel<<<grid, block, 0, stream>>>(
       keyspace_scratch.input, in_rows, keyspace_scratch.coeff, out_rows,
       row_len, keyspace_scratch.output);
