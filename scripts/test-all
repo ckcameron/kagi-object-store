@@ -23,10 +23,38 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   cargo clippy --all-targets --features ebpf -- -D warnings
 fi
 
-# CUDA is optional because only CUDA-capable builders are expected to have nvcc.
+# CPU vendor libraries are runtime-loaded, so their feature integration can be
+# compiled/tested even when the vendor shared objects are not installed.
+if [[ "$(uname -s)" == "Linux" ]]; then
+  cargo check --all-targets --features isa-l,ipp,aocl
+  cargo test --all-targets --features isa-l,ipp,aocl
+  cargo clippy --all-targets --features isa-l,ipp,aocl -- -D warnings
+fi
+
+# GPU integrations are compiled whenever the matching development toolchain is
+# present. Execution without a device is allowed here; the dedicated
+# hardware-execution workflow is the positive-execution gate.
 if command -v nvcc >/dev/null 2>&1; then
   cargo check --all-targets --features cuda
   cargo test --all-targets --features cuda
+  cargo clippy --all-targets --features cuda -- -D warnings
 else
   echo "nvcc not found; CUDA feature validation skipped" >&2
+fi
+
+hipcc="${ROCM_PATH:-/opt/rocm}/bin/hipcc"
+if [[ -x "$hipcc" ]]; then
+  cargo check --all-targets --features hip
+  cargo test --all-targets --features hip
+  cargo clippy --all-targets --features hip -- -D warnings
+else
+  echo "hipcc not found; HIP/ROCm feature validation skipped" >&2
+fi
+
+if [[ -r /usr/include/CL/cl.h ]] && ldconfig -p 2>/dev/null | grep -q 'libOpenCL\\.so'; then
+  cargo check --all-targets --features opencl
+  cargo test --all-targets --features opencl
+  cargo clippy --all-targets --features opencl -- -D warnings
+else
+  echo "OpenCL development headers/runtime not found; OpenCL feature validation skipped" >&2
 fi
