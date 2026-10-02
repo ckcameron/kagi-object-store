@@ -3018,7 +3018,9 @@ async fn internal_ui_telemetry(
     }
     Json(serde_json::json!({
         "node": st.data.local_host,
-        "samples": st.telemetry.history(query.after_ms)
+        "samples": st.telemetry.history(query.after_ms),
+        "erasure_acceleration": st.data.erasure.acceleration_status(),
+        "erasure_metrics": st.data.erasure.metrics_snapshot()
     }))
     .into_response()
 }
@@ -3036,7 +3038,9 @@ async fn ui_telemetry(
 
     let mut nodes = vec![serde_json::json!({
         "node": st.data.local_host,
-        "samples": st.telemetry.history(query.after_ms)
+        "samples": st.telemetry.history(query.after_ms),
+        "erasure_acceleration": st.data.erasure.acceleration_status(),
+        "erasure_metrics": st.data.erasure.metrics_snapshot()
     })];
 
     if let Some(identity) = st.data.pq_identity.as_ref() {
