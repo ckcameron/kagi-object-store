@@ -123,7 +123,7 @@ extern "C" int kagi_hip_matrix_apply(const uint8_t *input, size_t in_rows,
   if (out_rows > 65535)
     return 17;
   const size_t blocks_x = row_len / 256 + (row_len % 256 != 0);
-  if (blocks_x == 0 || blocks_x > UINT_MAX)
+  if (blocks_x == 0 || blocks_x > INT_MAX)
     return 18;
   const size_t input_bytes = in_rows * row_len;
   const size_t coeff_bytes = in_rows * out_rows;
