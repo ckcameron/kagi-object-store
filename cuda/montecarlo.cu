@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: CC-BY-NC-SA-4.0
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <limits.h>
 
 __global__ void kagi_readability_kernel(const uint8_t *alive, uint8_t *lost,
                                          uint64_t trials, uint32_t fragments,
@@ -39,12 +41,15 @@ extern "C" int kagi_mc_readability_cuda(const uint8_t *alive, uint8_t *lost,
                                           uint32_t local_parity,
                                           uint32_t global_parity) {
     if (!alive || !lost || trials == 0 || fragments == 0) return 1;
+    if (trials > SIZE_MAX / fragments || trials > SIZE_MAX) return 7;
+    const uint64_t blocks64 = trials / 256 + (trials % 256 != 0);
+    if (blocks64 == 0 || blocks64 > INT_MAX) return 8;
     uint8_t *d_alive = nullptr, *d_lost = nullptr;
     size_t alive_bytes = (size_t)trials * fragments;
     if (cudaMalloc(&d_alive, alive_bytes) != cudaSuccess) return 2;
     if (cudaMalloc(&d_lost, (size_t)trials) != cudaSuccess) { cudaFree(d_alive); return 3; }
     if (cudaMemcpy(d_alive, alive, alive_bytes, cudaMemcpyHostToDevice) != cudaSuccess) { cudaFree(d_alive); cudaFree(d_lost); return 4; }
-    int threads = 256; int blocks = (int)((trials + threads - 1) / threads);
+    int threads = 256; int blocks = (int)blocks64;
     kagi_readability_kernel<<<blocks, threads>>>(d_alive, d_lost, trials, fragments, mode, k, local_groups, local_parity, global_parity);
     int rc = 0;
     if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) rc = 5;
