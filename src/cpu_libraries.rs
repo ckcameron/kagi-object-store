@@ -26,8 +26,7 @@ fn open(names: &[&CStr]) -> Option<*mut libc::c_void> {
 #[cfg(feature = "isa-l")]
 type IsalInit = unsafe extern "C" fn(i32, i32, *const u8, *mut u8);
 #[cfg(feature = "isa-l")]
-type IsalEncode =
-    unsafe extern "C" fn(i32, i32, i32, *const u8, *const *const u8, *const *mut u8);
+type IsalEncode = unsafe extern "C" fn(i32, i32, i32, *const u8, *const *const u8, *const *mut u8);
 #[cfg(feature = "isa-l")]
 static ISAL_API: OnceLock<Option<(IsalInit, IsalEncode)>> = OnceLock::new();
 #[cfg(feature = "isa-l")]
