@@ -2765,16 +2765,31 @@ mod tests {
         }
     }
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-    #[tokio::test]
-    async fn gpu_product_matrix_matches_cpu_reference() {
-        if !gpu::available(BackendKind::Auto) {
+    fn gpu_test_backend() -> Option<BackendKind> {
+        let requested = match std::env::var("KAGI_REQUIRE_GPU_BACKEND").ok().as_deref() {
+            Some("cuda") => BackendKind::Cuda,
+            Some("hip") => BackendKind::Hip,
+            Some("opencl") => BackendKind::Opencl,
+            Some(other) => panic!("unknown KAGI_REQUIRE_GPU_BACKEND={other}"),
+            None => BackendKind::Auto,
+        };
+        let selected = gpu::selected(requested);
+        if selected.is_none() {
             assert!(
                 std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
-                "GPU execution required but no compiled backend has an available device"
+                "GPU execution required but requested backend {requested:?} is unavailable"
             );
-            eprintln!("GPU execution skipped: no available device");
-            return;
+            eprintln!("GPU execution skipped: requested backend {requested:?} unavailable");
         }
+        selected
+    }
+
+    #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+    #[tokio::test]
+    async fn gpu_product_matrix_matches_cpu_reference() {
+        let Some(kind) = gpu_test_backend() else {
+            return;
+        };
         let l = ErasureLayout {
             scheme: ErasureScheme::Msr,
             data_shards: 4,
@@ -2792,7 +2807,7 @@ mod tests {
             ..Default::default()
         });
         let gpu = AdaptiveBackend::new(ErasureConfig {
-            backend: BackendKind::Auto,
+            backend: kind,
             scheme: ErasureScheme::Msr,
             data_shards: 4,
             parity_shards: 3,
@@ -2818,14 +2833,9 @@ mod tests {
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
     #[tokio::test]
     async fn gpu_clay_matches_reference_and_reconstructs() {
-        if !gpu::available(BackendKind::Auto) {
-            assert!(
-                std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
-                "GPU execution required but no compiled backend has an available device"
-            );
-            eprintln!("GPU execution skipped: no available device");
+        let Some(kind) = gpu_test_backend() else {
             return;
-        }
+        };
         let l = ErasureLayout {
             scheme: ErasureScheme::Clay,
             data_shards: 4,
@@ -2834,7 +2844,7 @@ mod tests {
         };
         let src: Vec<u8> = (0..2_000_011).map(|x| (x * 13) as u8).collect();
         let gpu = AdaptiveBackend::new(ErasureConfig {
-            backend: BackendKind::Auto,
+            backend: kind,
             scheme: ErasureScheme::Clay,
             data_shards: 4,
             parity_shards: 2,
@@ -2859,15 +2869,22 @@ mod tests {
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
     #[tokio::test]
     async fn gpu_exact_repair_matches_persisted_chunks() {
-        if !gpu::available(BackendKind::Auto) {
-            assert!(
-                std::env::var_os("KAGI_REQUIRE_GPU_TESTS").is_none(),
-                "GPU execution required but no compiled backend has an available device"
-            );
-            eprintln!("GPU execution skipped: no available device");
+        let Some(kind) = gpu_test_backend() else {
             return;
-        }
+        };
         let cases = [
+            ErasureLayout {
+                scheme: ErasureScheme::ReedSolomon,
+                data_shards: 4,
+                parity_shards: 2,
+                repair_helpers: None,
+            },
+            ErasureLayout {
+                scheme: ErasureScheme::Lrc,
+                data_shards: 6,
+                parity_shards: 3,
+                repair_helpers: None,
+            },
             ErasureLayout {
                 scheme: ErasureScheme::Msr,
                 data_shards: 4,
@@ -2883,7 +2900,7 @@ mod tests {
         ];
         for l in cases {
             let gpu = AdaptiveBackend::new(ErasureConfig {
-                backend: BackendKind::Auto,
+                backend: kind,
                 scheme: l.scheme,
                 data_shards: l.data_shards,
                 parity_shards: l.parity_shards,
@@ -2905,6 +2922,60 @@ mod tests {
             }
         }
     }
+    #[cfg(any(feature = "isa-l", feature = "ipp", feature = "aocl"))]
+    #[test]
+    fn cpu_library_provider_is_reached_from_kagi_hot_path() {
+        let Ok(required) = std::env::var("KAGI_REQUIRE_CPU_LIB_BACKEND") else {
+            return;
+        };
+        match required.as_str() {
+            "isa-l" => {
+                #[cfg(all(unix, feature = "isa-l"))]
+                {
+                    let before = cpu_libraries::isal_calls();
+                    let width = 8192;
+                    let input = vec![0x5au8; width * 3];
+                    let coeff = vec![1u8, 2, 3, 4, 5, 6];
+                    let output = gf_matrix_apply_cpu(&input, 3, &coeff, 2, width).unwrap();
+                    assert_eq!(output.len(), width * 2);
+                    assert!(cpu_libraries::isal_calls() > before);
+                    return;
+                }
+                #[cfg(not(all(unix, feature = "isa-l")))]
+                panic!("ISA-L execution was required but feature/platform support is absent");
+            }
+            "ipp" => {
+                #[cfg(all(unix, feature = "ipp"))]
+                {
+                    let before = cpu_libraries::ipp_calls();
+                    let width = 8192;
+                    let input = vec![0x33u8; width * 2];
+                    let coeff = vec![1u8, 1];
+                    let output = gf_matrix_apply_cpu(&input, 2, &coeff, 1, width).unwrap();
+                    assert_eq!(output, vec![0u8; width]);
+                    assert!(cpu_libraries::ipp_calls() > before);
+                    return;
+                }
+                #[cfg(not(all(unix, feature = "ipp")))]
+                panic!("IPP execution was required but feature/platform support is absent");
+            }
+            "aocl" => {
+                #[cfg(all(unix, feature = "aocl"))]
+                {
+                    let before = cpu_libraries::aocl_calls();
+                    let input = vec![0x7cu8; 2 * 1024 * 1024 + 17];
+                    let packed = pack_source_rows(&input, 3, input.len().div_ceil(3));
+                    assert_eq!(&packed[..input.len()], &input);
+                    assert!(cpu_libraries::aocl_calls() > before);
+                    return;
+                }
+                #[cfg(not(all(unix, feature = "aocl")))]
+                panic!("AOCL execution was required but feature/platform support is absent");
+            }
+            other => panic!("unknown KAGI_REQUIRE_CPU_LIB_BACKEND={other}"),
+        }
+    }
+
     #[tokio::test]
     async fn clay_exact_plan_fetches_only_minimum_subchunks() {
         let b = AdaptiveBackend::new(ErasureConfig {
