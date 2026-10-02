@@ -498,6 +498,87 @@ fn gf_matrix_apply_cpu(
     }
     Ok(out)
 }
+fn rs_generator_matrix(k: usize, m: usize) -> Result<Vec<u8>> {
+    validate_common(k, m)?;
+    let rs = ReedSolomon::new(k, m)?;
+    let mut matrix = vec![0u8; (k + m) * k];
+    for i in 0..k {
+        matrix[i * k + i] = 1;
+    }
+    for data_row in 0..k {
+        let mut basis = vec![vec![0u8; 1]; k + m];
+        basis[data_row][0] = 1;
+        rs.encode(&mut basis)?;
+        for parity_row in 0..m {
+            matrix[(k + parity_row) * k + data_row] = basis[k + parity_row][0];
+        }
+    }
+    Ok(matrix)
+}
+
+fn rs_reconstruct_with<F>(
+    shards: &mut [Option<Vec<u8>>],
+    original_len: u64,
+    layout: &ErasureLayout,
+    apply: &F,
+) -> Result<Vec<u8>>
+where
+    F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
+{
+    let k = layout.data_shards;
+    let m = layout.parity_shards;
+    let n = k + m;
+    if shards.len() != n {
+        bail!("Reed-Solomon shard count mismatch")
+    }
+    let original_len =
+        usize::try_from(original_len).context("Reed-Solomon object exceeds address space")?;
+    let shard_len = shards
+        .iter()
+        .flatten()
+        .next()
+        .context("no Reed-Solomon shards available")?
+        .len();
+    if shard_len == 0 || shards.iter().flatten().any(|shard| shard.len() != shard_len) {
+        bail!("Reed-Solomon shard length mismatch")
+    }
+    if original_len > k.checked_mul(shard_len).context("Reed-Solomon size overflow")? {
+        bail!("Reed-Solomon original length exceeds data capacity")
+    }
+
+    let generator = rs_generator_matrix(k, m)?;
+    let available = shards
+        .iter()
+        .enumerate()
+        .filter_map(|(index, shard)| shard.as_ref().map(|_| index))
+        .take(k)
+        .collect::<Vec<_>>();
+    if available.len() != k {
+        bail!("insufficient Reed-Solomon shards")
+    }
+    let survivor_rows = available
+        .iter()
+        .flat_map(|index| generator[index * k..(index + 1) * k].iter().copied())
+        .collect::<Vec<_>>();
+    let inverse = gf_matrix_inverse(&survivor_rows, k)?;
+    let input = available
+        .iter()
+        .flat_map(|index| shards[*index].as_ref().unwrap().iter().copied())
+        .collect::<Vec<_>>();
+    let data_rows = apply(&input, k, &inverse, k, shard_len)?;
+    let rebuilt = apply(&data_rows, k, &generator, n, shard_len)?;
+
+    for (index, shard) in shards.iter_mut().enumerate() {
+        if shard.is_none() {
+            *shard = Some(rebuilt[index * shard_len..(index + 1) * shard_len].to_vec());
+        }
+    }
+
+    let mut data = data_rows;
+    data.truncate(original_len);
+    Ok(data)
+}
+
 /// LRC v1 uses m-1 disjoint local XOR groups (data index modulo m-1),
 /// followed by a GF(256) global row with distinct nonzero coefficients. The
 /// persisted scheme/k/m completely determine the code; no runtime policy leaks
@@ -1866,30 +1947,15 @@ impl ErasureBackend for AdaptiveBackend {
                 let r = match layout.scheme {
                     ErasureScheme::Lrc => lrc_encode(data, layout),
                     ErasureScheme::ReedSolomon => {
-                        // Reuse the RS generator by encoding basis bytes; this preserves byte-for-byte compatibility.
                         let (k, m) = (layout.data_shards, layout.parity_shards);
-                        let rs = ReedSolomon::new(k, m)?;
-                        let mut coeff = vec![0u8; k * m];
-                        for d in 0..k {
-                            let mut basis = vec![vec![0u8; 1]; k + m];
-                            basis[d][0] = 1;
-                            rs.encode(&mut basis)?;
-                            for p in 0..m {
-                                coeff[p * k + d] = basis[k + p][0];
-                            }
-                        }
                         let shard_len = data.len().div_ceil(k).max(1);
                         let input = pack_source_rows(data, k, shard_len);
-                        let mut full_coeff = vec![0u8; (k + m) * k];
-                        for i in 0..k {
-                            full_coeff[i * k + i] = 1;
-                        }
-                        full_coeff[k * k..].copy_from_slice(&coeff);
+                        let matrix = rs_generator_matrix(k, m)?;
                         gpu::matrix_apply(
                             self.cfg.backend,
                             &input,
                             k,
-                            &full_coeff,
+                            &matrix,
                             k + m,
                             shard_len,
                         )
