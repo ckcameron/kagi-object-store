@@ -2006,7 +2006,8 @@ impl ErasureBackend for AdaptiveBackend {
         if use_gpu {
             #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
             {
-                let r = match layout.scheme {
+                let r: Result<EncodedShards> = (|| {
+                    match layout.scheme {
                     ErasureScheme::Lrc => lrc_encode_with(
                         data,
                         layout,
@@ -2065,8 +2066,8 @@ impl ErasureBackend for AdaptiveBackend {
                             )
                         },
                     ),
-                };
-                self.release_gpu_slot();
+                    }
+                })();                self.release_gpu_slot();
                 if let Ok(v) = r {
                     self.metrics
                         .gpu_bytes
@@ -2246,7 +2247,8 @@ impl ErasureBackend for AdaptiveBackend {
         let shard_bytes = shards.iter().flatten().next().map(|x| x.len()).unwrap_or(0);
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
         if self.can_gpu(shard_bytes) && self.try_gpu_slot() {
-            let r = match layout.scheme {
+            let r: Result<Vec<u8>> = (|| {
+                match layout.scheme {
                 ErasureScheme::Lrc => {
                     let size = shards
                         .iter()
@@ -2346,8 +2348,8 @@ impl ErasureBackend for AdaptiveBackend {
                         )
                     },
                 ),
-            };
-            self.release_gpu_slot();
+                }
+            })();            self.release_gpu_slot();
             if let Ok(v) = r {
                 self.metrics.gpu_repairs.fetch_add(1, Ordering::Relaxed);
                 return Ok(v);
