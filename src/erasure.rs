@@ -514,11 +514,18 @@ fn lrc_matrix(layout: &ErasureLayout) -> Vec<u8> {
     matrix
 }
 
-fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
+fn lrc_encode_with<F>(
+    data: &[u8],
+    layout: &ErasureLayout,
+    apply: &F,
+) -> Result<EncodedShards>
+where
+    F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
+{
     let k = layout.data_shards;
     let size = data.len().div_ceil(k).max(1);
     let packed = pack_source_rows(data, k, size);
-    let output = gf_matrix_apply_cpu(&packed, k, &lrc_matrix(layout), layout.n(), size)?;
+    let output = apply(&packed, k, &lrc_matrix(layout), layout.n(), size)?;
     Ok(EncodedShards {
         original_len: data.len() as u64,
         data_shards: k as u16,
@@ -528,6 +535,10 @@ fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
         sub_chunk_no: 1,
         shards: output.chunks_exact(size).map(<[u8]>::to_vec).collect(),
     })
+}
+
+fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
+    lrc_encode_with(data, layout, &gf_matrix_apply_cpu)
 }
 
 /// Select a basis by elimination, rather than assuming any k surviving rows
@@ -640,11 +651,15 @@ fn lrc_plan(
     })
 }
 
-fn lrc_reconstruct(
+fn lrc_reconstruct_with<F>(
     shards: &mut [Option<Vec<u8>>],
     original_len: u64,
     layout: &ErasureLayout,
-) -> Result<Vec<u8>> {
+    apply: &F,
+) -> Result<Vec<u8>>
+where
+    F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
+{
     if shards.len() != layout.n() {
         bail!("LRC shard count mismatch")
     }
@@ -669,15 +684,23 @@ fn lrc_reconstruct(
         .iter()
         .flat_map(|i| shards[*i].as_ref().unwrap().iter().copied())
         .collect();
-    let mut data = gf_matrix_apply_cpu(&input, k, &gf_matrix_inverse(&rows, k)?, k, size)?;
+    let mut data = apply(&input, k, &gf_matrix_inverse(&rows, k)?, k, size)?;
     data.truncate(original_len);
-    let encoded = lrc_encode(&data, layout)?;
+    let encoded = lrc_encode_with(&data, layout, apply)?;
     for (target, recovered) in shards.iter_mut().zip(encoded.shards) {
         if target.is_none() {
             *target = Some(recovered);
         }
     }
     Ok(data)
+}
+
+fn lrc_reconstruct(
+    shards: &mut [Option<Vec<u8>>],
+    original_len: u64,
+    layout: &ErasureLayout,
+) -> Result<Vec<u8>> {
+    lrc_reconstruct_with(shards, original_len, layout, &gf_matrix_apply_cpu)
 }
 
 /// Implements the pack source rows step and keeps its validation and state transitions visible at the call site.
