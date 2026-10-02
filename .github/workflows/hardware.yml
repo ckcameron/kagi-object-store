@@ -7,7 +7,7 @@ on:
         description: Dedicated disposable runner backend
         required: true
         type: choice
-        options: [cuda, hip, opencl, isa-l, ipp, aocl, ebpf, directory]
+        options: [cuda, hip, opencl, isa-l, ipp, aocl, avx2, avx512, ebpf, directory]
 permissions:
   contents: read
 jobs:
@@ -31,13 +31,17 @@ jobs:
               export KAGI_REQUIRE_GPU_TESTS=1
               export KAGI_REQUIRE_GPU_BACKEND="$BACKEND"
               cargo test --lib --features "$BACKEND" -- --nocapture 2>&1 | tee hardware-execution.log
-              cargo test --bin kagi-config --features "$BACKEND" planner_gpu_readability_matches_reference -- --exact --nocapture 2>&1 | tee -a hardware-execution.log
+              cargo test --bin kagi-config --features "$BACKEND" tests::planner_gpu_readability_matches_reference -- --exact --nocapture 2>&1 | tee -a hardware-execution.log
               cargo run --release --features "$BACKEND" --bin kagi-bench --                 --backend "$BACKEND" --scheme all --sizes 2MiB --iterations 1                 --gpu-threshold-bytes 0 --require-acceleration                 --json hardware-benchmark.json 2>&1 | tee -a hardware-execution.log
               ;;
             isa-l|ipp|aocl)
               export KAGI_REQUIRE_CPU_LIB_TESTS=1
               export KAGI_REQUIRE_CPU_LIB_BACKEND="$BACKEND"
               cargo test --lib --features "$BACKEND" -- --nocapture 2>&1 | tee hardware-execution.log
+              ;;
+            avx2|avx512)
+              export KAGI_REQUIRE_CPU_ISA_TESTS="$BACKEND"
+              cargo test --lib "${BACKEND}_all_coefficients_match_reference" -- --nocapture 2>&1 | tee hardware-execution.log
               ;;
             *) exit 2 ;;
           esac
@@ -65,7 +69,11 @@ jobs:
         if: always()
         with:
           name: execution-${{ inputs.backend }}-${{ github.sha }}
-          path: |
-            hardware-execution.log
-            hardware-benchmark.json
-          if-no-files-found: warn
+          path: hardware-execution.log
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always() && (inputs.backend == 'cuda' || inputs.backend == 'hip' || inputs.backend == 'opencl')
+        with:
+          name: benchmark-${{ inputs.backend }}-${{ github.sha }}
+          path: hardware-benchmark.json
+          if-no-files-found: error
