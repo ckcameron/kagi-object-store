@@ -3023,7 +3023,6 @@ mod tests {
                     let output = gf_matrix_apply_cpu(&input, 3, &coeff, 2, width).unwrap();
                     assert_eq!(output.len(), width * 2);
                     assert!(cpu_libraries::isal_calls() > before);
-                    return;
                 }
                 #[cfg(not(all(unix, feature = "isa-l")))]
                 panic!("ISA-L execution was required but feature/platform support is absent");
@@ -3038,7 +3037,6 @@ mod tests {
                     let output = gf_matrix_apply_cpu(&input, 2, &coeff, 1, width).unwrap();
                     assert_eq!(output, vec![0u8; width]);
                     assert!(cpu_libraries::ipp_calls() > before);
-                    return;
                 }
                 #[cfg(not(all(unix, feature = "ipp")))]
                 panic!("IPP execution was required but feature/platform support is absent");
@@ -3051,7 +3049,6 @@ mod tests {
                     let packed = pack_source_rows(&input, 3, input.len().div_ceil(3));
                     assert_eq!(&packed[..input.len()], &input);
                     assert!(cpu_libraries::aocl_calls() > before);
-                    return;
                 }
                 #[cfg(not(all(unix, feature = "aocl")))]
                 panic!("AOCL execution was required but feature/platform support is absent");
