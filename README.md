@@ -94,9 +94,9 @@ See `BUILD-VALIDATION.md` for the validation environment and known execution lim
 - CLAY as the default runtime erasure family.
 - Configurable `k`, parity count, and repair-helper fan-in.
 - CPU implementations for all normal runtime paths.
-- Optional CUDA GF(2^8) matrix acceleration.
-- CUDA-aware CLAY reconstruction and repair transforms.
-- Adaptive CPU/GPU dispatch with configurable GPU threshold and inflight limit.
+- Optional CUDA, HIP/ROCm, and OpenCL GF(2^8) matrix acceleration across Reed-Solomon, LRC, MSR, and CLAY encode/reconstruct/repair paths.
+- Accelerator-aware exact repair transforms, including CLAY subchunk and MSR projection recovery.
+- Adaptive CPU/GPU dispatch with configurable GPU threshold and inflight limit, runtime provider availability, execution counters, and fallback telemetry.
 - Bounded matrix caches to prevent unbounded memory growth from large subpacketization.
 - Backend fallback behavior that does not change the persisted object format.
 
