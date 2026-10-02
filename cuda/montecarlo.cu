@@ -40,7 +40,12 @@ extern "C" int kagi_mc_readability_cuda(const uint8_t *alive, uint8_t *lost,
                                           uint32_t local_groups,
                                           uint32_t local_parity,
                                           uint32_t global_parity) {
-    if (!alive || !lost || trials == 0 || fragments == 0) return 1;
+    if (!alive || !lost || trials == 0 || fragments == 0 || mode > 2) return 1;
+    if (mode == 1 && k > fragments) return 1;
+    if (mode == 2 &&
+        (local_groups == 0 || k % local_groups != 0 ||
+         (uint64_t)k + (uint64_t)local_groups * local_parity + global_parity != fragments))
+        return 1;
     if (trials > SIZE_MAX / fragments || trials > SIZE_MAX) return 7;
     const uint64_t blocks64 = trials / 256 + (trials % 256 != 0);
     if (blocks64 == 0 || blocks64 > INT_MAX) return 8;
