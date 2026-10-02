@@ -1631,26 +1631,30 @@ mod gpu {
             output: *mut u8,
         ) -> c_int;
     }
-    pub fn available(kind: BackendKind) -> bool {
+    pub fn selected(kind: BackendKind) -> Option<BackendKind> {
         #[cfg(feature = "cuda")]
         if matches!(kind, BackendKind::Auto | BackendKind::Cuda)
             && unsafe { keyspace_cuda_available() != 0 }
         {
-            return true;
+            return Some(BackendKind::Cuda);
         }
         #[cfg(feature = "hip")]
         if matches!(kind, BackendKind::Auto | BackendKind::Hip)
             && unsafe { kagi_hip_available() != 0 }
         {
-            return true;
+            return Some(BackendKind::Hip);
         }
         #[cfg(feature = "opencl")]
         if matches!(kind, BackendKind::Auto | BackendKind::Opencl)
             && unsafe { kagi_opencl_available() != 0 }
         {
-            return true;
+            return Some(BackendKind::Opencl);
         }
-        false
+        None
+    }
+
+    pub fn available(kind: BackendKind) -> bool {
+        selected(kind).is_some()
     }
     pub fn matrix_apply(
         kind: BackendKind,
@@ -1737,12 +1741,22 @@ pub struct ErasureMetricsSnapshot {
 #[derive(Debug, Clone, Serialize)]
 pub struct AccelerationStatus {
     pub requested: BackendKind,
+    pub selected_gpu: Option<BackendKind>,
     pub cuda_compiled: bool,
+    pub cuda_available: bool,
     pub hip_compiled: bool,
+    pub hip_available: bool,
     pub opencl_compiled: bool,
+    pub opencl_available: bool,
     pub isa_l_compiled: bool,
+    pub isa_l_available: bool,
+    pub isa_l_calls: u64,
     pub ipp_compiled: bool,
+    pub ipp_available: bool,
+    pub ipp_calls: u64,
     pub aocl_compiled: bool,
+    pub aocl_available: bool,
+    pub aocl_calls: u64,
     pub selected_gpu_available: bool,
     pub avx2: bool,
     pub avx512f: bool,
@@ -1772,6 +1786,25 @@ fn cpu_feature_avx512bw() -> bool {
 #[cfg(not(target_arch = "x86_64"))]
 fn cpu_feature_avx512bw() -> bool {
     false
+}
+
+fn cpu_library_status() -> (bool, u64, bool, u64, bool, u64) {
+    #[cfg(all(unix, feature = "isa-l"))]
+    let isa_l = (cpu_libraries::isal_available(), cpu_libraries::isal_calls());
+    #[cfg(not(all(unix, feature = "isa-l")))]
+    let isa_l = (false, 0);
+
+    #[cfg(all(unix, feature = "ipp"))]
+    let ipp = (cpu_libraries::ipp_available(), cpu_libraries::ipp_calls());
+    #[cfg(not(all(unix, feature = "ipp")))]
+    let ipp = (false, 0);
+
+    #[cfg(all(unix, feature = "aocl"))]
+    let aocl = (cpu_libraries::aocl_available(), cpu_libraries::aocl_calls());
+    #[cfg(not(all(unix, feature = "aocl")))]
+    let aocl = (false, 0);
+
+    (isa_l.0, isa_l.1, ipp.0, ipp.1, aocl.0, aocl.1)
 }
 
 #[derive(Default)]
@@ -1824,19 +1857,45 @@ impl AdaptiveBackend {
 
     pub fn acceleration_status(&self) -> AccelerationStatus {
         #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-        let selected_gpu_available = gpu::available(self.cfg.backend);
+        let selected_gpu = gpu::selected(self.cfg.backend);
         #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
-        let selected_gpu_available = false;
+        let selected_gpu = None;
+
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let cuda_available = gpu::available(BackendKind::Cuda);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let cuda_available = false;
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let hip_available = gpu::available(BackendKind::Hip);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let hip_available = false;
+        #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
+        let opencl_available = gpu::available(BackendKind::Opencl);
+        #[cfg(not(any(feature = "cuda", feature = "hip", feature = "opencl")))]
+        let opencl_available = false;
+
+        let (isa_l_available, isa_l_calls, ipp_available, ipp_calls, aocl_available, aocl_calls) =
+            cpu_library_status();
 
         AccelerationStatus {
             requested: self.cfg.backend,
+            selected_gpu,
             cuda_compiled: cfg!(feature = "cuda"),
+            cuda_available,
             hip_compiled: cfg!(feature = "hip"),
+            hip_available,
             opencl_compiled: cfg!(feature = "opencl"),
+            opencl_available,
             isa_l_compiled: cfg!(feature = "isa-l"),
+            isa_l_available,
+            isa_l_calls,
             ipp_compiled: cfg!(feature = "ipp"),
+            ipp_available,
+            ipp_calls,
             aocl_compiled: cfg!(feature = "aocl"),
-            selected_gpu_available,
+            aocl_available,
+            aocl_calls,
+            selected_gpu_available: selected_gpu.is_some(),
             avx2: cpu_feature_avx2(),
             avx512f: cpu_feature_avx512f(),
             avx512bw: cpu_feature_avx512bw(),
