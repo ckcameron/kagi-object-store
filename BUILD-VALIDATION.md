@@ -107,7 +107,7 @@ configuration type or protocol structure exists.
 | Fibre Channel | Integration boundary | Validate Linux-visible FC LUN discovery/admission; a native FC protocol stack is out of scope unless explicitly required. |
 | NBD/QEMU/libvirt block frontend | Runtime/integration implemented | Add VM-level persistence/restart tests. |
 | VMware/Hyper-V | Integration boundary | Validate supported iSCSI/image workflows on those hypervisors before claiming native integration. |
-| SCSI-3 PR | Runtime implemented | Clear all-feature `scsi-target` strict-Clippy warnings and add frontend-level reservation conflict tests. |
+| SCSI-3 PR | Runtime implemented | Maintain authenticated PR CDB, persisted reservation and NBD-to-API initiator/conflict tests; VM-level SCSI persistence remains integration-dependent. |
 | CUDA/HIP/OpenCL/ISA-L/IPP/AOCL | Hardware/library dependent | Require execution-marked tests on matching CI runners; fallback/compile-only runs do not count as accelerator validation. |
 | eBPF/LSM security | Kernel-dependent | Build, attach, exercise allow/deny and side actions on a supported kernel in privileged CI. |
 | Web operations console | Runtime implemented | Add browser/API integration tests for auth, object inspection, logs, buckets and WORM controls. |
@@ -149,8 +149,9 @@ repair, concurrent Raft proposals and joint-majority rejection, snapshot archive
 replay/GC fences, console role enforcement and persisted buckets, SCSI CDB conflicts
 and persisted registrations, and actual TLS QUIC transfers and failures.
 
-Local QUIC validation uses the system OpenSSL on PATH: the unrelated installation
-in /usr/local/bin cannot load its libompstub.so dependency on this machine.
+For local QUIC tests on this host, put `/usr/bin` ahead of `/usr/local/bin` in
+`PATH`. The `/usr/local/bin/openssl` installation cannot load its `libompstub.so`
+dependency here; `/usr/bin/openssl` works.
 
 The manual hardware workflow requires matching protected runners and records
 positive execution evidence. No GPU, LSM attachment, or directory-provider
@@ -211,3 +212,21 @@ integration and positive-execution gates; they do **not** claim that a particula
 GPU, CPU library, or SIMD implementation has executed on a matching runner until
 the corresponding `hardware-execution` workflow artifact exists for this
 revision.
+
+### Block reservation frontend regression follow-up (2026-10-02)
+
+The authenticated PR CDB regression now reserves a volume with Exclusive Access,
+reopens the persisted registration/reservation state, and exercises the volume
+read, write and UNMAP endpoints. The holder can read; a competing initiator gets
+reservation conflicts before the write or UNMAP can mutate the volume. A separate
+NBD protocol test checks that the configured stable initiator reaches those API
+operations and that conflicts map to NBD `EIO` while authorized operations succeed.
+These tests validate Kagi's NBD-to-API boundary, not VM-level SCSI sense codes or
+hypervisor restart persistence.
+
+Local validation for this follow-up passed: formatting, `cargo check --all-targets`,
+127 default tests (one ignored directory-provider test), strict default Clippy,
+130 tests with `quic,ebpf,scsi-target,rdma` (two ignored provider/kernel tests),
+and strict Clippy with that feature set. The targeted NBD protocol and authenticated
+block API integration tests also passed. Full CI results are recorded on the
+corresponding pull request.
