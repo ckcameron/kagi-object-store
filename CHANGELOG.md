@@ -20,6 +20,8 @@ Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 - Serialized Raft proposal/persistence paths and guarded commit authority against leadership
   changes; made snapshot archive accounting idempotent and completion conditional on all objects.
 - Connected the optional SCSI PR wire decoder to an authenticated administrative CDB bridge.
+- Added block API and NBD protocol regressions for stable initiator propagation and
+  Exclusive Access conflicts across reads, writes and UNMAP, including metadata reopen.
 - Added execution-only hardware/kernel/directory CI gates. RDMA remains unavailable as a backend;
   portable QUIC/HTTPS fallback remains explicit.
 - Added a self-documenting runtime configuration example covering every accepted node/cluster option, units, bounds and defaults; configuration structs now reject unknown keys and CI tests the canonical example against the production deserializer.

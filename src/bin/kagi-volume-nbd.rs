@@ -219,3 +219,163 @@ async fn main() -> Result<()> {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Bytes,
+        extract::{Path, State},
+        http::{HeaderMap, StatusCode},
+        response::{IntoResponse, Response},
+        routing::{get, put},
+        Json, Router,
+    };
+    use std::sync::Arc;
+
+    async fn mock_volume() -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "size_bytes": 4096,
+            "logical_block_bytes": 512
+        }))
+    }
+
+    fn authorized(headers: &HeaderMap, holder: &str) -> bool {
+        headers
+            .get("x-kagi-initiator")
+            .and_then(|value| value.to_str().ok())
+            == Some(holder)
+    }
+
+    async fn mock_read(
+        State(holder): State<Arc<str>>,
+        headers: HeaderMap,
+        Path((_id, _offset, _length)): Path<(String, u64, usize)>,
+    ) -> Response {
+        if authorized(&headers, &holder) {
+            (StatusCode::OK, Bytes::from_static(b"data")).into_response()
+        } else {
+            StatusCode::CONFLICT.into_response()
+        }
+    }
+
+    async fn mock_write(
+        State(holder): State<Arc<str>>,
+        headers: HeaderMap,
+        Path((_id, _offset)): Path<(String, u64)>,
+        _body: Bytes,
+    ) -> StatusCode {
+        if authorized(&headers, &holder) {
+            StatusCode::OK
+        } else {
+            StatusCode::CONFLICT
+        }
+    }
+
+    async fn mock_unmap(
+        State(holder): State<Arc<str>>,
+        headers: HeaderMap,
+        Path((_id, _offset, _length)): Path<(String, u64, usize)>,
+    ) -> StatusCode {
+        if authorized(&headers, &holder) {
+            StatusCode::OK
+        } else {
+            StatusCode::CONFLICT
+        }
+    }
+
+    async fn start_session(
+        api: String,
+        initiator: &str,
+    ) -> (TcpStream, tokio::task::JoinHandle<Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let opt = Opt {
+            listen: addr.to_string(),
+            api,
+            volume: "test-volume".into(),
+            initiator: initiator.into(),
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await?;
+            serve(stream, opt).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        assert_eq!(client.read_u64().await.unwrap(), NBD_MAGIC);
+        assert_eq!(client.read_u64().await.unwrap(), IHAVEOPT);
+        let _server_flags = client.read_u16().await.unwrap();
+        client.write_u32(2).await.unwrap();
+        client.write_u64(IHAVEOPT).await.unwrap();
+        client.write_u32(1).await.unwrap(); // NBD_OPT_EXPORT_NAME
+        client.write_u32(0).await.unwrap();
+        client.flush().await.unwrap();
+        assert_eq!(client.read_u64().await.unwrap(), 4096);
+        let _transmission_flags = client.read_u16().await.unwrap();
+        (client, server)
+    }
+
+    async fn request(
+        client: &mut TcpStream,
+        kind: u16,
+        handle: u64,
+        length: u32,
+        body: &[u8],
+    ) -> (u32, Vec<u8>) {
+        client.write_u32(REQ_MAGIC).await.unwrap();
+        client.write_u16(0).await.unwrap();
+        client.write_u16(kind).await.unwrap();
+        client.write_u64(handle).await.unwrap();
+        client.write_u64(0).await.unwrap();
+        client.write_u32(length).await.unwrap();
+        if kind == 1 {
+            assert_eq!(body.len(), length as usize);
+            client.write_all(body).await.unwrap();
+        }
+        client.flush().await.unwrap();
+        assert_eq!(client.read_u32().await.unwrap(), REP_MAGIC);
+        let errno = client.read_u32().await.unwrap();
+        assert_eq!(client.read_u64().await.unwrap(), handle);
+        let mut response = vec![
+            0;
+            if kind == 0 && errno == 0 {
+                length as usize
+            } else {
+                0
+            }
+        ];
+        client.read_exact(&mut response).await.unwrap();
+        (errno, response)
+    }
+
+    #[tokio::test]
+    async fn nbd_frontend_carries_initiator_and_maps_reservation_conflicts() {
+        let api = Router::new()
+            .route("/v1/volumes/:id", get(mock_volume))
+            .route("/v1/volumes/:id/data/:offset/:length", get(mock_read))
+            .route("/v1/volumes/:id/data/:offset", put(mock_write))
+            .route("/v1/volumes/:id/unmap/:offset/:length", put(mock_unmap))
+            .with_state(Arc::<str>::from("initiator-a"));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let api_server = tokio::spawn(async move { axum::serve(listener, api).await.unwrap() });
+
+        let (mut holder, holder_server) = start_session(api_url.clone(), "initiator-a").await;
+        assert_eq!(
+            request(&mut holder, 0, 1, 4, &[]).await,
+            (0, b"data".to_vec())
+        );
+        assert_eq!(request(&mut holder, 1, 2, 5, b"write").await.0, 0);
+        assert_eq!(request(&mut holder, 4, 3, 4, &[]).await.0, 0);
+        drop(holder);
+        holder_server.await.unwrap().unwrap();
+
+        let (mut competitor, competitor_server) = start_session(api_url, "initiator-b").await;
+        assert_eq!(request(&mut competitor, 0, 4, 4, &[]).await.0, 5);
+        assert_eq!(request(&mut competitor, 1, 5, 4, b"deny").await.0, 5);
+        assert_eq!(request(&mut competitor, 4, 6, 4, &[]).await.0, 5);
+        drop(competitor);
+        competitor_server.await.unwrap().unwrap();
+        api_server.abort();
+    }
+}
