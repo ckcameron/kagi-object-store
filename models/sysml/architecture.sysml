@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: CC-BY-NC-SA-4.0
-// Kagi SysML v2 architecture model; validate with a compatible SysML v2 tool.
+// Kagi architecture model. CI syntax-checks this file with sysml2 0.3.1.
 package KagiArchitecture {
-    requirement def DurabilityTarget {
-        doc /* The protection policy must satisfy the configured durability objective. */
-        attribute targetLossProbability : Real;
-    }
     part def Disk;
     part def Host { part disks : Disk[*]; }
     part def Rack { part hosts : Host[*]; }
@@ -15,6 +11,11 @@ package KagiArchitecture {
     part def BlockVolumeService;
     part def SecurityService;
     part def MaintenanceService;
+    part def PlannerConstraints {
+        attribute minimumHosts : Integer = 6;
+        attribute minimumDisksPerHost : Integer = 6;
+        attribute protectionScheme : String = "clay";
+    }
     part def KagiSystem {
         part topology : Site[*];
         part metadata : RaftMetadataService;
@@ -23,14 +24,18 @@ package KagiArchitecture {
         part volumes : BlockVolumeService;
         part security : SecurityService;
         part maintenance : MaintenanceService;
+        part plannerConstraints : PlannerConstraints;
     }
-    requirement <REQ-ARCH-001> durability {
-        doc /* Durability claims require kagi-config analysis, not model assertions alone. */
+    requirement <'REQ-ARCH-001'> durability {
+        doc /* Durability estimates are produced by kagi-config; the model does not assert a loss probability. */
         subject system : KagiSystem;
-        attribute targetLossProbability : Real;
     }
-    requirement <REQ-ARCH-002> verificationTraceability {
-        doc /* Requirements map to implementation and verification evidence. */
+    requirement <'REQ-ARCH-002'> plannerConstraintsAreApplied {
+        doc /* Planner constraints are validated and applied by the SysML adapter before kagi-config runs. */
+        subject system : KagiSystem;
+    }
+    requirement <'REQ-ARCH-003'> verificationTraceability {
+        doc /* Requirements map to implementation and automated verification evidence. */
         subject system : KagiSystem;
     }
 }
