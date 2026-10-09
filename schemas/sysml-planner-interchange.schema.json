@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kagi SysML-to-planner interchange",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "model_revision",
+    "requirements",
+    "constraints"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "model_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "evidence_status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^REQ-[A-Z0-9-]+$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence_status": {
+            "enum": [
+              "unverified",
+              "requires-run",
+              "verified",
+              "blocked",
+              "automated-structural-check"
+            ]
+          }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minimum_hosts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "minimum_disks_per_host": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "target_loss_probability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "protection_scheme": {
+          "enum": [
+            "replication",
+            "reed-solomon",
+            "lrc",
+            "msr",
+            "clay"
+          ]
+        },
+        "max_repair_bandwidth_bytes_per_second": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
