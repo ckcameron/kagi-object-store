@@ -82,6 +82,10 @@ The intended model exchange uses the OMG SysML v2 textual notation and machine-r
 
 The integration boundary should remain tool-neutral: version SysML models with the source, validate them with a declared compatible SysML v2 toolchain, and exchange derived constraints with `kagi-config` through a documented schema. Do not treat generated diagrams or an unvalidated model as proof of runtime behavior or durability. SysML validation must report tool/version, model revision, checks run, and failures.
 
+## SysML modelling workflow
+
+Kagi now includes a version-controlled SysML v2 architecture model, requirement traceability map, versioned planner-interchange schema, structural validator, regression tests, and CI validation. The structural validator is not a full SysML v2 semantic validator; see [the SysML workflow](docs/SYSML.md) for scope and commands.
+
 ## Feature inventory
 
 ### Distributed object storage
