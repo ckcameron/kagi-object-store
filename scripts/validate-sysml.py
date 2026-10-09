@@ -34,7 +34,7 @@ def main():
 
     if not re.search(r"\bpackage\s+KagiArchitecture\s*\{", model):
         fail("model package KagiArchitecture not found")
-    model_ids = set(re.findall(r"requirement\s+<['\"]?([^>'\"]+)['\"]?>", model))
+    model_ids = set(re.findall(r"requirement\s+(?:def\s+)?<['\"]?([^>'\"]+)['\"]?>", model))
     requirements = trace.get("requirements")
     if not isinstance(requirements, list) or not requirements:
         fail("traceability must contain a non-empty requirements array")
