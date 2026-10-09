@@ -26,15 +26,15 @@ package KagiArchitecture {
         part maintenance : MaintenanceService;
         part plannerConstraints : PlannerConstraints;
     }
-    requirement <'REQ-ARCH-001'> durability {
+    requirement def <'REQ-ARCH-001'> durability {
         doc /* Durability estimates are produced by kagi-config; the model does not assert a loss probability. */
         subject system : KagiSystem;
     }
-    requirement <'REQ-ARCH-002'> plannerConstraintsAreApplied {
+    requirement def <'REQ-ARCH-002'> plannerConstraintsAreApplied {
         doc /* Planner constraints are validated and applied by the SysML adapter before kagi-config runs. */
         subject system : KagiSystem;
     }
-    requirement <'REQ-ARCH-003'> verificationTraceability {
+    requirement def <'REQ-ARCH-003'> verificationTraceability {
         doc /* Requirements map to implementation and automated verification evidence. */
         subject system : KagiSystem;
     }
