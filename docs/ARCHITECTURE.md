@@ -27,9 +27,7 @@ Until a compatible SysML v2 parser/validator, sample model, interchange schema, 
 
 ## SysML v2 model bundle
 
-The source-controlled SysML model and requirement traceability map live under `models/sysml/`. The versioned JSON exchange contract is `schemas/sysml-planner-interchange.schema.json`; `scripts/validate-sysml.py` checks bundle structure, requirement IDs, and repository references and emits normalized interchange JSON. CI tests these checks.
-
-This validator is intentionally not described as a standards-compliant SysML v2 parser. A pinned external SysML v2 validator is still required for semantic conformance. Planner interchange constraints remain empty until a reviewed mapping to the real `kagi-config` schema is implemented. Durability and placement probability remain the executable planner's responsibility.
+The source-controlled model and requirement traceability map live under `models/sysml/`. The versioned JSON exchange contract is `schemas/sysml-planner-interchange.schema.json`. CI syntax-checks the model with the pinned `sysml2` CLI and validates the emitted interchange against JSON Schema. `scripts/apply-sysml-constraints.py` applies the model's host/disk minimums and protection family to an existing planner YAML before `kagi-config` runs. It preserves topology and seed geometry while enabling the existing geometry optimizer. Monte Carlo loss probability, placement feasibility, and final geometry remain the planner's responsibility; this integration does not claim full OMG semantic conformance or infer durability from the architecture model.
 
 See [SysML modelling workflow](SYSML.md) for commands and limitations.
 
