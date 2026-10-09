@@ -69,6 +69,19 @@ runtime or validation status. The following boundaries are material:
 
 See `BUILD-VALIDATION.md` for the validation environment and known execution limitations.
 
+## SysML architecture and planning
+
+Kagi's architecture/planning workflow includes a **SysML v2 modelling integration design** for expressing system structure, interfaces, requirements, constraints, and verification evidence alongside the existing topology and durability planner. This is an architecture-planning layer, not a claim that a SysML parser, solver, or model execution engine is already bundled into the runtime.
+
+The intended model exchange uses the OMG SysML v2 textual notation and machine-readable API representations where supported. Models should describe:
+- requirements and traceability to implementation, tests, and validation evidence;
+- logical components and ports, including object, namespace, block-volume, metadata/Raft, security, and maintenance services;
+- deployment topology and constraints across site/rack/host/disk and network failure domains;
+- protection-policy parameters and resource budgets, linked to—but not replacing—the Monte Carlo planner's calculations;
+- verification cases, assumptions, unresolved risks, and evidence provenance.
+
+The integration boundary should remain tool-neutral: version SysML models with the source, validate them with a declared compatible SysML v2 toolchain, and exchange derived constraints with `kagi-config` through a documented schema. Do not treat generated diagrams or an unvalidated model as proof of runtime behavior or durability. SysML validation must report tool/version, model revision, checks run, and failures.
+
 ## Feature inventory
 
 ### Distributed object storage
