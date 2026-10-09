@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0.0",
+  "model": "models/sysml/architecture.sysml",
+  "requirements": [
+    {
+      "id": "REQ-ARCH-001",
+      "title": "Durability target",
+      "implementation": [
+        "src/config.rs",
+        "src/erasure.rs"
+      ],
+      "verification": [
+        "cargo test --all-targets",
+        "kagi-config Monte Carlo report"
+      ],
+      "evidence_status": "requires-run"
+    },
+    {
+      "id": "REQ-ARCH-002",
+      "title": "Verification traceability",
+      "implementation": [
+        "models/sysml/architecture.sysml"
+      ],
+      "verification": [
+        "scripts/validate-sysml.py"
+      ],
+      "evidence_status": "automated-structural-check"
+    }
+  ]
+}
