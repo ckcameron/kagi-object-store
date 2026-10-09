@@ -23,7 +23,7 @@ The initial modelling scope is:
 
 Use OMG SysML v2 textual models and standard machine-readable API representations where the selected tool supports them. Keep model validation behind a documented toolchain adapter so Kagi does not depend on one vendor's UI or proprietary project format. The adapter should emit a versioned, schema-validated interchange document for constraints that `kagi-config` can consume; it must reject unknown schema versions and preserve source model identifiers.
 
-Until a compatible SysML v2 parser/validator, sample model, interchange schema, and automated validation job are checked into the repository, this is an **architecture integration specification**, not a claim of implemented SysML execution. A future implementation should add model examples, round-trip tests, invalid-model tests, traceability checks, and CI validation using a pinned tool version. Rendered diagrams alone are not validation evidence.
+The repository now includes a sample SysML v2 model, a pinned syntax checker, schema-validated interchange, a planner adapter, regression tests, and CI validation. These checks establish syntax and integration behavior, not full OMG semantic conformance or proof of durability. Rendered diagrams alone are not validation evidence.
 
 ## SysML v2 model bundle
 
