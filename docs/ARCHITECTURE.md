@@ -25,6 +25,14 @@ Use OMG SysML v2 textual models and standard machine-readable API representation
 
 Until a compatible SysML v2 parser/validator, sample model, interchange schema, and automated validation job are checked into the repository, this is an **architecture integration specification**, not a claim of implemented SysML execution. A future implementation should add model examples, round-trip tests, invalid-model tests, traceability checks, and CI validation using a pinned tool version. Rendered diagrams alone are not validation evidence.
 
+## SysML v2 model bundle
+
+The source-controlled SysML model and requirement traceability map live under `models/sysml/`. The versioned JSON exchange contract is `schemas/sysml-planner-interchange.schema.json`; `scripts/validate-sysml.py` checks bundle structure, requirement IDs, and repository references and emits normalized interchange JSON. CI tests these checks.
+
+This validator is intentionally not described as a standards-compliant SysML v2 parser. A pinned external SysML v2 validator is still required for semantic conformance. Planner interchange constraints remain empty until a reviewed mapping to the real `kagi-config` schema is implemented. Durability and placement probability remain the executable planner's responsibility.
+
+See [SysML modelling workflow](SYSML.md) for commands and limitations.
+
 ## Failure-domain hierarchy
 
 The physical topology is modeled as site → rack → host → disk. Network domains are orthogonal to this hierarchy: a host may have one or more network paths. In Monte Carlo modeling, a multihomed host becomes network-unreachable only when every network domain attached to it is unavailable.
