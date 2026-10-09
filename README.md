@@ -486,3 +486,7 @@ Kagi source and documentation are licensed under CC BY-NC-SA 4.0; see `LICENSE`.
 Copyright (c) 2026 CK Cameron. Kagi source code, scripts, configuration examples, and documentation are licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE). Attribute CK Cameron and Kagi, retain notices, identify modifications, and follow the noncommercial and share-alike terms of the license. The canonical project is https://github.com/ckcameron/kagi-object-store.
 
 The fileguard-derived security workspace and third-party dependencies retain their upstream licenses; see [Third-Party Notices](THIRD-PARTY-NOTICES.md). Generated validation logs are historical evidence, not new license declarations.
+
+## SysML v2 integration
+
+The SysML v2 model is syntax-checked in CI and generates a versioned, schema-validated planner interchange. Apply the modelled topology minimums and protection family to a topology file before running `kagi-config`; see [the SysML workflow](docs/SYSML.md).
