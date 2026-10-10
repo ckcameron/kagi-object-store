@@ -24,6 +24,7 @@ Build and install:
 
 ```sh
 docker build -f deploy/kubernetes/csi/Dockerfile -t ghcr.io/ckcameron/kagi-csi:dev .
+# Push to a registry reachable by the cluster, or load the image into your local cluster.
 ```
 
 Edit `deploy/kubernetes/csi/deployment.yaml` to use your image and set `KAGI_API_ENDPOINT` to a reachable Kagi cluster-host API service. The example assumes `kagi-cluster-host.kagi-system.svc.cluster.local:7400`; adapt this service DNS name to your deployment. Apply the manifests and StorageClass:
@@ -33,6 +34,7 @@ kubectl apply -f deploy/kubernetes/csi/deployment.yaml
 kubectl apply -f deploy/kubernetes/csi/rbac.yaml
 kubectl apply -f deploy/kubernetes/csi/storageclass.yaml
 kubectl apply -f deploy/kubernetes/csi/pvc-examples.yaml
+kubectl apply -f deploy/kubernetes/csi/pod-example.yaml
 kubectl -n kagi-system get pods
 kubectl get storageclass kagi-retain
 ```
