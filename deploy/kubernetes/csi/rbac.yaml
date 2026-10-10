@@ -8,8 +8,11 @@ rules:
     resources: ["persistentvolumes", "persistentvolumeclaims", "events"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses", "csinodes", "csidrivers", "volumeattachments"]
+    resources: ["storageclasses", "csinodes", "csidrivers"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
@@ -32,7 +35,7 @@ kind: CSIDriver
 metadata:
   name: csi.kagi.io
 spec:
-  attachRequired: false
+  attachRequired: true
   podInfoOnMount: true
   volumeLifecycleModes: ["Persistent"]
   fsGroupPolicy: File
