@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 const driverName = "csi.kagi.io"
@@ -59,10 +60,11 @@ func (d *driver) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi
 	return &csi.GetPluginInfoResponse{Name: driverName, VendorVersion: "0.1.0"}, nil
 }
 func (d *driver) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
+	if d.mode != "controller" { return &csi.GetPluginCapabilitiesResponse{}, nil }
 	return &csi.GetPluginCapabilitiesResponse{Capabilities: []*csi.PluginCapability{{Type: &csi.PluginCapability_Service_{Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE}}}}}, nil
 }
 func (d *driver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
-	return &csi.ProbeResponse{Ready: nil}, nil
+	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
 }
 func (d *driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
 	return &csi.ControllerGetCapabilitiesResponse{Capabilities: []*csi.ControllerServiceCapability{
@@ -131,6 +133,7 @@ func (d *driver) NodeGetInfo(context.Context,*csi.NodeGetInfoRequest)(*csi.NodeG
 }
 type stageState struct { VolumeID, Device, Port, ServerPID string; Filesystem bool; StagePath string }
 func safeID(id string) string { return strings.Map(func(r rune) rune { if r>='a'&&r<='z'||r>='A'&&r<='Z'||r>='0'&&r<='9'||r=='-'||r=='_' {return r}; return '_' },id) }
+func contains(items []string, wanted string) bool { for _,item:=range items { if item==wanted{return true} }; return false }
 func (d *driver) statePath(id string) string { return filepath.Join(d.stateDir,safeID(id)+".json") }
 func (d *driver) loadState(id string)(stageState,error) {
 	var s stageState; b,e:=os.ReadFile(d.statePath(id)); if e!=nil{return s,e}; e=json.Unmarshal(b,&s); return s,e
@@ -162,7 +165,10 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
-	if fs && vol.ReadOnly==false && req.GetReadonly() { /* requested read-only is enforced at mount */ }
+	if fs {
+		fsType:=strings.ToLower(req.GetVolumeCapability().GetMount().GetFsType())
+		if fsType!="" && fsType!="ext4" { return nil,status.Errorf(codes.InvalidArgument,"filesystem type %q is unsupported; only ext4 is supported",fsType) }
+	}
 	if err=os.MkdirAll(stage,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create staging directory: %v",err)}
 	if err=os.MkdirAll(d.stateDir,0700);err!=nil{return nil,status.Errorf(codes.Internal,"create CSI state directory: %v",err)}
 	_ = run(ctx,"modprobe","nbd","nbds_max=128") // The module may already be loaded; device availability is checked below.
@@ -189,7 +195,12 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		if err=run(ctx,"blkid","-p","-s","TYPE","-o","value",device);err!=nil {
 			if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
 		}
-		if err=run(ctx,"mount","-o","defaults",device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
+		opts:=[]string{"defaults"}
+		for _,flag:=range req.GetVolumeCapability().GetMount().GetMountFlags() {
+			switch flag { case "noatime","nodiratime","nodev","nosuid","noexec","sync","dirsync","ro": opts=append(opts,flag); default: return nil,status.Errorf(codes.InvalidArgument,"unsupported mount flag %q",flag) }
+		}
+		if req.GetReadonly() && !contains(opts,"ro") { opts=append(opts,"ro") }
+		if err=run(ctx,"mount","-o",strings.Join(opts,","),device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
 	}
 	if err=d.saveState(s);err!=nil{return nil,status.Errorf(codes.Internal,"save staging state: %v",err)}
 	return &csi.NodeStageVolumeResponse{},nil
@@ -234,8 +245,9 @@ func (d *driver) NodeUnpublishVolume(ctx context.Context,req *csi.NodeUnpublishV
 }
 func (d *driver) NodeGetVolumeStats(ctx context.Context,req *csi.NodeGetVolumeStatsRequest)(*csi.NodeGetVolumeStatsResponse,error) {
 	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Error(codes.NotFound,"volume is not staged")}
+	if !s.Filesystem { return nil,status.Error(codes.Unimplemented,"volume statistics are available only for filesystem-mode volumes") }
 	var st syscall.Statfs_t
-	path:=s.Device;if s.Filesystem{path=s.StagePath}
+	path:=s.StagePath
 	if err=syscall.Statfs(path,&st);err!=nil{return nil,status.Errorf(codes.Internal,"stat volume: %v",err)}
 	return &csi.NodeGetVolumeStatsResponse{Usage:[]*csi.VolumeUsage{{Unit:csi.VolumeUsage_BYTES,Total:int64(st.Blocks)*int64(st.Bsize),Used:int64(st.Blocks-st.Bfree)*int64(st.Bsize)},{Unit:csi.VolumeUsage_INODES,Total:int64(st.Files),Used:int64(st.Files-st.Ffree)}}},nil
 }
