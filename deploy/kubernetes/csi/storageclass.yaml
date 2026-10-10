@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: kagi-retain
+provisioner: csi.kagi.io
+parameters:
+  csi.storage.k8s.io/fstype: ext4
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+allowVolumeExpansion: false
