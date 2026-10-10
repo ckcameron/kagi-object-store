@@ -46,7 +46,7 @@ jobs:
           python - <<'PY'
           import pathlib
           import yaml
-          for path in pathlib.Path('deploy/kubernetes/csi').glob('*.yaml'):
+          for path in pathlib.Path('deploy/kubernetes').rglob('*.yaml'):
               docs = list(yaml.safe_load_all(path.read_text()))
               assert all(isinstance(doc, dict) for doc in docs), path
               print(f'validated {path}')
