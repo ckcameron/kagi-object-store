@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0.0",
+  "model": "models/sysml/architecture.sysml",
+  "requirements": [
+    {
+      "id": "REQ-ARCH-001",
+      "title": "Durability estimates remain planner-owned",
+      "implementation": [
+        "src/durability.rs",
+        "src/main.rs",
+        "docs/MONTECARLO.md"
+      ],
+      "verification": [
+        "cargo test --all-targets",
+        "kagi-config Monte Carlo report"
+      ],
+      "evidence_status": "requires-run"
+    },
+    {
+      "id": "REQ-ARCH-002",
+      "title": "SysML planner constraints are applied",
+      "implementation": [
+        "scripts/apply-sysml-constraints.py",
+        "schemas/sysml-planner-interchange.schema.json"
+      ],
+      "verification": [
+        "tests/sysml/test_validate_sysml.py",
+        "scripts/validate-sysml.py"
+      ],
+      "evidence_status": "automated-structural-check"
+    },
+    {
+      "id": "REQ-ARCH-003",
+      "title": "Verification traceability",
+      "implementation": [
+        "models/sysml/architecture.sysml"
+      ],
+      "verification": [
+        "scripts/validate-sysml.py",
+        "sysml check models/sysml/architecture.sysml"
+      ],
+      "evidence_status": "automated-structural-check"
+    }
+  ]
+}
