@@ -18,7 +18,7 @@ The script is idempotent for existing guests and networks; it does not delete or
 
 ## Kubernetes CSI driver
 
-`deploy/kubernetes/csi` contains a CSI controller/node implementation. The controller creates thin-provisioned Kagi volumes through `POST /v1/volumes`. Each node stages a volume by starting the Kagi NBD frontend locally, attaching an available `/dev/nbdN`, and then publishes either a raw block device or an ext4 filesystem into a pod. Node staging state and NBD logs live under the kubelet plugin directory.
+`deploy/kubernetes/csi` contains a CSI controller/node implementation. The controller creates thin-provisioned Kagi volumes through `POST /v1/volumes`. Controller publish/unpublish uses Kagi's Raft-backed SCSI persistent-reservation API to fence a volume to one Kubernetes node. Each node stages a volume by starting the Kagi NBD frontend locally, attaching an available `/dev/nbdN`, and then publishes either a raw block device or an ext4 filesystem into a pod. Node staging state and NBD logs live under the kubelet plugin directory.
 
 Build and install:
 
@@ -37,7 +37,7 @@ kubectl -n kagi-system get pods
 kubectl get storageclass kagi-retain
 ```
 
-Use the filesystem PVC with a normal pod volume mount, or the block PVC with `volumeDevices` and `devicePath`. The node plugin is privileged because it manages NBD devices and mounts; restrict scheduling to trusted storage nodes, limit cluster RBAC, and use TLS/network policy for the Kagi API in production. The NBD endpoint is loopback-bound on the node and is not exposed as a network service.
+Use the filesystem PVC with a normal pod volume mount, or the block PVC with `volumeDevices` and `devicePath`. The node plugin is privileged because it manages NBD devices and mounts; restrict scheduling to trusted storage nodes, limit cluster RBAC, and use TLS/network policy for the Kagi API in production. The controller uses the CSI external-attacher sidecar; the Kagi API's persistent reservation is the single-node write-fencing mechanism. The NBD endpoint is loopback-bound on the node and is not exposed as a network service.
 
 ### Lifecycle and safety limits
 
