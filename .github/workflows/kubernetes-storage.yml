@@ -1,0 +1,49 @@
+name: VM and Kubernetes storage
+on:
+  pull_request:
+    paths:
+      - 'deploy/vm/**'
+      - 'deploy/kubernetes/**'
+      - 'src/bin/kagi-volume-nbd.rs'
+      - 'src/bin/kagi-cluster-host.rs'
+      - '.github/workflows/kubernetes-storage.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/vm/**'
+      - 'deploy/kubernetes/**'
+      - 'src/bin/kagi-volume-nbd.rs'
+      - 'src/bin/kagi-cluster-host.rs'
+      - '.github/workflows/kubernetes-storage.yml'
+  workflow_dispatch:
+jobs:
+  csi-driver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: deploy/kubernetes/csi/go.mod
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check Rust NBD frontend
+        run: cargo check --locked --bin kagi-volume-nbd
+      - name: Resolve Go dependencies
+        working-directory: deploy/kubernetes/csi
+        run: go mod tidy
+      - name: Test CSI driver
+        working-directory: deploy/kubernetes/csi
+        run: go test -race ./...
+      - name: Vet CSI driver
+        working-directory: deploy/kubernetes/csi
+        run: go vet ./...
+      - name: Validate Kubernetes YAML
+        run: |
+          python - <<'PY'
+          import pathlib
+          import yaml
+          for path in pathlib.Path('deploy/kubernetes/csi').glob('*.yaml'):
+              docs = list(yaml.safe_load_all(path.read_text()))
+              assert all(isinstance(doc, dict) for doc in docs), path
+              print(f'validated {path}')
+          PY
