@@ -198,6 +198,7 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	vresp,err:=d.api(ctx,http.MethodGet,"/v1/volumes/"+id,nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
+	if vol.ReadOnly && !req.GetReadonly() { return nil,status.Error(codes.FailedPrecondition,"Kagi volume is read-only but the pod requested a writable stage") }
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
 	mountOptions:=[]string{"defaults"}
@@ -232,8 +233,19 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if device=="" { _=server.Process.Kill();return nil,status.Error(codes.ResourceExhausted,"no free NBD device; load the nbd kernel module and expose /dev/nbd* to the node plugin") }
 	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,StagePath:stage}
 	if fs {
-		if err=run(ctx,"blkid","-p","-s","TYPE","-o","value",device);err!=nil {
-			if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
+		blkid:=exec.CommandContext(ctx,"blkid","-p","-s","TYPE","-o","value",device)
+		fsOutput,fsErr:=blkid.CombinedOutput()
+		if fsErr!=nil {
+			var exitErr *exec.ExitError
+			if errors.As(fsErr,&exitErr) && exitErr.ExitCode()==2 {
+				if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
+			} else {
+				_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
+				return nil,status.Errorf(codes.Internal,"could not safely inspect existing filesystem; refusing to format volume: %v: %s",fsErr,strings.TrimSpace(string(fsOutput)))
+			}
+		} else if found:=strings.TrimSpace(string(fsOutput));found!="" && found!="ext4" {
+			_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
+			return nil,status.Errorf(codes.FailedPrecondition,"volume already contains %q filesystem; only ext4 is supported",found)
 		}
 		if err=run(ctx,"mount","-o",strings.Join(mountOptions,","),device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
 	}
