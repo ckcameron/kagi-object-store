@@ -110,8 +110,8 @@ spec:
           volumeMounts:
             - name: plugin-dir
               mountPath: /csi
-            - name: kubelet-pods
-              mountPath: /var/lib/kubelet/pods
+            - name: kubelet-root
+              mountPath: /var/lib/kubelet
               mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
@@ -140,9 +140,9 @@ spec:
           hostPath:
             path: /var/lib/kubelet/plugins_registry
             type: Directory
-        - name: kubelet-pods
+        - name: kubelet-root
           hostPath:
-            path: /var/lib/kubelet/pods
+            path: /var/lib/kubelet
             type: Directory
         - name: dev
           hostPath:
