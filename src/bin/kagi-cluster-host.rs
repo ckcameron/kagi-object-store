@@ -1595,7 +1595,11 @@ async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> imp
         return StatusCode::NO_CONTENT.into_response();
     };
     if !volume.extents.is_empty() {
-        return (StatusCode::CONFLICT, "volume contains allocated extents; reclaim data before deleting the volume").into_response();
+        return (
+            StatusCode::CONFLICT,
+            "volume contains allocated extents; reclaim data before deleting the volume",
+        )
+            .into_response();
     }
     match committed(&st, MetadataCommand::DeleteVolume { id }).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
