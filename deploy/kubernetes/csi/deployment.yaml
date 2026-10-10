@@ -49,6 +49,21 @@ spec:
           volumeMounts:
             - name: socket
               mountPath: /csi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.9.0
+          args:
+            - --csi-address=$(ADDRESS)
+            - --leader-election=true
+            - --timeout=30s
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: socket
+              mountPath: /csi
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
           args:
