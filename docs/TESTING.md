@@ -37,7 +37,7 @@ Reports are written under `coverage/` as HTML and LCOV. Set `KAGI_COVERAGE_MIN_L
 
 ## Test philosophy
 
-Unit tests cover deterministic placement helpers, key-range boundaries, network multihoming behavior, disk-class AFR selection, mount normalization, erasure coding, ACL evaluation, virtual-volume geometry, SCSI persistent reservations, SCSI PR wire encoding/decoding, and physical storage-kind classification. Integration testing should add multi-node Raft failure scenarios, joint-consensus membership churn, snapshot materialization interruption, recovery/rebalance under foreground load, and VM/CSI block-I/O tests.
+Unit tests cover deterministic placement helpers, key-range boundaries, network multihoming behavior, disk-class AFR selection, mount normalization, erasure coding, ACL evaluation, virtual-volume geometry, SCSI persistent reservations, SCSI PR wire encoding/decoding, and physical storage-kind classification. Integration tests now cover authenticated PR CDB registration/reservation, persisted registration state, NBD stable-initiator forwarding, and reservation conflicts across block read/write/UNMAP endpoints. Remaining integration work includes multi-node Raft failure scenarios, joint-consensus membership churn, snapshot materialization interruption, recovery/rebalance under foreground load, and VM/CSI block-I/O tests.
 
 ## Monte Carlo tests
 
