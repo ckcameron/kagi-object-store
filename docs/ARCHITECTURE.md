@@ -23,7 +23,13 @@ The initial modelling scope is:
 
 Use OMG SysML v2 textual models and standard machine-readable API representations where the selected tool supports them. Keep model validation behind a documented toolchain adapter so Kagi does not depend on one vendor's UI or proprietary project format. The adapter should emit a versioned, schema-validated interchange document for constraints that `kagi-config` can consume; it must reject unknown schema versions and preserve source model identifiers.
 
-Until a compatible SysML v2 parser/validator, sample model, interchange schema, and automated validation job are checked into the repository, this is an **architecture integration specification**, not a claim of implemented SysML execution. A future implementation should add model examples, round-trip tests, invalid-model tests, traceability checks, and CI validation using a pinned tool version. Rendered diagrams alone are not validation evidence.
+The repository now includes a sample SysML v2 model, a pinned syntax checker, schema-validated interchange, a planner adapter, regression tests, and CI validation. These checks establish syntax and integration behavior, not full OMG semantic conformance or proof of durability. Rendered diagrams alone are not validation evidence.
+
+## SysML v2 model bundle
+
+The source-controlled model and requirement traceability map live under `models/sysml/`. The versioned JSON exchange contract is `schemas/sysml-planner-interchange.schema.json`. CI syntax-checks the model with the pinned `sysml2` CLI and validates the emitted interchange against JSON Schema. `scripts/apply-sysml-constraints.py` applies the model's host/disk minimums and protection family to an existing planner YAML before `kagi-config` runs. It preserves topology and seed geometry while enabling the existing geometry optimizer. Monte Carlo loss probability, placement feasibility, and final geometry remain the planner's responsibility; this integration does not claim full OMG semantic conformance or infer durability from the architecture model.
+
+See [SysML modelling workflow](SYSML.md) for commands and limitations.
 
 ## Failure-domain hierarchy
 
