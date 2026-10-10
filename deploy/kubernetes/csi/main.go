@@ -211,6 +211,14 @@ func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 }
 func (d *driver) ValidateVolumeCapabilities(_ context.Context, req *csi.ValidateVolumeCapabilitiesRequest)(*csi.ValidateVolumeCapabilitiesResponse,error) {
 	if req.GetVolumeId()=="" || len(req.GetVolumeCapabilities())==0 { return nil,status.Error(codes.InvalidArgument,"volume_id and capabilities required") }
+	for _,capability:=range req.GetVolumeCapabilities() {
+		if capability.GetAccessMode()==nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
+			return &csi.ValidateVolumeCapabilitiesResponse{Message:"Kagi CSI supports single-node access modes only"},nil
+		}
+		if capability.GetBlock()==nil && capability.GetMount()==nil {
+			return &csi.ValidateVolumeCapabilitiesResponse{Message:"volume capability must request block or mount access"},nil
+		}
+	}
 	return &csi.ValidateVolumeCapabilitiesResponse{Confirmed:&csi.ValidateVolumeCapabilitiesResponse_Confirmed{VolumeCapabilities:req.GetVolumeCapabilities(),VolumeContext:req.GetVolumeContext()}},nil
 }
 func (d *driver) NodeGetCapabilities(context.Context,*csi.NodeGetCapabilitiesRequest)(*csi.NodeGetCapabilitiesResponse,error) {
@@ -354,7 +362,9 @@ func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolum
 			if p,e:=os.FindProcess(pid);e==nil{_ = p.Kill()}
 		}
 	}
-	_ = os.Remove(d.statePath(s.VolumeID));return &csi.NodeUnstageVolumeResponse{},nil
+	_ = os.Remove(d.statePath(s.VolumeID))
+	_ = os.Remove(s.StagePath)
+	return &csi.NodeUnstageVolumeResponse{},nil
 }
 func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolumeRequest)(*csi.NodePublishVolumeResponse,error) {
 	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"volume is not staged: %v",err)}
