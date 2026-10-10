@@ -32,7 +32,7 @@ kind: CSIDriver
 metadata:
   name: csi.kagi.io
 spec:
-  attachRequired: true
+  attachRequired: false
   podInfoOnMount: true
   volumeLifecycleModes: ["Persistent"]
   fsGroupPolicy: File
