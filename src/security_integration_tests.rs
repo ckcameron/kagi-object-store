@@ -306,9 +306,13 @@ async fn scsi_bridge_authentication_conflict_and_persistence() {
     );
     let app = Router::new()
         .route("/pr/:id", axum::routing::post(volume_pr_cdb))
+        .route("/v1/volumes/:id/data/:offset/:length", get(volume_read))
+        .route("/v1/volumes/:id/data/:offset", put(volume_write))
+        .route("/v1/volumes/:id/unmap/:offset/:length", put(volume_unmap))
         .with_state(st.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/pr/test-volume", listener.local_addr().unwrap());
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("{base}/pr/test-volume");
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = reqwest::Client::new();
     let mut cdb = vec![0u8; 10];
@@ -364,13 +368,98 @@ async fn scsi_bridge_authentication_conflict_and_persistence() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.bytes().await.unwrap();
     assert_eq!(&bytes[8..16], &123u64.to_be_bytes());
-    let reopened = MetadataStore::open(root.join("metadata")).await.unwrap();
+
+    // Reserve Exclusive Access through the SCSI PR CDB bridge, then exercise
+    // the same block API paths used by the NBD frontend.
+    let mut reserve_cdb = vec![0u8; 10];
+    reserve_cdb[0] = 0x5f;
+    reserve_cdb[1] = 1;
+    reserve_cdb[2] = 3;
+    reserve_cdb[8] = 24;
+    let mut reserve_parameters = vec![0u8; 24];
+    reserve_parameters[0..8].copy_from_slice(&123u64.to_be_bytes());
+    let reserve = serde_json::json!({
+        "cdb":reserve_cdb,
+        "parameters":reserve_parameters,
+        "initiator":"initiator-a"
+    });
     assert_eq!(
-        reopened.state().await.volumes["test-volume"]
-            .persistent_reservation
-            .registrations["initiator-a"]
-            .key,
+        client
+            .post(&url)
+            .basic_auth("admin", Some("admin-test-password"))
+            .json(&reserve)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let denied_read = client
+        .get(format!("{base}/v1/volumes/test-volume/data/0/512"))
+        .header("x-kagi-initiator", "initiator-b")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_read.status(), StatusCode::CONFLICT);
+    let allowed_read = client
+        .get(format!("{base}/v1/volumes/test-volume/data/0/512"))
+        .header("x-kagi-initiator", "initiator-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed_read.status(), StatusCode::OK);
+    assert_eq!(allowed_read.bytes().await.unwrap().len(), 512);
+
+    let denied_write = client
+        .put(format!("{base}/v1/volumes/test-volume/data/0"))
+        .header("x-kagi-initiator", "initiator-b")
+        .body("blocked")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_write.status(), StatusCode::CONFLICT);
+    let denied_unmap = client
+        .put(format!("{base}/v1/volumes/test-volume/unmap/0/512"))
+        .header("x-kagi-initiator", "initiator-b")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_unmap.status(), StatusCode::CONFLICT);
+    let denied_state = st.meta.store.state().await;
+    assert_eq!(denied_state.volumes["test-volume"].generation, 0);
+    assert!(denied_state.volumes["test-volume"].extents.is_empty());
+
+    let authorized_noop_write = client
+        .put(format!("{base}/v1/volumes/test-volume/data/0"))
+        .header("x-kagi-initiator", "initiator-a")
+        .body(Vec::new())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authorized_noop_write.status(), StatusCode::OK);
+    let authorized_noop_unmap = client
+        .put(format!("{base}/v1/volumes/test-volume/unmap/0/0"))
+        .header("x-kagi-initiator", "initiator-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authorized_noop_unmap.status(), StatusCode::OK);
+    let reopened = MetadataStore::open(root.join("metadata")).await.unwrap();
+    let restored_volume = &reopened.state().await.volumes["test-volume"];
+    assert_eq!(restored_volume.generation, 2);
+    assert_eq!(
+        restored_volume.persistent_reservation.registrations["initiator-a"].key,
         123
+    );
+    assert_eq!(
+        restored_volume
+            .persistent_reservation
+            .reservation
+            .as_ref()
+            .unwrap()
+            .holder,
+        "initiator-a"
     );
     server.abort();
     raft.abort();
