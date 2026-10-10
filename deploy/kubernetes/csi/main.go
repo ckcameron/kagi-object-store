@@ -23,7 +23,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 const driverName = "csi.kagi.io"
@@ -80,14 +79,17 @@ func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	size = ((size + extent - 1) / extent) * extent
 	listResp, err := d.api(ctx, http.MethodGet, "/v1/volumes", nil)
 	if err != nil { return nil, status.Errorf(codes.Unavailable, "list existing volumes: %v", err) }
-	var existing []map[string]any
+	var existing map[string]struct {
+			ID string `json:"id"`
+			Name string `json:"name"`
+			Size int64 `json:"size_bytes"`
+		}
 	if err = readJSON(listResp, &existing); err == nil {
 		for _, v := range existing {
-			if v["name"] == req.GetName() {
-				id, _ := v["id"].(string); bytes, _ := v["size_bytes"].(float64)
-				if id == "" { continue }
-				if int64(bytes) < size { return nil, status.Error(codes.AlreadyExists, "volume name exists with smaller capacity") }
-				return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId:id, CapacityBytes:int64(bytes), VolumeContext:map[string]string{"apiEndpoint":d.endpoint}}}, nil
+			if v.Name == req.GetName() {
+				if v.ID == "" { continue }
+				if v.Size < size { return nil, status.Error(codes.AlreadyExists, "volume name exists with smaller capacity") }
+				return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId:v.ID, CapacityBytes:v.Size, VolumeContext:map[string]string{"apiEndpoint":d.endpoint}}}, nil
 			}
 		}
 	} else { return nil, status.Errorf(codes.Unavailable, "decode volume list: %v", err) }
@@ -100,10 +102,14 @@ func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if result.Volume.ID == "" { return nil, status.Error(codes.Internal, "Kagi API returned no volume ID") }
 	return &csi.CreateVolumeResponse{Volume:&csi.Volume{VolumeId:result.Volume.ID,CapacityBytes:result.Volume.Size,VolumeContext:map[string]string{"apiEndpoint":d.endpoint}}},nil
 }
-func (d *driver) DeleteVolume(context.Context, *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	// The Kagi API intentionally has no safe delete endpoint yet. PVs are deployed
-	// with reclaimPolicy=Retain; refusing deletion avoids silently orphaning extents.
-	return nil, status.Error(codes.Unimplemented, "Kagi volume deletion is not exposed by the API; use Retain reclaim policy")
+func (d *driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
+	if req.GetVolumeId() == "" { return nil, status.Error(codes.InvalidArgument, "volume_id is required") }
+	resp, err := d.api(ctx, http.MethodDelete, "/v1/volumes/"+req.GetVolumeId(), nil)
+	if err != nil { return nil, status.Errorf(codes.Unavailable, "delete Kagi volume: %v", err) }
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK { return &csi.DeleteVolumeResponse{}, nil }
+	if resp.StatusCode == http.StatusConflict { return nil, status.Error(codes.FailedPrecondition, "Kagi refuses to delete a volume with allocated extents; use reclaimPolicy Retain and explicitly reclaim data") }
+	return nil, status.Errorf(codes.Internal, "Kagi API returned %s deleting volume", resp.Status)
 }
 func (d *driver) ControllerPublishVolume(_ context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	if req.GetVolumeId()=="" || req.GetNodeId()=="" { return nil,status.Error(codes.InvalidArgument,"volume_id and node_id are required") }
@@ -158,13 +164,15 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	fs:=req.GetVolumeCapability().GetMount()!=nil
 	if fs && vol.ReadOnly==false && req.GetReadonly() { /* requested read-only is enforced at mount */ }
 	if err=os.MkdirAll(stage,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create staging directory: %v",err)}
-	if err=run(ctx,"modprobe","nbd","nbds_max=128");err!=nil { /* module may already be loaded or container lacks CAP_SYS_MODULE */ }
+	if err=os.MkdirAll(d.stateDir,0700);err!=nil{return nil,status.Errorf(codes.Internal,"create CSI state directory: %v",err)}
+	_ = run(ctx,"modprobe","nbd","nbds_max=128") // The module may already be loaded; device availability is checked below.
 	portListener,err:=net.Listen("tcp","127.0.0.1:0");if err!=nil{return nil,status.Errorf(codes.Internal,"reserve NBD port: %v",err)}
 	port:=portListener.Addr().(*net.TCPAddr).Port;_ = portListener.Close()
 	server:=exec.Command("/usr/local/bin/kagi-volume-nbd","--listen",fmt.Sprintf("127.0.0.1:%d",port),"--api",api,"--volume",id,"--initiator","k8s:"+d.nodeID)
 	logFile,logErr:=os.OpenFile(filepath.Join(d.stateDir,safeID(id)+".log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0600)
 	if logErr==nil {server.Stdout=logFile;server.Stderr=logFile}
-	if err=server.Start();err!=nil{return nil,status.Errorf(codes.Unavailable,"start NBD frontend: %v",err)}
+	if err=server.Start();err!=nil{if logFile!=nil{_ = logFile.Close()};return nil,status.Errorf(codes.Unavailable,"start NBD frontend: %v",err)}
+	go func(){ _ = server.Wait(); if logFile!=nil { _ = logFile.Close() } }()
 	ready:=false
 	for i:=0;i<50;i++ { c,e:=net.DialTimeout("tcp",fmt.Sprintf("127.0.0.1:%d",port),100*time.Millisecond);if e==nil{c.Close();ready=true;break};time.Sleep(100*time.Millisecond) }
 	if !ready { _=server.Process.Kill(); return nil,status.Error(codes.Unavailable,"NBD frontend did not become ready") }
@@ -178,9 +186,8 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if device=="" { _=server.Process.Kill();return nil,status.Error(codes.ResourceExhausted,"no free NBD device; load the nbd kernel module and expose /dev/nbd* to the node plugin") }
 	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,StagePath:stage}
 	if fs {
-		if _,err=os.Stat(filepath.Join(stage,".kagi-formatted"));errors.Is(err,os.ErrNotExist) {
-			if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format volume as ext4: %v",err)}
-			_ = os.WriteFile(filepath.Join(stage,".kagi-formatted"),[]byte(id),0600)
+		if err=run(ctx,"blkid","-p","-s","TYPE","-o","value",device);err!=nil {
+			if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
 		}
 		if err=run(ctx,"mount","-o","defaults",device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
 	}
@@ -191,7 +198,13 @@ func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolum
 	s,err:=d.loadState(req.GetVolumeId());if errors.Is(err,os.ErrNotExist){return &csi.NodeUnstageVolumeResponse{},nil};if err!=nil{return nil,status.Errorf(codes.Internal,"read stage state: %v",err)}
 	if s.Filesystem {if err=run(ctx,"umount",s.StagePath);err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"unmount staged filesystem: %v",err)}}
 	if err=run(ctx,"nbd-client","-d",s.Device);err!=nil{return nil,status.Errorf(codes.Internal,"disconnect NBD device: %v",err)}
-	if pid,e:=strconv.Atoi(s.ServerPID);e==nil {if p,e:=os.FindProcess(pid);e==nil{_ = p.Kill()}}
+	if pid,e:=strconv.Atoi(s.ServerPID);e==nil {
+		cmdline,readErr:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
+		// Protect against killing a reused PID after a driver/container restart.
+		if readErr==nil && strings.Contains(string(cmdline),"kagi-volume-nbd") && strings.Contains(string(cmdline),s.VolumeID) {
+			if p,e:=os.FindProcess(pid);e==nil{_ = p.Kill()}
+		}
+	}
 	_ = os.Remove(d.statePath(s.VolumeID));return &csi.NodeUnstageVolumeResponse{},nil
 }
 func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolumeRequest)(*csi.NodePublishVolumeResponse,error) {
@@ -204,11 +217,13 @@ func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolum
 		flags:=uintptr(syscall.MS_BIND)
 		if req.GetReadonly(){flags|=syscall.MS_RDONLY}
 		if err=syscall.Mount(s.StagePath,target,"",flags,"");err!=nil{return nil,status.Errorf(codes.Internal,"bind mount staged filesystem: %v",err)}
+		if req.GetReadonly() { if err=syscall.Mount("",target,"",syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY,"");err!=nil{_ = syscall.Unmount(target,0);return nil,status.Errorf(codes.Internal,"remount filesystem read-only: %v",err)} }
 	} else {
 		f,openErr:=os.OpenFile(target,os.O_CREATE,0600);if openErr!=nil{return nil,status.Errorf(codes.Internal,"create block target: %v",openErr)};_ = f.Close()
 		flags:=uintptr(syscall.MS_BIND)
 		if req.GetReadonly(){flags|=syscall.MS_RDONLY}
 		if err=syscall.Mount(s.Device,target,"",flags,"");err!=nil{return nil,status.Errorf(codes.Internal,"bind mount block device: %v",err)}
+		if req.GetReadonly() { if err=syscall.Mount("",target,"",syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY,"");err!=nil{_ = syscall.Unmount(target,0);return nil,status.Errorf(codes.Internal,"remount block device read-only: %v",err)} }
 	}
 	return &csi.NodePublishVolumeResponse{},nil
 }
@@ -245,4 +260,3 @@ func main() {
 	if d.stateDir==""{d.stateDir="/var/lib/kagi-csi"}
 	if err:=d.serve();err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
 }
-var _ = emptypb.Empty{}
