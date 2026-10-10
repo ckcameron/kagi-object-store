@@ -26,6 +26,8 @@ jobs:
           go-version: '1.24.x'
           cache-dependency-path: deploy/kubernetes/csi/go.mod
       - uses: dtolnay/rust-toolchain@stable
+      - name: Check VM deployment shell syntax
+        run: bash -n deploy/vm/deploy-kagi-lab.sh
       - name: Check Rust NBD frontend
         run: cargo check --locked --bin kagi-volume-nbd
       - name: Resolve Go dependencies
