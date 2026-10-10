@@ -1591,6 +1591,7 @@ async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> imp
     if !st.meta.is_leader().await {
         return StatusCode::TEMPORARY_REDIRECT.into_response();
     }
+    let _serial = st.namespace_lock.lock().await;
     let Some(volume) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NO_CONTENT.into_response();
     };
