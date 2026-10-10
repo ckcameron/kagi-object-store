@@ -143,6 +143,26 @@ func (d *driver) saveState(s stageState) error {
 	b,err:=json.MarshalIndent(s,"","  ");if err!=nil{return err}
 	tmp:=d.statePath(s.VolumeID)+".tmp";if err=os.WriteFile(tmp,b,0600);err!=nil{return err};return os.Rename(tmp,d.statePath(s.VolumeID))
 }
+func serverAlive(s stageState) bool {
+	pid,err:=strconv.Atoi(s.ServerPID);if err!=nil||pid<=1{return false}
+	cmdline,err:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
+	if err!=nil||!strings.Contains(string(cmdline),"kagi-volume-nbd")||!strings.Contains(string(cmdline),s.VolumeID){return false}
+	base:=filepath.Base(s.Device)
+	if !strings.HasPrefix(base,"nbd"){return false}
+	devicePID,err:=os.ReadFile(filepath.Join("/sys/block",base,"pid"))
+	return err==nil&&strings.TrimSpace(string(devicePID))!="0"
+}
+func cleanupStaleState(ctx context.Context,d *driver,s stageState) {
+	if s.Filesystem { _ = run(ctx,"umount",s.StagePath) }
+	if s.Device!="" { _ = run(ctx,"nbd-client","-d",s.Device) }
+	if pid,err:=strconv.Atoi(s.ServerPID);err==nil&&pid>1 {
+		cmdline,readErr:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
+		if readErr==nil&&strings.Contains(string(cmdline),"kagi-volume-nbd")&&strings.Contains(string(cmdline),s.VolumeID) {
+			if p,e:=os.FindProcess(pid);e==nil{_ = p.Kill()}
+		}
+	}
+	_ = os.Remove(d.statePath(s.VolumeID))
+}
 func run(ctx context.Context, name string, args ...string) error {
 	cmd:=exec.CommandContext(ctx,name,args...); out,err:=cmd.CombinedOutput()
 	if err!=nil{return fmt.Errorf("%s %v: %w: %s",name,args,err,strings.TrimSpace(string(out)))}
@@ -158,7 +178,15 @@ func freeNBD() string {
 func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest)(*csi.NodeStageVolumeResponse,error) {
 	id,stage:=req.GetVolumeId(),req.GetStagingTargetPath()
 	if id==""||stage=="" { return nil,status.Error(codes.InvalidArgument,"volume_id and staging_target_path required") }
-	if old,err:=d.loadState(id);err==nil { if old.StagePath==stage {return &csi.NodeStageVolumeResponse{},nil}; return nil,status.Error(codes.AlreadyExists,"volume already staged at a different path") }
+	if old,err:=d.loadState(id);err==nil {
+		if serverAlive(old) {
+			if old.StagePath==stage { return &csi.NodeStageVolumeResponse{},nil }
+			return nil,status.Error(codes.AlreadyExists,"volume already staged at a different path")
+		}
+		cleanupStaleState(ctx,d,old)
+	} else if !errors.Is(err,os.ErrNotExist) {
+		return nil,status.Errorf(codes.Internal,"read existing stage state: %v",err)
+	}
 	api:=req.GetVolumeContext()["apiEndpoint"];if api=="" {api=d.endpoint};if api=="" {return nil,status.Error(codes.FailedPrecondition,"volume context lacks apiEndpoint and KAGI_API_ENDPOINT is unset")}
 	vresp,err:=d.api(ctx,http.MethodGet,"/v1/volumes/"+id,nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"` }
