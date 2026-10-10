@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -132,7 +134,12 @@ func (d *driver) NodeGetInfo(context.Context,*csi.NodeGetInfoRequest)(*csi.NodeG
 	return &csi.NodeGetInfoResponse{NodeId:d.nodeID,MaxVolumesPerNode:128},nil
 }
 type stageState struct { VolumeID, Device, Port, ServerPID string; Filesystem bool; StagePath string }
-func safeID(id string) string { return strings.Map(func(r rune) rune { if r>='a'&&r<='z'||r>='A'&&r<='Z'||r>='0'&&r<='9'||r=='-'||r=='_' {return r}; return '_' },id) }
+func safeID(id string) string {
+	base:=strings.Map(func(r rune) rune { if r>='a'&&r<='z'||r>='A'&&r<='Z'||r>='0'&&r<='9'||r=='-'||r=='_' {return r}; return '_' },id)
+	if len(base)>64 { base=base[:64] }
+	sum:=sha256.Sum256([]byte(id))
+	return base+"-"+hex.EncodeToString(sum[:6])
+}
 func contains(items []string, wanted string) bool { for _,item:=range items { if item==wanted{return true} }; return false }
 func (d *driver) statePath(id string) string { return filepath.Join(d.stateDir,safeID(id)+".json") }
 func (d *driver) loadState(id string)(stageState,error) {
