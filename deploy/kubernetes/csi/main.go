@@ -75,13 +75,35 @@ func (d *driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 		{Type: &csi.ControllerServiceCapability_Rpc{Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME}}},
 	}}, nil
 }
+func supportedAccessMode(mode csi.VolumeCapability_AccessMode_Mode) bool {
+	switch mode {
+	case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER:
+		return true
+	default:
+		return false
+	}
+}
 func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	if req.GetName() == "" || len(req.GetVolumeCapabilities()) == 0 { return nil, status.Error(codes.InvalidArgument, "name and at least one volume capability are required") }
+	for _,capability:=range req.GetVolumeCapabilities() {
+		if capability.GetAccessMode()==nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
+			return nil,status.Error(codes.InvalidArgument,"Kagi CSI supports single-node access modes only")
+		}
+		if capability.GetBlock()==nil && capability.GetMount()==nil {
+			return nil,status.Error(codes.InvalidArgument,"volume capability must request block or mount access")
+		}
+	}
 	size := req.GetCapacityRange().GetRequiredBytes()
 	if size <= 0 { size = 10 * 1024 * 1024 * 1024 }
 	const extent = 4 * 1024 * 1024
 	if size > int64(^uint64(0)>>1)-(extent-1) { return nil, status.Error(codes.InvalidArgument, "requested capacity is too large") }
 	size = ((size + extent - 1) / extent) * extent
+	if limit:=req.GetCapacityRange().GetLimitBytes();limit>0&&size>limit {
+		return nil,status.Error(codes.InvalidArgument,"rounded capacity exceeds capacity_range.limit_bytes")
+	}
 	listResp, err := d.api(ctx, http.MethodGet, "/v1/volumes", nil)
 	if err != nil { return nil, status.Errorf(codes.Unavailable, "list existing volumes: %v", err) }
 	var existing map[string]struct {
