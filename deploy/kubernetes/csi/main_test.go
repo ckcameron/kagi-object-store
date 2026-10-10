@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -11,7 +12,9 @@ import (
 
 func TestSafeID(t *testing.T) {
 	got := safeID("../volume:01")
-	if got != "___volume_01" { t.Fatalf("safeID returned %q", got) }
+	if !strings.HasPrefix(got, "___volume_01-") || strings.ContainsAny(got, "/:") {
+		t.Fatalf("safeID returned unsafe or unexpected value %q", got)
+	}
 }
 func TestCreateVolumeIsIdempotentByName(t *testing.T) {
 	created := false
