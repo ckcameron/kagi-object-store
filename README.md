@@ -490,3 +490,7 @@ The fileguard-derived security workspace and third-party dependencies retain the
 ## SysML v2 integration
 
 The SysML v2 model is syntax-checked in CI and generates a versioned, schema-validated planner interchange. Apply the modelled topology minimums and protection family to a topology file before running `kagi-config`; see [the SysML workflow](docs/SYSML.md).
+
+## VM lab and Kubernetes storage
+
+An idempotent eight-VM Ubuntu/KVM lab deployment and a Kubernetes CSI driver for Kagi logical volumes are documented in [the VM and Kubernetes storage guide](deploy/kubernetes/csi/README.md). The CSI driver provisions volumes through the Kagi API, uses Raft-backed persistent reservations to fence a volume to one Kubernetes node, and publishes filesystem or raw-block devices through NBD.
