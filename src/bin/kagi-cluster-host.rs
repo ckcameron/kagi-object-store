@@ -1586,6 +1586,22 @@ async fn volume_get(State(st): State<V6State>, Path(id): Path<String>) -> impl I
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+/// Delete only an empty volume. Extents must be explicitly reclaimed before deleting metadata.
+async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let Some(volume) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if !volume.extents.is_empty() {
+        return (StatusCode::CONFLICT, "volume contains allocated extents; reclaim data before deleting the volume").into_response();
+    }
+    match committed(&st, MetadataCommand::DeleteVolume { id }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
 /// Implements the volume create step and keeps its validation and state transitions visible at the call site.
 async fn volume_create(
     State(st): State<V6State>,
@@ -3618,7 +3634,7 @@ async fn main() -> Result<()> {
                 .route("/v1/snapshots/:id/object/*key", get(snapshot_object_get))
                 .route("/v1/maintenance/status", get(maintenance_status))
                 .route("/v1/volumes", get(volume_list).post(volume_create))
-                .route("/v1/volumes/:id", get(volume_get))
+                .route("/v1/volumes/:id", get(volume_get).delete(volume_delete))
                 .route("/v1/volumes/:id/data/:offset/:length", get(volume_read))
                 .route("/v1/volumes/:id/data/:offset", put(volume_write))
                 .route("/v1/volumes/:id/read-only", put(volume_readonly))
