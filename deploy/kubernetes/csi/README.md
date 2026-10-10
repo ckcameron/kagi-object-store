@@ -30,6 +30,7 @@ Edit `deploy/kubernetes/csi/deployment.yaml` to use your image and set `KAGI_API
 
 ```sh
 kubectl apply -f deploy/kubernetes/csi/deployment.yaml
+kubectl apply -f deploy/kubernetes/csi/rbac.yaml
 kubectl apply -f deploy/kubernetes/csi/storageclass.yaml
 kubectl apply -f deploy/kubernetes/csi/pvc-examples.yaml
 kubectl -n kagi-system get pods
