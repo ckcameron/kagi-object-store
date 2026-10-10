@@ -198,7 +198,6 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	vresp,err:=d.api(ctx,http.MethodGet,"/v1/volumes/"+id,nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
-	if vol.ReadOnly && !req.GetReadonly() { return nil,status.Error(codes.FailedPrecondition,"Kagi volume is read-only but the pod requested a writable stage") }
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
 	mountOptions:=[]string{"defaults"}
@@ -208,7 +207,7 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		for _,flag:=range req.GetVolumeCapability().GetMount().GetMountFlags() {
 			switch flag { case "noatime","nodiratime","nodev","nosuid","noexec","sync","dirsync","ro": mountOptions=append(mountOptions,flag); default: return nil,status.Errorf(codes.InvalidArgument,"unsupported mount flag %q",flag) }
 		}
-		if req.GetReadonly() && !contains(mountOptions,"ro") { mountOptions=append(mountOptions,"ro") }
+		if vol.ReadOnly && !contains(mountOptions,"ro") { mountOptions=append(mountOptions,"ro") }
 	}
 	if err=os.MkdirAll(stage,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create staging directory: %v",err)}
 	if err=os.MkdirAll(d.stateDir,0700);err!=nil{return nil,status.Errorf(codes.Internal,"create CSI state directory: %v",err)}
