@@ -165,9 +165,14 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
+	mountOptions:=[]string{"defaults"}
 	if fs {
 		fsType:=strings.ToLower(req.GetVolumeCapability().GetMount().GetFsType())
 		if fsType!="" && fsType!="ext4" { return nil,status.Errorf(codes.InvalidArgument,"filesystem type %q is unsupported; only ext4 is supported",fsType) }
+		for _,flag:=range req.GetVolumeCapability().GetMount().GetMountFlags() {
+			switch flag { case "noatime","nodiratime","nodev","nosuid","noexec","sync","dirsync","ro": mountOptions=append(mountOptions,flag); default: return nil,status.Errorf(codes.InvalidArgument,"unsupported mount flag %q",flag) }
+		}
+		if req.GetReadonly() && !contains(mountOptions,"ro") { mountOptions=append(mountOptions,"ro") }
 	}
 	if err=os.MkdirAll(stage,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create staging directory: %v",err)}
 	if err=os.MkdirAll(d.stateDir,0700);err!=nil{return nil,status.Errorf(codes.Internal,"create CSI state directory: %v",err)}
@@ -195,14 +200,14 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		if err=run(ctx,"blkid","-p","-s","TYPE","-o","value",device);err!=nil {
 			if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
 		}
-		opts:=[]string{"defaults"}
-		for _,flag:=range req.GetVolumeCapability().GetMount().GetMountFlags() {
-			switch flag { case "noatime","nodiratime","nodev","nosuid","noexec","sync","dirsync","ro": opts=append(opts,flag); default: return nil,status.Errorf(codes.InvalidArgument,"unsupported mount flag %q",flag) }
-		}
-		if req.GetReadonly() && !contains(opts,"ro") { opts=append(opts,"ro") }
-		if err=run(ctx,"mount","-o",strings.Join(opts,","),device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
+		if err=run(ctx,"mount","-o",strings.Join(mountOptions,","),device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
 	}
-	if err=d.saveState(s);err!=nil{return nil,status.Errorf(codes.Internal,"save staging state: %v",err)}
+	if err=d.saveState(s);err!=nil{
+		if fs { _ = run(ctx,"umount",stage) }
+		_ = run(ctx,"nbd-client","-d",device)
+		_ = server.Process.Kill()
+		return nil,status.Errorf(codes.Internal,"save staging state: %v",err)
+	}
 	return &csi.NodeStageVolumeResponse{},nil
 }
 func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolumeRequest)(*csi.NodeUnstageVolumeResponse,error) {
