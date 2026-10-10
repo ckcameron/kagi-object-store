@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kagi-csi-provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes", "persistentvolumeclaims", "events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csinodes", "csidrivers", "volumeattachments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kagi-csi-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kagi-csi-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: kagi-csi-controller
+    namespace: kagi-system
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.kagi.io
+spec:
+  attachRequired: true
+  podInfoOnMount: true
+  volumeLifecycleModes: ["Persistent"]
+  fsGroupPolicy: File
