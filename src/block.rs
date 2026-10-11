@@ -501,6 +501,26 @@ pub fn make_scsi_identity(id: &str) -> ScsiIdentity {
 mod tests {
     use super::*;
     #[test]
+    fn pr_api_json_matches_csi_client_contract() {
+        let register = serde_json::to_value(PrOut::Register {
+            initiator: "k8s:node-a".into(),
+            current_key: 0,
+            new_key: 7,
+            aptpl: false,
+            ignore_existing: false,
+        }).unwrap();
+        assert_eq!(register["Register"]["initiator"], "k8s:node-a");
+        assert_eq!(register["Register"]["new_key"], 7);
+
+        let reserve = serde_json::to_value(PrOut::Reserve {
+            initiator: "k8s:node-a".into(),
+            key: 7,
+            reservation_type: PrType::ExclusiveAccess,
+        }).unwrap();
+        assert_eq!(reserve["Reserve"]["reservation_type"], "exclusive_access");
+    }
+
+    #[test]
     fn pr_register_reserve_and_release() {
         let mut pr = PersistentReservation::default();
         apply_pr_out(
