@@ -27,7 +27,7 @@ docker build -f deploy/kubernetes/csi/Dockerfile -t ghcr.io/ckcameron/kagi-csi:d
 # Push to a registry reachable by the cluster, or load the image into your local cluster.
 ```
 
-Edit `deploy/kubernetes/csi/deployment.yaml` to use your image and set `KAGI_API_ENDPOINT` to a reachable Kagi cluster-host API service. The example assumes `kagi-cluster-host.kagi-system.svc.cluster.local:7400`; adapt this service DNS name to your deployment. Apply the manifests and StorageClass:
+Edit `deploy/kubernetes/csi/deployment.yaml` to use your image and set `KAGI_API_ENDPOINT` to the administrator-trusted Kagi cluster-host API service. The configured endpoint takes precedence over the PV's `apiEndpoint` attribute; do not allow untrusted tenants to configure the privileged driver's API destination. The example assumes `kagi-cluster-host.kagi-system.svc.cluster.local:7400`; adapt this service DNS name to your deployment. Apply the manifests and StorageClass:
 
 ```sh
 kubectl apply -f deploy/kubernetes/csi/deployment.yaml
