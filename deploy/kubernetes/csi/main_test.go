@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/container-storage-interface/spec/lib/go/csi"\n\t"google.golang.org/grpc/codes"\n\t"google.golang.org/grpc/status"
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestSafeID(t *testing.T) {
