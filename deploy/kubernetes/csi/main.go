@@ -200,10 +200,13 @@ func prKey(volumeID,nodeID string) uint64 {
 	key:=binary.BigEndian.Uint64(sum[:8]);if key==0{return 1};return key
 }
 func endpointFromContext(volumeContext map[string]string, fallback string) string {
-	if endpoint := strings.TrimSpace(volumeContext["apiEndpoint"]); endpoint != "" {
+	// A PV's volumeAttributes are user-controlled in many clusters. Prefer the
+	// administrator-configured endpoint to prevent a PV from redirecting the
+	// privileged controller or node plugin to an arbitrary HTTP service.
+	if endpoint := strings.TrimSpace(fallback); endpoint != "" {
 		return strings.TrimRight(endpoint, "/")
 	}
-	return strings.TrimRight(fallback, "/")
+	return strings.TrimRight(strings.TrimSpace(volumeContext["apiEndpoint"]), "/")
 }
 func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	id, node := req.GetVolumeId(), req.GetNodeId()
@@ -415,7 +418,10 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	} else if !errors.Is(err,os.ErrNotExist) {
 		return nil,status.Errorf(codes.Internal,"read existing stage state: %v",err)
 	}
-	api:=req.GetVolumeContext()["apiEndpoint"];if api=="" {api=d.endpoint};if api=="" {return nil,status.Error(codes.FailedPrecondition,"volume context lacks apiEndpoint and KAGI_API_ENDPOINT is unset")}
+	api := endpointFromContext(req.GetVolumeContext(), d.endpoint)
+	if api == "" {
+		return nil, status.Error(codes.FailedPrecondition, "KAGI_API_ENDPOINT is unset and volume context lacks apiEndpoint")
+	}
 	vresp,err:=d.apiAt(ctx,api,http.MethodGet,"/v1/volumes/"+id+"/info",nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"`; AllocatedExtents uint64 `json:"allocated_extents"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
