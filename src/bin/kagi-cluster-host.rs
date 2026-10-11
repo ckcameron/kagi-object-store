@@ -1734,6 +1734,9 @@ async fn volume_write(
     let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if v.read_only {
+        return (StatusCode::FORBIDDEN, "volume is read-only").into_response();
+    }
     let initiator = headers
         .get("x-kagi-initiator")
         .and_then(|x| x.to_str().ok());
@@ -1838,6 +1841,9 @@ async fn volume_unmap(
     let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if v.read_only {
+        return (StatusCode::FORBIDDEN, "volume is read-only").into_response();
+    }
     let initiator = headers
         .get("x-kagi-initiator")
         .and_then(|x| x.to_str().ok());
