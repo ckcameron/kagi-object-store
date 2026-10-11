@@ -192,7 +192,10 @@ async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
             2 => return Ok(()),
             3 => reply(&mut s, 0, handle, None).await?,
             4 => {
-                if read_only { reply(&mut s, 30, handle, None).await?; continue; }
+                if read_only {
+                    reply(&mut s, 30, handle, None).await?;
+                    continue;
+                }
                 let r = c
                     .put(format!(
                         "{}/v1/volumes/{}/unmap/{}/{}",
