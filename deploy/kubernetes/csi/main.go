@@ -407,9 +407,14 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	vresp,err:=d.apiAt(ctx,api,http.MethodGet,"/v1/volumes/"+id+"/info",nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"`; AllocatedExtents uint64 `json:"allocated_extents"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
-	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
-	if req.GetVolumeCapability().GetMount()==nil && req.GetVolumeCapability().GetBlock()==nil {
-		return nil,status.Error(codes.InvalidArgument,"volume capability must request mount or block access")
+	if req.GetVolumeCapability() == nil {
+		return nil, status.Error(codes.InvalidArgument, "volume_capability is required")
+	}
+	if req.GetVolumeCapability().GetAccessMode() == nil || !supportedAccessMode(req.GetVolumeCapability().GetAccessMode().GetMode()) {
+		return nil, status.Error(codes.InvalidArgument, "Kagi CSI supports single-node access modes only")
+	}
+	if req.GetVolumeCapability().GetMount() == nil && req.GetVolumeCapability().GetBlock() == nil {
+		return nil, status.Error(codes.InvalidArgument, "volume capability must request mount or block access")
 	}
 	if vol.Size==0 || vol.Block<512 || vol.Block>65536 || (vol.Block&(vol.Block-1))!=0 {
 		return nil,status.Error(codes.FailedPrecondition,"Kagi volume has invalid size or logical block geometry")
@@ -493,7 +498,13 @@ func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolum
 	defer unlock()
 	s,err:=d.loadState(req.GetVolumeId());if errors.Is(err,os.ErrNotExist){return &csi.NodeUnstageVolumeResponse{},nil};if err!=nil{return nil,status.Errorf(codes.Internal,"read stage state: %v",err)}
 	if s.Filesystem {if err=run(ctx,"umount",s.StagePath);err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"unmount staged filesystem: %v",err)}}
-	if err=run(ctx,"nbd-client","-d",s.Device);err!=nil{return nil,status.Errorf(codes.Internal,"disconnect NBD device: %v",err)}
+	if err=run(ctx,"nbd-client","-d",s.Device);err!=nil {
+		base := filepath.Base(s.Device)
+		devicePID, readErr := os.ReadFile(filepath.Join("/sys/block", base, "pid"))
+		if readErr != nil || strings.TrimSpace(string(devicePID)) != "0" {
+			return nil,status.Errorf(codes.Internal,"disconnect NBD device: %v",err)
+		}
+	}
 	if pid,e:=strconv.Atoi(s.ServerPID);e==nil {
 		cmdline,readErr:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
 		// Protect against killing a reused PID after a driver/container restart.
@@ -509,13 +520,22 @@ func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolum
 	if req.GetVolumeId()==""||req.GetTargetPath()==""||req.GetVolumeCapability()==nil {
 		return nil,status.Error(codes.InvalidArgument,"volume_id, target_path, and volume_capability are required")
 	}
+	if req.GetVolumeCapability().GetAccessMode() == nil || !supportedAccessMode(req.GetVolumeCapability().GetAccessMode().GetMode()) {
+		return nil, status.Error(codes.InvalidArgument, "Kagi CSI supports single-node access modes only")
+	}
+	if req.GetVolumeCapability().GetMount() == nil && req.GetVolumeCapability().GetBlock() == nil {
+		return nil, status.Error(codes.InvalidArgument, "volume capability must request mount or block access")
+	}
+	if req.GetVolumeCapability().GetMount() != nil {
+		fsType := strings.ToLower(req.GetVolumeCapability().GetMount().GetFsType())
+		if fsType != "" && fsType != "ext4" {
+			return nil, status.Error(codes.InvalidArgument, "only ext4 filesystem volumes are supported")
+		}
+	}
 	unlock := d.lock("volume:" + req.GetVolumeId())
 	defer unlock()
 	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"volume is not staged: %v",err)}
 	target:=req.GetTargetPath();if target==""{return nil,status.Error(codes.InvalidArgument,"target_path required")}
-	if req.GetReadonly() && !s.ReadOnly && !s.Filesystem {
-		// Read-only bind mounts are supported; the underlying device remains writable for the owning node.
-	}
 	if err=os.MkdirAll(filepath.Dir(target),0750);err!=nil{return nil,status.Errorf(codes.Internal,"create target parent: %v",err)}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
 	if fs {
@@ -534,7 +554,7 @@ func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolum
 	return &csi.NodePublishVolumeResponse{},nil
 }
 func (d *driver) NodeUnpublishVolume(ctx context.Context,req *csi.NodeUnpublishVolumeRequest)(*csi.NodeUnpublishVolumeResponse,error) {
-	if req.GetTargetPath()==""{return nil,status.Error(codes.InvalidArgument,"target_path required")}
+	if req.GetVolumeId()=="" || req.GetTargetPath()==""{return nil,status.Error(codes.InvalidArgument,"volume_id and target_path required")}
 	unlock := d.lock("volume:" + req.GetVolumeId())
 	defer unlock()
 	if err:=run(ctx,"umount",req.GetTargetPath());err!=nil&&!strings.Contains(err.Error(),"not mounted"){return nil,status.Errorf(codes.Internal,"unmount target: %v",err)}
