@@ -30,12 +30,17 @@ jobs:
         run: bash -n deploy/vm/deploy-kagi-lab.sh
       - name: Check Rust NBD frontend
         run: cargo check --locked --bin kagi-volume-nbd
+      - name: Build CSI container image
+        run: docker build -f deploy/kubernetes/csi/Dockerfile -t kagi-csi:ci .
       - name: Resolve Go dependencies
         working-directory: deploy/kubernetes/csi
         run: go mod tidy
       - name: Test CSI driver
         working-directory: deploy/kubernetes/csi
         run: go test -race ./...
+      - name: Check Go formatting
+        working-directory: deploy/kubernetes/csi
+        run: test -z "$(gofmt -l main.go main_test.go)"
       - name: Vet CSI driver
         working-directory: deploy/kubernetes/csi
         run: go vet ./...
