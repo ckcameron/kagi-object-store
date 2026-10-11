@@ -335,9 +335,10 @@ func (d *driver) ValidateVolumeCapabilities(ctx context.Context, req *csi.Valida
 	}, nil
 }
 func (d *driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
+	// NodeGetVolumeStats is intentionally not advertised: raw-block usage accounting
+	// is not yet implemented against the Kagi allocated-extent map.
 	return &csi.NodeGetCapabilitiesResponse{Capabilities: []*csi.NodeServiceCapability{
 		{Type: &csi.NodeServiceCapability_Rpc{Rpc: &csi.NodeServiceCapability_RPC{Type: csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME}}},
-		{Type: &csi.NodeServiceCapability_Rpc{Rpc: &csi.NodeServiceCapability_RPC{Type: csi.NodeServiceCapability_RPC_GET_VOLUME_STATS}}},
 	}}, nil
 }
 func (d *driver) NodeGetInfo(context.Context,*csi.NodeGetInfoRequest)(*csi.NodeGetInfoResponse,error) {
