@@ -257,6 +257,11 @@ pub enum VolumePresentation {
     Vhdx,
     Kubernetes,
 }
+/// Kubernetes-managed volumes must have an active persistent reservation before data I/O.
+pub fn presentation_requires_reservation(presentations: &[VolumePresentation]) -> bool {
+    presentations.contains(&VolumePresentation::Kubernetes)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Kagi state or configuration used by the VolumeExtent path.
 pub struct VolumeExtent {
