@@ -1586,6 +1586,26 @@ async fn volume_get(State(st): State<V6State>, Path(id): Path<String>) -> impl I
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+/// Return the small metadata envelope needed by block frontends without serializing every extent manifest.
+async fn volume_info(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st.meta.store.state().await.volumes.get(&id) {
+        Some(v) => Json(serde_json::json!({
+            "id": v.id,
+            "name": v.name,
+            "size_bytes": v.size_bytes,
+            "logical_block_bytes": v.logical_block_bytes,
+            "extent_bytes": v.extent_bytes,
+            "generation": v.generation,
+            "read_only": v.read_only,
+            "thin_provisioned": v.thin_provisioned,
+            "allocated_extents": v.extents.len()
+        })).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
 /// Delete only an empty volume. Extents must be explicitly reclaimed before deleting metadata.
 async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
     if !st.meta.is_leader().await {
@@ -3654,6 +3674,7 @@ async fn main() -> Result<()> {
                 .route("/v1/maintenance/status", get(maintenance_status))
                 .route("/v1/volumes", get(volume_list).post(volume_create))
                 .route("/v1/volumes/:id", get(volume_get).delete(volume_delete))
+                .route("/v1/volumes/:id/info", get(volume_info))
                 .route("/v1/volumes/:id/data/:offset/:length", get(volume_read))
                 .route("/v1/volumes/:id/data/:offset", put(volume_write))
                 .route("/v1/volumes/:id/read-only", put(volume_readonly))
