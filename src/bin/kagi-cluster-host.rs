@@ -1714,7 +1714,7 @@ async fn volume_read(
             StatusCode::CONFLICT,
             "Kubernetes volume has no active persistent reservation",
         )
-        .into_response();
+            .into_response();
     }
     let initiator = headers
         .get("x-kagi-initiator")
@@ -1753,7 +1753,7 @@ async fn volume_write(
             StatusCode::CONFLICT,
             "Kubernetes volume has no active persistent reservation",
         )
-        .into_response();
+            .into_response();
     }
     let initiator = headers
         .get("x-kagi-initiator")
@@ -1869,7 +1869,7 @@ async fn volume_unmap(
             StatusCode::CONFLICT,
             "Kubernetes volume has no active persistent reservation",
         )
-        .into_response();
+            .into_response();
     }
     let initiator = headers
         .get("x-kagi-initiator")
