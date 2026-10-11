@@ -363,6 +363,14 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		if fsErr!=nil {
 			var exitErr *exec.ExitError
 			if errors.As(fsErr,&exitErr) && exitErr.ExitCode()==2 {
+				if vol.ReadOnly {
+					_ = run(ctx,"nbd-client","-d",device); _ = server.Process.Kill()
+					return nil,status.Error(codes.FailedPrecondition,"cannot initialize a read-only volume with no filesystem")
+				}
+				if vol.AllocatedExtents != 0 {
+					_ = run(ctx,"nbd-client","-d",device); _ = server.Process.Kill()
+					return nil,status.Error(codes.FailedPrecondition,"volume has allocated data but no recognized filesystem; refusing to format")
+				}
 				if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
 			} else {
 				_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
