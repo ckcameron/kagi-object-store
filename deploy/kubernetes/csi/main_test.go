@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/container-storage-interface/spec/lib/go/csi"\n\t"google.golang.org/grpc/codes"\n\t"google.golang.org/grpc/status"
 )
 
 func TestSafeID(t *testing.T) {
@@ -73,13 +73,13 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 		}
 		for name,raw:=range op { action=name; if err:=json.Unmarshal(raw,&payload);err!=nil{http.Error(w,err.Error(),400);return} }
 		switch action {
-		case "Register":
+		case "register":
 			if registrations[payload.Initiator] != payload.CurrentKey { http.Error(w,"key mismatch",http.StatusConflict);return }
 			if payload.NewKey==0 { delete(registrations,payload.Initiator) } else { registrations[payload.Initiator]=payload.NewKey }
-		case "Reserve":
+		case "reserve":
 			if registrations[payload.Initiator] != payload.Key || (holder!="" && holder!=payload.Initiator) || payload.ReservationType!="exclusive_access" { http.Error(w,"reserved or invalid reservation type",http.StatusConflict);return }
 			holder=payload.Initiator;reservationKey=payload.Key
-		case "Release":
+		case "release":
 			if holder!=payload.Initiator||reservationKey!=payload.Key||payload.ReservationType!="exclusive_access" { http.Error(w,"not reservation holder",http.StatusConflict);return }
 			holder="";reservationKey=0
 		default: http.Error(w,"unknown Serde PR operation",400);return
@@ -105,4 +105,77 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if holder!=""||len(registrations)!=0 {t.Fatalf("reservation/registrations not released: holder=%q registrations=%v",holder,registrations)}
+}
+
+func TestAPIAtUsesProvidedEndpointForJSONRequests(t *testing.T) {
+	var firstHit, secondHit bool
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstHit = true
+		http.Error(w, "wrong endpoint", http.StatusInternalServerError)
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondHit = true
+		if r.Method != http.MethodPost || r.URL.Path != "/test" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		if body["value"] != "correct" {
+			t.Errorf("unexpected body: %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer second.Close()
+	d := &driver{endpoint: first.URL, http: second.Client()}
+	resp, err := d.apiAt(context.Background(), second.URL, http.MethodPost, "/test", map[string]string{"value":"correct"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if firstHit || !secondHit {
+		t.Fatalf("endpoint selection incorrect: firstHit=%v secondHit=%v", firstHit, secondHit)
+	}
+}
+
+func TestCreateVolumeRejectsMultiNodeAccessAndImpossibleRoundedLimit(t *testing.T) {
+	d := &driver{endpoint: "http://127.0.0.1:1", http: &http.Client{Timeout: time.Millisecond}}
+	capability := func(mode csi.VolumeCapability_AccessMode_Mode) *csi.VolumeCapability {
+		return &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+			AccessMode: &csi.VolumeCapability_AccessMode{Mode: mode},
+		}
+	}
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:"multi-node", VolumeCapabilities:[]*csi.VolumeCapability{capability(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("multi-node mode should be rejected, got %v", err)
+	}
+	_, err = d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:"capacity-limit",
+		CapacityRange:&csi.CapacityRange{RequiredBytes:1<<20, LimitBytes:2<<20},
+		VolumeCapabilities:[]*csi.VolumeCapability{capability(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER)},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("rounded capacity beyond limit should be rejected before API call, got %v", err)
+	}
+}
+
+func TestNodeCapabilitiesAdvertiseOnlyImplementedStatsAndStage(t *testing.T) {
+	d := &driver{}
+	resp, err := d.NodeGetCapabilities(context.Background(), &csi.NodeGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[csi.NodeServiceCapability_RPC_Type]bool{}
+	for _, cap := range resp.GetCapabilities() {
+		got[cap.GetRpc().GetType()] = true
+	}
+	if !got[csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME] || !got[csi.NodeServiceCapability_RPC_GET_VOLUME_STATS] {
+		t.Fatalf("missing implemented node capabilities: %v", got)
+	}
 }
