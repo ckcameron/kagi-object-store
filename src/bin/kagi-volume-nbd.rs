@@ -31,6 +31,8 @@ struct Opt {
     volume: String,
     #[arg(long, default_value = "nbd:anonymous")]
     initiator: String,
+    #[arg(long, default_value_t = false)]
+    read_only: bool,
 }
 #[derive(Deserialize)]
 struct Volume {
@@ -112,7 +114,8 @@ async fn reply(s: &mut TcpStream, errno: u32, handle: u64, data: Option<&[u8]>) 
 async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
     let c = reqwest::Client::new();
     let v = volume(&c, &o).await?;
-    handshake(&mut s, v.size_bytes, v.read_only).await?;
+    let read_only = v.read_only || o.read_only;
+    handshake(&mut s, v.size_bytes, read_only).await?;
     loop {
         let magic = match s.read_u32().await {
             Ok(x) => x,
@@ -154,6 +157,7 @@ async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
             1 => {
                 let mut b = vec![0; len];
                 s.read_exact(&mut b).await?;
+                if read_only { reply(&mut s, 30, handle, None).await?; continue; }
                 let r = c
                     .put(format!(
                         "{}/v1/volumes/{}/data/{}",
@@ -180,6 +184,7 @@ async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
             2 => return Ok(()),
             3 => reply(&mut s, 0, handle, None).await?,
             4 => {
+                if read_only { reply(&mut s, 30, handle, None).await?; continue; }
                 let r = c
                     .put(format!(
                         "{}/v1/volumes/{}/unmap/{}/{}",
@@ -301,6 +306,7 @@ mod tests {
             api,
             volume: "test-volume".into(),
             initiator: initiator.into(),
+            read_only: false,
         };
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await?;
