@@ -1602,7 +1602,8 @@ async fn volume_info(State(st): State<V6State>, Path(id): Path<String>) -> impl 
             "read_only": v.read_only,
             "thin_provisioned": v.thin_provisioned,
             "allocated_extents": v.extents.len()
-        })).into_response(),
+        }))
+        .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1658,7 +1659,11 @@ async fn volume_create(
     if state.volumes.contains_key(&id) {
         return (StatusCode::CONFLICT, "volume ID already exists").into_response();
     }
-    if state.volumes.values().any(|existing| existing.name == req.name) {
+    if state
+        .volumes
+        .values()
+        .any(|existing| existing.name == req.name)
+    {
         return (StatusCode::CONFLICT, "volume name already exists").into_response();
     }
     drop(state);
