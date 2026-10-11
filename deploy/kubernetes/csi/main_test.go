@@ -94,6 +94,13 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 	mu.Lock()
 	if holder!="k8s:node-1" {t.Fatalf("reservation holder=%q",holder)}
 	mu.Unlock()
+	if _,err:=d.ControllerPublishVolume(ctx,&csi.ControllerPublishVolumeRequest{VolumeId:"vol-1",NodeId:"node-2"});err==nil {
+		t.Fatal("second node unexpectedly acquired an exclusive-access reservation")
+	}
+	mu.Lock()
+	if holder!="k8s:node-1" {t.Fatalf("failed competing attach changed holder to %q",holder)}
+	if _,ok:=registrations["k8s:node-2"];ok {t.Fatal("failed competing attach left a stale registration")}
+	mu.Unlock()
 	if _,err:=d.ControllerUnpublishVolume(ctx,&csi.ControllerUnpublishVolumeRequest{VolumeId:"vol-1",NodeId:"node-1"});err!=nil{t.Fatal(err)}
 	mu.Lock()
 	defer mu.Unlock()
