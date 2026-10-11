@@ -106,6 +106,8 @@ func supportedAccessMode(mode csi.VolumeCapability_AccessMode_Mode) bool {
 }
 func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	if req.GetName() == "" || len(req.GetVolumeCapabilities()) == 0 { return nil, status.Error(codes.InvalidArgument, "name and at least one volume capability are required") }
+	unlock := d.lock("create:" + req.GetName())
+	defer unlock()
 	for _,capability:=range req.GetVolumeCapabilities() {
 		if capability.GetAccessMode()==nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
 			return nil,status.Error(codes.InvalidArgument,"Kagi CSI supports single-node access modes only")
@@ -196,6 +198,8 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	if id == "" || node == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_id and node_id are required")
 	}
+	unlock := d.lock("volume:" + id)
+	defer unlock()
 	endpoint := endpointFromContext(req.GetVolumeContext(), d.endpoint)
 	if endpoint == "" {
 		return nil, status.Error(codes.FailedPrecondition, "KAGI_API_ENDPOINT or volume apiEndpoint is required")
@@ -247,6 +251,8 @@ func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 	if id == "" || node == "" {
 		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
+	unlock := d.lock("volume:" + id)
+	defer unlock()
 	endpoint := endpointFromContext(req.GetVolumeContext(), d.endpoint)
 	state, err := d.getPR(ctx, endpoint, id)
 	if err != nil {
@@ -386,6 +392,8 @@ func freeNBD() string {
 func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest)(*csi.NodeStageVolumeResponse,error) {
 	id,stage:=req.GetVolumeId(),req.GetStagingTargetPath()
 	if id==""||stage=="" { return nil,status.Error(codes.InvalidArgument,"volume_id and staging_target_path required") }
+	unlock := d.lock("volume:" + id)
+	defer unlock()
 	if old,err:=d.loadState(id);err==nil {
 		if serverAlive(old) {
 			if old.StagePath==stage { return &csi.NodeStageVolumeResponse{},nil }
@@ -481,6 +489,8 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	return &csi.NodeStageVolumeResponse{},nil
 }
 func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolumeRequest)(*csi.NodeUnstageVolumeResponse,error) {
+	unlock := d.lock("volume:" + req.GetVolumeId())
+	defer unlock()
 	s,err:=d.loadState(req.GetVolumeId());if errors.Is(err,os.ErrNotExist){return &csi.NodeUnstageVolumeResponse{},nil};if err!=nil{return nil,status.Errorf(codes.Internal,"read stage state: %v",err)}
 	if s.Filesystem {if err=run(ctx,"umount",s.StagePath);err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"unmount staged filesystem: %v",err)}}
 	if err=run(ctx,"nbd-client","-d",s.Device);err!=nil{return nil,status.Errorf(codes.Internal,"disconnect NBD device: %v",err)}
@@ -499,8 +509,13 @@ func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolum
 	if req.GetVolumeId()==""||req.GetTargetPath()==""||req.GetVolumeCapability()==nil {
 		return nil,status.Error(codes.InvalidArgument,"volume_id, target_path, and volume_capability are required")
 	}
+	unlock := d.lock("volume:" + req.GetVolumeId())
+	defer unlock()
 	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"volume is not staged: %v",err)}
 	target:=req.GetTargetPath();if target==""{return nil,status.Error(codes.InvalidArgument,"target_path required")}
+	if req.GetReadonly() && !s.ReadOnly && !s.Filesystem {
+		// Read-only bind mounts are supported; the underlying device remains writable for the owning node.
+	}
 	if err=os.MkdirAll(filepath.Dir(target),0750);err!=nil{return nil,status.Errorf(codes.Internal,"create target parent: %v",err)}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
 	if fs {
@@ -520,6 +535,8 @@ func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolum
 }
 func (d *driver) NodeUnpublishVolume(ctx context.Context,req *csi.NodeUnpublishVolumeRequest)(*csi.NodeUnpublishVolumeResponse,error) {
 	if req.GetTargetPath()==""{return nil,status.Error(codes.InvalidArgument,"target_path required")}
+	unlock := d.lock("volume:" + req.GetVolumeId())
+	defer unlock()
 	if err:=run(ctx,"umount",req.GetTargetPath());err!=nil&&!strings.Contains(err.Error(),"not mounted"){return nil,status.Errorf(codes.Internal,"unmount target: %v",err)}
 	_ = os.Remove(req.GetTargetPath());return &csi.NodeUnpublishVolumeResponse{},nil
 }
