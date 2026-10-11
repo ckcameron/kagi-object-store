@@ -374,7 +374,7 @@ mod tests {
     #[tokio::test]
     async fn nbd_frontend_carries_initiator_and_maps_reservation_conflicts() {
         let api = Router::new()
-            .route("/v1/volumes/:id/info", get(mock_volume))
+            .route("/v1/volumes/:id", get(mock_volume))
             .route("/v1/volumes/:id/data/:offset/:length", get(mock_read))
             .route("/v1/volumes/:id/data/:offset", put(mock_write))
             .route("/v1/volumes/:id/unmap/:offset/:length", put(mock_unmap))
