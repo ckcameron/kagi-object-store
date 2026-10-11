@@ -508,16 +508,20 @@ mod tests {
             new_key: 7,
             aptpl: false,
             ignore_existing: false,
-        }).unwrap();
-        assert_eq!(register["Register"]["initiator"], "k8s:node-a");
-        assert_eq!(register["Register"]["new_key"], 7);
+        })
+        .unwrap();
+        assert_eq!(register["action"], "register");
+        assert_eq!(register["initiator"], "k8s:node-a");
+        assert_eq!(register["new_key"], 7);
 
         let reserve = serde_json::to_value(PrOut::Reserve {
             initiator: "k8s:node-a".into(),
             key: 7,
             reservation_type: PrType::ExclusiveAccess,
-        }).unwrap();
-        assert_eq!(reserve["Reserve"]["reservation_type"], "exclusive_access");
+        })
+        .unwrap();
+        assert_eq!(reserve["action"], "reserve");
+        assert_eq!(reserve["reservation_type"], "exclusive_access");
     }
 
     #[test]
