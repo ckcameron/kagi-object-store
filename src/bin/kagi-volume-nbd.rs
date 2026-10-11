@@ -241,7 +241,8 @@ mod tests {
     async fn mock_volume() -> Json<serde_json::Value> {
         Json(serde_json::json!({
             "size_bytes": 4096,
-            "logical_block_bytes": 512
+            "logical_block_bytes": 512,
+            "read_only": false
         }))
     }
 
