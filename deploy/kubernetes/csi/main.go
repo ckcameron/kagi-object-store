@@ -174,11 +174,11 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	key:=registration.Key
 	if !registered {
 		key=prKey(id,node)
-		if err=d.putPR(ctx,id,map[string]any{"action":"register","initiator":initiator,"current_key":uint64(0),"new_key":key});err!=nil {
+		if err=d.putPR(ctx,id,map[string]any{"Register":map[string]any{"initiator":initiator,"current_key":uint64(0),"new_key":key,"aptpl":false,"ignore_existing":false}});err!=nil {
 			return nil,status.Errorf(codes.Aborted,"register node for Kagi volume: %v",err)
 		}
 	}
-	if err=d.putPR(ctx,id,map[string]any{"action":"reserve","initiator":initiator,"key":key,"reservation_type":"exclusive_access"});err!=nil {
+	if err=d.putPR(ctx,id,map[string]any{"Reserve":map[string]any{"initiator":initiator,"key":key,"reservation_type":"ExclusiveAccess"}});err!=nil {
 		return nil,status.Errorf(codes.Aborted,"reserve Kagi volume for node %q: %v",node,err)
 	}
 	// Read after write: PR generation checks can reject a stale concurrent command.
@@ -200,11 +200,11 @@ func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 	registration,registered:=state.Registrations[initiator]
 	if !registered { return &csi.ControllerUnpublishVolumeResponse{},nil }
 	if state.Reservation!=nil&&state.Reservation.Holder==initiator {
-		if err=d.putPR(ctx,id,map[string]any{"action":"release","initiator":initiator,"key":state.Reservation.Key,"reservation_type":state.Reservation.Type});err!=nil {
+		if err=d.putPR(ctx,id,map[string]any{"Release":map[string]any{"initiator":initiator,"key":state.Reservation.Key,"reservation_type":state.Reservation.Type}});err!=nil {
 			return nil,status.Errorf(codes.Aborted,"release Kagi volume reservation: %v",err)
 		}
 	}
-	if err=d.putPR(ctx,id,map[string]any{"action":"register","initiator":initiator,"current_key":registration.Key,"new_key":uint64(0)});err!=nil {
+	if err=d.putPR(ctx,id,map[string]any{"Register":map[string]any{"initiator":initiator,"current_key":registration.Key,"new_key":uint64(0),"aptpl":false,"ignore_existing":false}});err!=nil {
 		return nil,status.Errorf(codes.Aborted,"unregister node from Kagi volume: %v",err)
 	}
 	return &csi.ControllerUnpublishVolumeResponse{},nil
