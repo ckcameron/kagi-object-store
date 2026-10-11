@@ -70,7 +70,18 @@ func (d *driver) GetPluginCapabilities(context.Context, *csi.GetPluginCapabiliti
 	if d.mode != "controller" { return &csi.GetPluginCapabilitiesResponse{}, nil }
 	return &csi.GetPluginCapabilitiesResponse{Capabilities: []*csi.PluginCapability{{Type: &csi.PluginCapability_Service_{Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE}}}}}, nil
 }
-func (d *driver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+func (d *driver) Probe(ctx context.Context, _ *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+	if d.endpoint == "" {
+		return &csi.ProbeResponse{Ready: wrapperspb.Bool(false)}, nil
+	}
+	resp, err := d.api(ctx, http.MethodGet, "/v1/volumes", nil)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "Kagi API probe failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, status.Errorf(codes.Unavailable, "Kagi API probe returned %s", resp.Status)
+	}
 	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
 }
 func (d *driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
@@ -302,6 +313,12 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
+	if req.GetVolumeCapability().GetMount()==nil && req.GetVolumeCapability().GetBlock()==nil {
+		return nil,status.Error(codes.InvalidArgument,"volume capability must request mount or block access")
+	}
+	if vol.Size==0 || vol.Block<512 || vol.Block>65536 || (vol.Block&(vol.Block-1))!=0 {
+		return nil,status.Error(codes.FailedPrecondition,"Kagi volume has invalid size or logical block geometry")
+	}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
 	mountOptions:=[]string{"defaults"}
 	if fs {
