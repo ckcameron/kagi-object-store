@@ -40,6 +40,10 @@ type driver struct {
 }
 
 func (d *driver) api(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	return d.apiAt(ctx, d.endpoint, method, path, body)
+}
+func (d *driver) apiAt(ctx context.Context, endpoint, method, path string, body any) (*http.Response, error) {
+	if endpoint == "" { return nil, fmt.Errorf("Kagi API endpoint is empty") }
 	var reader *strings.Reader
 	if body != nil {
 		b, err := json.Marshal(body); if err != nil { return nil, err }
@@ -47,7 +51,7 @@ func (d *driver) api(ctx context.Context, method, path string, body any) (*http.
 	}
 	var req *http.Request
 	var err error
-	if reader == nil { req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(d.endpoint, "/")+path, nil) } else {
+	if reader == nil { req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(endpoint, "/")+path, nil) } else {
 		req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(d.endpoint, "/")+path, reader)
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -183,7 +187,7 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	}
 	// Read after write: PR generation checks can reject a stale concurrent command.
 	state,err=d.getPR(ctx,id)
-	if err!=nil||state.Reservation==nil||state.Reservation.Holder!=initiator||state.Reservation.Key!=key {
+	if err!=nil||state.Reservation==nil||state.Reservation.Holder!=initiator||state.Reservation.Key!=key||state.Reservation.Type!="exclusive_access" {
 		return nil,status.Error(codes.Aborted,"Kagi volume reservation was not acquired by this node")
 	}
 	return &csi.ControllerPublishVolumeResponse{PublishContext:map[string]string{"apiEndpoint":d.endpoint,"initiator":initiator}},nil
@@ -290,7 +294,7 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil,status.Errorf(codes.Internal,"read existing stage state: %v",err)
 	}
 	api:=req.GetVolumeContext()["apiEndpoint"];if api=="" {api=d.endpoint};if api=="" {return nil,status.Error(codes.FailedPrecondition,"volume context lacks apiEndpoint and KAGI_API_ENDPOINT is unset")}
-	vresp,err:=d.api(ctx,http.MethodGet,"/v1/volumes/"+id,nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
+	vresp,err:=d.apiAt(ctx,api,http.MethodGet,"/v1/volumes/"+id,nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
 	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
@@ -373,6 +377,9 @@ func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolum
 	return &csi.NodeUnstageVolumeResponse{},nil
 }
 func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolumeRequest)(*csi.NodePublishVolumeResponse,error) {
+	if req.GetVolumeId()==""||req.GetTargetPath()==""||req.GetVolumeCapability()==nil {
+		return nil,status.Error(codes.InvalidArgument,"volume_id, target_path, and volume_capability are required")
+	}
 	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"volume is not staged: %v",err)}
 	target:=req.GetTargetPath();if target==""{return nil,status.Error(codes.InvalidArgument,"target_path required")}
 	if err=os.MkdirAll(filepath.Dir(target),0750);err!=nil{return nil,status.Errorf(codes.Internal,"create target parent: %v",err)}
