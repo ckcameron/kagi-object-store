@@ -228,7 +228,7 @@ func (d *driver) NodeGetInfo(context.Context,*csi.NodeGetInfoRequest)(*csi.NodeG
 	if d.nodeID=="" { return nil,status.Error(codes.FailedPrecondition,"KAGI_NODE_ID is required") }
 	return &csi.NodeGetInfoResponse{NodeId:d.nodeID,MaxVolumesPerNode:128},nil
 }
-type stageState struct { VolumeID, Device, Port, ServerPID string; Filesystem bool; StagePath string }
+type stageState struct { VolumeID, Device, Port, ServerPID string; Filesystem bool; ReadOnly bool; StagePath string }
 func safeID(id string) string {
 	base:=strings.Map(func(r rune) rune { if r>='a'&&r<='z'||r>='A'&&r<='Z'||r>='0'&&r<='9'||r=='-'||r=='_' {return r}; return '_' },id)
 	if len(base)>64 { base=base[:64] }
@@ -325,7 +325,13 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		if e=run(ctx,"nbd-client","-N","keyspace","127.0.0.1",strconv.Itoa(port),candidate,"-b",strconv.Itoa(int(vol.Block)));e==nil{device=candidate;break}
 	}
 	if device=="" { _=server.Process.Kill();return nil,status.Error(codes.ResourceExhausted,"no free NBD device; load the nbd kernel module and expose /dev/nbd* to the node plugin") }
-	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,StagePath:stage}
+	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,ReadOnly:vol.ReadOnly,StagePath:stage}
+	if vol.ReadOnly && !fs {
+		if err=run(ctx,"blockdev","--setro",device);err!=nil {
+			_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
+			return nil,status.Errorf(codes.Internal,"set read-only block device: %v",err)
+		}
+	}
 	if fs {
 		blkid:=exec.CommandContext(ctx,"blkid","-p","-s","TYPE","-o","value",device)
 		fsOutput,fsErr:=blkid.CombinedOutput()
