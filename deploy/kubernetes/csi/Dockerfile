@@ -11,8 +11,9 @@ RUN cargo build --release --locked --bin kagi-volume-nbd
 FROM golang:1.24-bookworm AS go-build
 WORKDIR /src
 COPY deploy/kubernetes/csi/go.mod ./
-RUN go mod download
 COPY deploy/kubernetes/csi/*.go ./
+# Generate complete module checksums from the locked direct dependency versions.
+RUN go mod tidy
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kagi-csi .
 
 FROM debian:bookworm-slim
