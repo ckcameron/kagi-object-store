@@ -82,7 +82,9 @@ async fn handshake(s: &mut TcpStream, size: u64, read_only: bool) -> Result<()> 
         if opt == 1 {
             s.write_u64(size).await?;
             let mut transmission_flags = 1 | 4 | 32; // HAS_FLAGS, SEND_FLUSH, SEND_TRIM
-            if read_only { transmission_flags |= 2; } // READ_ONLY
+            if read_only {
+                transmission_flags |= 2;
+            } // READ_ONLY
             s.write_u16(transmission_flags).await?;
             if client_flags & 2 == 0 {
                 s.write_all(&[0u8; 124]).await?;
@@ -129,6 +131,9 @@ async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
         let handle = s.read_u64().await?;
         let off = s.read_u64().await?;
         let len = s.read_u32().await? as usize;
+        if len > MAX_REQUEST_BYTES {
+            bail!("NBD request length {len} exceeds the {MAX_REQUEST_BYTES}-byte limit");
+        }
         if off.saturating_add(len as u64) > v.size_bytes {
             reply(&mut s, 22, handle, None).await?;
             continue;
@@ -157,7 +162,10 @@ async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
             1 => {
                 let mut b = vec![0; len];
                 s.read_exact(&mut b).await?;
-                if read_only { reply(&mut s, 30, handle, None).await?; continue; }
+                if read_only {
+                    reply(&mut s, 30, handle, None).await?;
+                    continue;
+                }
                 let r = c
                     .put(format!(
                         "{}/v1/volumes/{}/data/{}",
