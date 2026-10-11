@@ -647,6 +647,13 @@ mod tests {
         assert!(validate_create(&v).is_err());
     }
     #[test]
+    fn kubernetes_presentation_requires_active_reservation() {
+        assert!(presentation_requires_reservation(&[VolumePresentation::Kubernetes]));
+        assert!(!presentation_requires_reservation(&[VolumePresentation::Nbd]));
+        assert!(!presentation_requires_reservation(&[]));
+    }
+
+    #[test]
     fn scsi_identity_is_stable() {
         assert_eq!(
             make_scsi_identity("vol-1").serial,
