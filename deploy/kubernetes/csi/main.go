@@ -115,6 +115,15 @@ func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		if capability.GetBlock()==nil && capability.GetMount()==nil {
 			return nil,status.Error(codes.InvalidArgument,"volume capability must request block or mount access")
 		}
+		if capability.GetMount() != nil {
+			fsType := strings.ToLower(capability.GetMount().GetFsType())
+			if fsType != "" && fsType != "ext4" {
+				return nil, status.Error(codes.InvalidArgument, "only ext4 filesystem volumes are supported")
+			}
+		}
+	}
+	if req.GetCapacityRange() != nil && (req.GetCapacityRange().GetRequiredBytes() < 0 || req.GetCapacityRange().GetLimitBytes() < 0) {
+		return nil, status.Error(codes.InvalidArgument, "capacity range values cannot be negative")
 	}
 	size := req.GetCapacityRange().GetRequiredBytes()
 	if size <= 0 { size = 10 * 1024 * 1024 * 1024 }
@@ -155,7 +164,10 @@ func (d *driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	if err != nil { return nil, status.Errorf(codes.Unavailable, "delete Kagi volume: %v", err) }
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK { return &csi.DeleteVolumeResponse{}, nil }
-	if resp.StatusCode == http.StatusConflict { return nil, status.Error(codes.FailedPrecondition, "Kagi refuses to delete a volume with allocated extents; use reclaimPolicy Retain and explicitly reclaim data") }
+	if resp.StatusCode == http.StatusConflict {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, status.Errorf(codes.FailedPrecondition, "Kagi refused volume deletion: %s", strings.TrimSpace(string(body)))
+	}
 	return nil, status.Errorf(codes.Internal, "Kagi API returned %s deleting volume", resp.Status)
 }
 type prState struct {
