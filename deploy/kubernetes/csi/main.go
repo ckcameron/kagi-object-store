@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,6 +39,7 @@ type driver struct {
 	csi.UnimplementedNodeServer
 	mode, endpoint, nodeID, stateDir string
 	http *http.Client
+	locks sync.Map
 }
 
 func (d *driver) api(ctx context.Context, method, path string, body any) (*http.Response, error) {
@@ -52,7 +55,7 @@ func (d *driver) apiAt(ctx context.Context, endpoint, method, path string, body 
 	var req *http.Request
 	var err error
 	if reader == nil { req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(endpoint, "/")+path, nil) } else {
-		req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(d.endpoint, "/")+path, reader)
+		req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(endpoint, "/")+path, reader)
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if err != nil { return nil, err }
@@ -161,87 +164,160 @@ type prState struct {
 		Type string `json:"reservation_type"`
 	} `json:"reservation"`
 }
-func (d *driver) getPR(ctx context.Context, id string) (prState, error) {
-	resp,err:=d.api(ctx,http.MethodGet,"/v1/volumes/"+id+"/pr",nil);if err!=nil{return prState{},err}
+func (d *driver) getPR(ctx context.Context, endpoint, id string) (prState, error) {
+	resp, err := d.apiAt(ctx, endpoint, http.MethodGet, "/v1/volumes/"+id+"/pr", nil)
+	if err != nil { return prState{}, err }
 	var state prState
-	if err=readJSON(resp,&state);err!=nil{return state,err}
-	return state,nil
+	if err = readJSON(resp, &state); err != nil { return state, err }
+	return state, nil
 }
-func (d *driver) putPR(ctx context.Context,id string,op map[string]any) error {
-	resp,err:=d.api(ctx,http.MethodPut,"/v1/volumes/"+id+"/pr",op);if err!=nil{return err}
+func (d *driver) putPR(ctx context.Context, endpoint, id string, op map[string]any) error {
+	resp, err := d.apiAt(ctx, endpoint, http.MethodPut, "/v1/volumes/"+id+"/pr", op)
+	if err != nil { return err }
 	defer resp.Body.Close()
-	if resp.StatusCode<200||resp.StatusCode>=300 { return fmt.Errorf("Kagi persistent reservation API returned %s",resp.Status) }
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("Kagi persistent reservation API returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
 	return nil
 }
 func prKey(volumeID,nodeID string) uint64 {
 	sum:=sha256.Sum256([]byte(volumeID+"\x00"+nodeID))
 	key:=binary.BigEndian.Uint64(sum[:8]);if key==0{return 1};return key
 }
+func endpointFromContext(volumeContext map[string]string, fallback string) string {
+	if endpoint := strings.TrimSpace(volumeContext["apiEndpoint"]); endpoint != "" {
+		return strings.TrimRight(endpoint, "/")
+	}
+	return strings.TrimRight(fallback, "/")
+}
 func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-	id,node:=req.GetVolumeId(),req.GetNodeId()
-	if id==""||node=="" { return nil,status.Error(codes.InvalidArgument,"volume_id and node_id are required") }
-	initiator:="k8s:"+node
-	state,err:=d.getPR(ctx,id);if err!=nil{return nil,status.Errorf(codes.Unavailable,"read Kagi reservation state: %v",err)}
-	if state.Reservation!=nil&&state.Reservation.Holder!=initiator {
-		return nil,status.Error(codes.Aborted,"Kagi volume is persistently reserved by another node")
+	id, node := req.GetVolumeId(), req.GetNodeId()
+	if id == "" || node == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and node_id are required")
 	}
-	registration,registered:=state.Registrations[initiator]
-	key:=registration.Key
+	endpoint := endpointFromContext(req.GetVolumeContext(), d.endpoint)
+	if endpoint == "" {
+		return nil, status.Error(codes.FailedPrecondition, "KAGI_API_ENDPOINT or volume apiEndpoint is required")
+	}
+	initiator := "k8s:" + node
+	state, err := d.getPR(ctx, endpoint, id)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return nil, status.Error(codes.NotFound, "Kagi volume does not exist")
+		}
+		return nil, status.Errorf(codes.Unavailable, "read Kagi reservation state: %v", err)
+	}
+	if state.Reservation != nil && state.Reservation.Holder != initiator {
+		return nil, status.Error(codes.Aborted, "Kagi volume is persistently reserved by another node")
+	}
+	registration, registered := state.Registrations[initiator]
+	key := registration.Key
 	if !registered {
-		key=prKey(id,node)
-		if err=d.putPR(ctx,id,map[string]any{"Register":map[string]any{"initiator":initiator,"current_key":uint64(0),"new_key":key,"aptpl":false,"ignore_existing":false}});err!=nil {
-			return nil,status.Errorf(codes.Aborted,"register node for Kagi volume: %v",err)
+		key = prKey(id, node)
+		if err = d.putPR(ctx, endpoint, id, map[string]any{
+			"action": "register", "initiator": initiator, "current_key": uint64(0),
+			"new_key": key, "aptpl": false, "ignore_existing": false,
+		}); err != nil {
+			return nil, status.Errorf(codes.Aborted, "register node for Kagi volume: %v", err)
 		}
 	}
-	if err=d.putPR(ctx,id,map[string]any{"Reserve":map[string]any{"initiator":initiator,"key":key,"reservation_type":"exclusive_access"}});err!=nil {
-		// A failed attach must not leave a registration that can accumulate across retries.
+	if err = d.putPR(ctx, endpoint, id, map[string]any{
+		"action": "reserve", "initiator": initiator, "key": key, "reservation_type": "exclusive_access",
+	}); err != nil {
 		if !registered {
-			_ = d.putPR(ctx,id,map[string]any{"Register":map[string]any{"initiator":initiator,"current_key":key,"new_key":uint64(0),"aptpl":false,"ignore_existing":false}})
+			_ = d.putPR(ctx, endpoint, id, map[string]any{
+				"action": "register", "initiator": initiator, "current_key": key, "new_key": uint64(0),
+				"aptpl": false, "ignore_existing": false,
+			})
 		}
-		return nil,status.Errorf(codes.Aborted,"reserve Kagi volume for node %q: %v",node,err)
+		return nil, status.Errorf(codes.Aborted, "reserve Kagi volume for node %q: %v", node, err)
 	}
-	// Read after write: PR generation checks can reject a stale concurrent command.
-	state,err=d.getPR(ctx,id)
-	if err!=nil||state.Reservation==nil||state.Reservation.Holder!=initiator||state.Reservation.Key!=key||state.Reservation.Type!="exclusive_access" {
-		return nil,status.Error(codes.Aborted,"Kagi volume reservation was not acquired by this node")
+	state, err = d.getPR(ctx, endpoint, id)
+	if err != nil || state.Reservation == nil || state.Reservation.Holder != initiator ||
+		state.Reservation.Key != key || state.Reservation.Type != "exclusive_access" {
+		return nil, status.Error(codes.Aborted, "Kagi volume reservation was not acquired by this node")
 	}
-	return &csi.ControllerPublishVolumeResponse{PublishContext:map[string]string{"apiEndpoint":d.endpoint,"initiator":initiator}},nil
+	return &csi.ControllerPublishVolumeResponse{
+		PublishContext: map[string]string{"apiEndpoint": endpoint, "initiator": initiator},
+	}, nil
 }
-func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest)(*csi.ControllerUnpublishVolumeResponse,error) {
-	id,node:=req.GetVolumeId(),req.GetNodeId()
-	if id==""||node=="" { return &csi.ControllerUnpublishVolumeResponse{},nil }
-	state,err:=d.getPR(ctx,id)
-	if err!=nil {
-		if strings.Contains(err.Error(),"404") { return &csi.ControllerUnpublishVolumeResponse{},nil }
-		return nil,status.Errorf(codes.Unavailable,"read Kagi reservation state: %v",err)
+func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
+	id, node := req.GetVolumeId(), req.GetNodeId()
+	if id == "" || node == "" {
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
-	initiator:="k8s:"+node
-	registration,registered:=state.Registrations[initiator]
-	if !registered { return &csi.ControllerUnpublishVolumeResponse{},nil }
-	if state.Reservation!=nil&&state.Reservation.Holder==initiator {
-		if err=d.putPR(ctx,id,map[string]any{"Release":map[string]any{"initiator":initiator,"key":state.Reservation.Key,"reservation_type":state.Reservation.Type}});err!=nil {
-			return nil,status.Errorf(codes.Aborted,"release Kagi volume reservation: %v",err)
+	endpoint := endpointFromContext(req.GetVolumeContext(), d.endpoint)
+	state, err := d.getPR(ctx, endpoint, id)
+	if err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return &csi.ControllerUnpublishVolumeResponse{}, nil
+		}
+		return nil, status.Errorf(codes.Unavailable, "read Kagi reservation state: %v", err)
+	}
+	initiator := "k8s:" + node
+	registration, registered := state.Registrations[initiator]
+	if !registered {
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
+	if state.Reservation != nil && state.Reservation.Holder == initiator {
+		if err = d.putPR(ctx, endpoint, id, map[string]any{
+			"action": "release", "initiator": initiator, "key": state.Reservation.Key,
+			"reservation_type": state.Reservation.Type,
+		}); err != nil {
+			return nil, status.Errorf(codes.Aborted, "release Kagi volume reservation: %v", err)
 		}
 	}
-	if err=d.putPR(ctx,id,map[string]any{"Register":map[string]any{"initiator":initiator,"current_key":registration.Key,"new_key":uint64(0),"aptpl":false,"ignore_existing":false}});err!=nil {
-		return nil,status.Errorf(codes.Aborted,"unregister node from Kagi volume: %v",err)
+	if err = d.putPR(ctx, endpoint, id, map[string]any{
+		"action": "register", "initiator": initiator, "current_key": registration.Key,
+		"new_key": uint64(0), "aptpl": false, "ignore_existing": false,
+	}); err != nil {
+		return nil, status.Errorf(codes.Aborted, "unregister node from Kagi volume: %v", err)
 	}
-	return &csi.ControllerUnpublishVolumeResponse{},nil
+	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
-func (d *driver) ValidateVolumeCapabilities(_ context.Context, req *csi.ValidateVolumeCapabilitiesRequest)(*csi.ValidateVolumeCapabilitiesResponse,error) {
-	if req.GetVolumeId()=="" || len(req.GetVolumeCapabilities())==0 { return nil,status.Error(codes.InvalidArgument,"volume_id and capabilities required") }
-	for _,capability:=range req.GetVolumeCapabilities() {
-		if capability.GetAccessMode()==nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
-			return &csi.ValidateVolumeCapabilitiesResponse{Message:"Kagi CSI supports single-node access modes only"},nil
+func (d *driver) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
+	if req.GetVolumeId() == "" || len(req.GetVolumeCapabilities()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and capabilities required")
+	}
+	for _, capability := range req.GetVolumeCapabilities() {
+		if capability.GetAccessMode() == nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
+			return &csi.ValidateVolumeCapabilitiesResponse{Message: "Kagi CSI supports single-node access modes only"}, nil
 		}
-		if capability.GetBlock()==nil && capability.GetMount()==nil {
-			return &csi.ValidateVolumeCapabilitiesResponse{Message:"volume capability must request block or mount access"},nil
+		if capability.GetBlock() == nil && capability.GetMount() == nil {
+			return &csi.ValidateVolumeCapabilitiesResponse{Message: "volume capability must request block or mount access"}, nil
+		}
+		if capability.GetMount() != nil {
+			fsType := strings.ToLower(capability.GetMount().GetFsType())
+			if fsType != "" && fsType != "ext4" {
+				return &csi.ValidateVolumeCapabilitiesResponse{Message: "only ext4 filesystem volumes are supported"}, nil
+			}
 		}
 	}
-	return &csi.ValidateVolumeCapabilitiesResponse{Confirmed:&csi.ValidateVolumeCapabilitiesResponse_Confirmed{VolumeCapabilities:req.GetVolumeCapabilities(),VolumeContext:req.GetVolumeContext()}},nil
+	endpoint := endpointFromContext(req.GetVolumeContext(), d.endpoint)
+	resp, err := d.apiAt(ctx, endpoint, http.MethodGet, "/v1/volumes/"+req.GetVolumeId()+"/info", nil)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "validate Kagi volume: %v", err)
+	}
+	var info map[string]any
+	if err = readJSON(resp, &info); err != nil {
+		if strings.Contains(err.Error(), "404") {
+			return nil, status.Error(codes.NotFound, "Kagi volume does not exist")
+		}
+		return nil, status.Errorf(codes.Unavailable, "validate Kagi volume: %v", err)
+	}
+	return &csi.ValidateVolumeCapabilitiesResponse{
+		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
+			VolumeCapabilities: req.GetVolumeCapabilities(),
+			VolumeContext: req.GetVolumeContext(),
+		},
+	}, nil
 }
-func (d *driver) NodeGetCapabilities(context.Context,*csi.NodeGetCapabilitiesRequest)(*csi.NodeGetCapabilitiesResponse,error) {
-	return &csi.NodeGetCapabilitiesResponse{Capabilities:[]*csi.NodeServiceCapability{{Type:&csi.NodeServiceCapability_Rpc{Rpc:&csi.NodeServiceCapability_RPC{Type:csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME}}}}},nil
+func (d *driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
+	return &csi.NodeGetCapabilitiesResponse{Capabilities: []*csi.NodeServiceCapability{
+		{Type: &csi.NodeServiceCapability_Rpc{Rpc: &csi.NodeServiceCapability_RPC{Type: csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME}}},
+		{Type: &csi.NodeServiceCapability_Rpc{Rpc: &csi.NodeServiceCapability_RPC{Type: csi.NodeServiceCapability_RPC_GET_VOLUME_STATS}}},
+	}}, nil
 }
 func (d *driver) NodeGetInfo(context.Context,*csi.NodeGetInfoRequest)(*csi.NodeGetInfoResponse,error) {
 	if d.nodeID=="" { return nil,status.Error(codes.FailedPrecondition,"KAGI_NODE_ID is required") }
@@ -254,7 +330,18 @@ func safeID(id string) string {
 	sum:=sha256.Sum256([]byte(id))
 	return base+"-"+hex.EncodeToString(sum[:6])
 }
-func contains(items []string, wanted string) bool { for _,item:=range items { if item==wanted{return true} }; return false }
+func contains(items []string, wanted string) bool {
+	for _, item := range items {
+		if item == wanted { return true }
+	}
+	return false
+}
+func (d *driver) lock(key string) func() {
+	value, _ := d.locks.LoadOrStore(key, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 func (d *driver) statePath(id string) string { return filepath.Join(d.stateDir,safeID(id)+".json") }
 func (d *driver) loadState(id string)(stageState,error) {
 	var s stageState; b,e:=os.ReadFile(d.statePath(id)); if e!=nil{return s,e}; e=json.Unmarshal(b,&s); return s,e
