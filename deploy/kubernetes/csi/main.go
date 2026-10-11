@@ -183,6 +183,10 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 		}
 	}
 	if err=d.putPR(ctx,id,map[string]any{"Reserve":map[string]any{"initiator":initiator,"key":key,"reservation_type":"exclusive_access"}});err!=nil {
+		// A failed attach must not leave a registration that can accumulate across retries.
+		if !registered {
+			_ = d.putPR(ctx,id,map[string]any{"Register":map[string]any{"initiator":initiator,"current_key":key,"new_key":uint64(0),"aptpl":false,"ignore_existing":false}})
+		}
 		return nil,status.Errorf(codes.Aborted,"reserve Kagi volume for node %q: %v",node,err)
 	}
 	// Read after write: PR generation checks can reject a stale concurrent command.
