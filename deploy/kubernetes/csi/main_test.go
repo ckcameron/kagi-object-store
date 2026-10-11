@@ -168,7 +168,7 @@ func TestCreateVolumeRejectsMultiNodeAccessAndImpossibleRoundedLimit(t *testing.
 	}
 }
 
-func TestNodeCapabilitiesAdvertiseOnlyImplementedStatsAndStage(t *testing.T) {
+func TestNodeCapabilitiesAdvertiseOnlyImplementedStageLifecycle(t *testing.T) {
 	d := &driver{}
 	resp, err := d.NodeGetCapabilities(context.Background(), &csi.NodeGetCapabilitiesRequest{})
 	if err != nil {
@@ -178,7 +178,10 @@ func TestNodeCapabilitiesAdvertiseOnlyImplementedStatsAndStage(t *testing.T) {
 	for _, cap := range resp.GetCapabilities() {
 		got[cap.GetRpc().GetType()] = true
 	}
-	if !got[csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME] || !got[csi.NodeServiceCapability_RPC_GET_VOLUME_STATS] {
-		t.Fatalf("missing implemented node capabilities: %v", got)
+	if !got[csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME] {
+		t.Fatalf("missing implemented stage/unstage capability: %v", got)
+	}
+	if got[csi.NodeServiceCapability_RPC_GET_VOLUME_STATS] {
+		t.Fatalf("raw-block stats are not implemented and must not be advertised: %v", got)
 	}
 }
