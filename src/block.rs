@@ -648,8 +648,12 @@ mod tests {
     }
     #[test]
     fn kubernetes_presentation_requires_active_reservation() {
-        assert!(presentation_requires_reservation(&[VolumePresentation::Kubernetes]));
-        assert!(!presentation_requires_reservation(&[VolumePresentation::Nbd]));
+        assert!(presentation_requires_reservation(&[
+            VolumePresentation::Kubernetes
+        ]));
+        assert!(!presentation_requires_reservation(&[
+            VolumePresentation::Nbd
+        ]));
         assert!(!presentation_requires_reservation(&[]));
     }
 
