@@ -1595,6 +1595,15 @@ async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> imp
     let Some(volume) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NO_CONTENT.into_response();
     };
+    if volume.persistent_reservation.reservation.is_some()
+        || !volume.persistent_reservation.registrations.is_empty()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "volume is still attached or has persistent-reservation registrations",
+        )
+            .into_response();
+    }
     if !volume.extents.is_empty() {
         return (
             StatusCode::CONFLICT,
@@ -1619,13 +1628,18 @@ async fn volume_create(
     if let Err(e) = block::validate_create(&req) {
         return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
+    // Serialize ID/name uniqueness checks with deletes and block writes.
+    let _serial = st.namespace_lock.lock().await;
     let id = req
         .id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let state = st.meta.store.state().await;
     if state.volumes.contains_key(&id) {
-        return (StatusCode::CONFLICT, "volume already exists").into_response();
+        return (StatusCode::CONFLICT, "volume ID already exists").into_response();
+    }
+    if state.volumes.values().any(|existing| existing.name == req.name) {
+        return (StatusCode::CONFLICT, "volume name already exists").into_response();
     }
     drop(state);
     let v = VolumeRecord {
