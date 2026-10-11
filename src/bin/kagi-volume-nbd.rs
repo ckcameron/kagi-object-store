@@ -19,7 +19,7 @@ use tokio::{
 const NBD_MAGIC: u64 = 0x4e42444d41474943;
 const IHAVEOPT: u64 = 0x49484156454f5054;
 const REQ_MAGIC: u32 = 0x25609513;
-const REP_MAGIC: u32 = 0x67446698;
+const REP_MAGIC: u32 = 0x67446698;\nconst MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Parser, Clone)]
 struct Opt {
     #[arg(long, default_value = "127.0.0.1:10809")]
@@ -36,6 +36,8 @@ struct Volume {
     size_bytes: u64,
     #[serde(rename = "logical_block_bytes")]
     _logical_block_bytes: u32,
+    #[serde(default)]
+    read_only: bool,
 }
 /// Implements the volume step and keeps its validation and state transitions visible at the call site.
 async fn volume(c: &reqwest::Client, o: &Opt) -> Result<Volume> {
@@ -60,7 +62,7 @@ async fn read_be_u64(s: &mut TcpStream) -> Result<u64> {
     Ok(s.read_u64().await?)
 }
 /// Implements the handshake step and keeps its validation and state transitions visible at the call site.
-async fn handshake(s: &mut TcpStream, size: u64) -> Result<()> {
+async fn handshake(s: &mut TcpStream, size: u64, read_only: bool) -> Result<()> {
     s.write_u64(NBD_MAGIC).await?;
     s.write_u64(IHAVEOPT).await?;
     s.write_u16(3).await?;
@@ -76,7 +78,7 @@ async fn handshake(s: &mut TcpStream, size: u64) -> Result<()> {
         s.read_exact(&mut payload).await?;
         if opt == 1 {
             s.write_u64(size).await?;
-            s.write_u16(1 | 4 | 32).await?;
+            let mut transmission_flags = 1 | 4 | 32; // HAS_FLAGS, SEND_FLUSH, SEND_TRIM\n            if read_only { transmission_flags |= 2; } // READ_ONLY\n            s.write_u16(transmission_flags).await?;
             if client_flags & 2 == 0 {
                 s.write_all(&[0u8; 124]).await?;
             }
@@ -107,7 +109,7 @@ async fn reply(s: &mut TcpStream, errno: u32, handle: u64, data: Option<&[u8]>) 
 async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
     let c = reqwest::Client::new();
     let v = volume(&c, &o).await?;
-    handshake(&mut s, v.size_bytes).await?;
+    handshake(&mut s, v.size_bytes, v.read_only).await?;
     loop {
         let magic = match s.read_u32().await {
             Ok(x) => x,
