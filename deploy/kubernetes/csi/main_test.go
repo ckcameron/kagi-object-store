@@ -80,7 +80,7 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 			if registrations[payload.Initiator] != payload.Key || (holder!="" && holder!=payload.Initiator) || payload.ReservationType!="exclusive_access" { http.Error(w,"reserved or invalid reservation type",http.StatusConflict);return }
 			holder=payload.Initiator;reservationKey=payload.Key
 		case "Release":
-			if holder!=payload.Initiator||reservationKey!=payload.Key||payload.ReservationType!="ExclusiveAccess" { http.Error(w,"not reservation holder",http.StatusConflict);return }
+			if holder!=payload.Initiator||reservationKey!=payload.Key||payload.ReservationType!="exclusive_access" { http.Error(w,"not reservation holder",http.StatusConflict);return }
 			holder="";reservationKey=0
 		default: http.Error(w,"unknown Serde PR operation",400);return
 		}
