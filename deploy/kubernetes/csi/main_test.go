@@ -55,30 +55,34 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 			state := map[string]any{"registrations": map[string]any{}, "reservation": nil}
 			regs := state["registrations"].(map[string]any)
 			for name, key := range registrations { regs[name] = map[string]uint64{"key":key} }
-			if holder != "" { state["reservation"] = map[string]any{"holder":holder,"key":reservationKey,"reservation_type":"exclusive_access"} }
+			if holder != "" { state["reservation"] = map[string]any{"holder":holder,"key":reservationKey,"reservation_type":"ExclusiveAccess"} }
 			_ = json.NewEncoder(w).Encode(state)
 			return
 		}
-		var op struct {
-			Action string `json:"action"`
+		var op map[string]json.RawMessage
+		if err:=json.NewDecoder(r.Body).Decode(&op);err!=nil{http.Error(w,err.Error(),400);return}
+		var action string
+		var payload struct {
 			Initiator string `json:"initiator"`
 			CurrentKey uint64 `json:"current_key"`
 			NewKey uint64 `json:"new_key"`
 			Key uint64 `json:"key"`
 			ReservationType string `json:"reservation_type"`
+			APTPL bool `json:"aptpl"`
+			IgnoreExisting bool `json:"ignore_existing"`
 		}
-		if err:=json.NewDecoder(r.Body).Decode(&op);err!=nil{http.Error(w,err.Error(),400);return}
-		switch op.Action {
-		case "register":
-			if registrations[op.Initiator] != op.CurrentKey { http.Error(w,"key mismatch",http.StatusConflict);return }
-			if op.NewKey==0 { delete(registrations,op.Initiator) } else { registrations[op.Initiator]=op.NewKey }
-		case "reserve":
-			if registrations[op.Initiator] != op.Key || (holder!="" && holder!=op.Initiator) { http.Error(w,"reserved",http.StatusConflict);return }
-			holder=op.Initiator;reservationKey=op.Key
-		case "release":
-			if holder!=op.Initiator||reservationKey!=op.Key { http.Error(w,"not reservation holder",http.StatusConflict);return }
+		for name,raw:=range op { action=name; if err:=json.Unmarshal(raw,&payload);err!=nil{http.Error(w,err.Error(),400);return} }
+		switch action {
+		case "Register":
+			if registrations[payload.Initiator] != payload.CurrentKey { http.Error(w,"key mismatch",http.StatusConflict);return }
+			if payload.NewKey==0 { delete(registrations,payload.Initiator) } else { registrations[payload.Initiator]=payload.NewKey }
+		case "Reserve":
+			if registrations[payload.Initiator] != payload.Key || (holder!="" && holder!=payload.Initiator) || payload.ReservationType!="ExclusiveAccess" { http.Error(w,"reserved or invalid reservation type",http.StatusConflict);return }
+			holder=payload.Initiator;reservationKey=payload.Key
+		case "Release":
+			if holder!=payload.Initiator||reservationKey!=payload.Key||payload.ReservationType!="ExclusiveAccess" { http.Error(w,"not reservation holder",http.StatusConflict);return }
 			holder="";reservationKey=0
-		default: http.Error(w,"unknown action",400);return
+		default: http.Error(w,"unknown Serde PR operation",400);return
 		}
 		w.Header().Set("Content-Type","application/json")
 		_,_=w.Write([]byte(`{"ok":true}`))
