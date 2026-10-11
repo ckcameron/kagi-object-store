@@ -19,7 +19,8 @@ use tokio::{
 const NBD_MAGIC: u64 = 0x4e42444d41474943;
 const IHAVEOPT: u64 = 0x49484156454f5054;
 const REQ_MAGIC: u32 = 0x25609513;
-const REP_MAGIC: u32 = 0x67446698;\nconst MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const REP_MAGIC: u32 = 0x67446698;
+const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Parser, Clone)]
 struct Opt {
     #[arg(long, default_value = "127.0.0.1:10809")]
@@ -78,7 +79,9 @@ async fn handshake(s: &mut TcpStream, size: u64, read_only: bool) -> Result<()> 
         s.read_exact(&mut payload).await?;
         if opt == 1 {
             s.write_u64(size).await?;
-            let mut transmission_flags = 1 | 4 | 32; // HAS_FLAGS, SEND_FLUSH, SEND_TRIM\n            if read_only { transmission_flags |= 2; } // READ_ONLY\n            s.write_u16(transmission_flags).await?;
+            let mut transmission_flags = 1 | 4 | 32; // HAS_FLAGS, SEND_FLUSH, SEND_TRIM
+            if read_only { transmission_flags |= 2; } // READ_ONLY
+            s.write_u16(transmission_flags).await?;
             if client_flags & 2 == 0 {
                 s.write_all(&[0u8; 124]).await?;
             }
