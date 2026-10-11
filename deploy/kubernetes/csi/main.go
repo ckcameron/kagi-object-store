@@ -309,8 +309,8 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil,status.Errorf(codes.Internal,"read existing stage state: %v",err)
 	}
 	api:=req.GetVolumeContext()["apiEndpoint"];if api=="" {api=d.endpoint};if api=="" {return nil,status.Error(codes.FailedPrecondition,"volume context lacks apiEndpoint and KAGI_API_ENDPOINT is unset")}
-	vresp,err:=d.apiAt(ctx,api,http.MethodGet,"/v1/volumes/"+id,nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
-	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"` }
+	vresp,err:=d.apiAt(ctx,api,http.MethodGet,"/v1/volumes/"+id+"/info",nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
+	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"`; AllocatedExtents uint64 `json:"allocated_extents"` }
 	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
 	if req.GetVolumeCapability()==nil{return nil,status.Error(codes.InvalidArgument,"volume_capability is required")}
 	if req.GetVolumeCapability().GetMount()==nil && req.GetVolumeCapability().GetBlock()==nil {
