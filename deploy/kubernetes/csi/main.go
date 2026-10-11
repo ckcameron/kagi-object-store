@@ -159,7 +159,7 @@ func (d *driver) putPR(ctx context.Context,id string,op map[string]any) error {
 	return nil
 }
 func prKey(volumeID,nodeID string) uint64 {
-	sum:=sha256.Sum256([]byte(volumeID+"\\x00"+nodeID))
+	sum:=sha256.Sum256([]byte(volumeID+"\x00"+nodeID))
 	key:=binary.BigEndian.Uint64(sum[:8]);if key==0{return 1};return key
 }
 func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
@@ -178,7 +178,7 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 			return nil,status.Errorf(codes.Aborted,"register node for Kagi volume: %v",err)
 		}
 	}
-	if err=d.putPR(ctx,id,map[string]any{"Reserve":map[string]any{"initiator":initiator,"key":key,"reservation_type":"ExclusiveAccess"}});err!=nil {
+	if err=d.putPR(ctx,id,map[string]any{"Reserve":map[string]any{"initiator":initiator,"key":key,"reservation_type":"exclusive_access"}});err!=nil {
 		return nil,status.Errorf(codes.Aborted,"reserve Kagi volume for node %q: %v",node,err)
 	}
 	// Read after write: PR generation checks can reject a stale concurrent command.
