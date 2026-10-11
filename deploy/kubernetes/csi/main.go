@@ -320,6 +320,7 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil,status.Error(codes.FailedPrecondition,"Kagi volume has invalid size or logical block geometry")
 	}
 	fs:=req.GetVolumeCapability().GetMount()!=nil
+	readOnly:=vol.ReadOnly || req.GetVolumeCapability().GetAccessMode().GetMode()==csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
 	mountOptions:=[]string{"defaults"}
 	if fs {
 		fsType:=strings.ToLower(req.GetVolumeCapability().GetMount().GetFsType())
@@ -327,14 +328,16 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		for _,flag:=range req.GetVolumeCapability().GetMount().GetMountFlags() {
 			switch flag { case "noatime","nodiratime","nodev","nosuid","noexec","sync","dirsync","ro": mountOptions=append(mountOptions,flag); default: return nil,status.Errorf(codes.InvalidArgument,"unsupported mount flag %q",flag) }
 		}
-		if vol.ReadOnly && !contains(mountOptions,"ro") { mountOptions=append(mountOptions,"ro") }
+		if readOnly && !contains(mountOptions,"ro") { mountOptions=append(mountOptions,"ro") }
 	}
 	if err=os.MkdirAll(stage,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create staging directory: %v",err)}
 	if err=os.MkdirAll(d.stateDir,0700);err!=nil{return nil,status.Errorf(codes.Internal,"create CSI state directory: %v",err)}
 	_ = run(ctx,"modprobe","nbd","nbds_max=128") // The module may already be loaded; device availability is checked below.
 	portListener,err:=net.Listen("tcp","127.0.0.1:0");if err!=nil{return nil,status.Errorf(codes.Internal,"reserve NBD port: %v",err)}
 	port:=portListener.Addr().(*net.TCPAddr).Port;_ = portListener.Close()
-	server:=exec.Command("/usr/local/bin/kagi-volume-nbd","--listen",fmt.Sprintf("127.0.0.1:%d",port),"--api",api,"--volume",id,"--initiator","k8s:"+d.nodeID)
+	serverArgs:=[]string{"--listen",fmt.Sprintf("127.0.0.1:%d",port),"--api",api,"--volume",id,"--initiator","k8s:"+d.nodeID}
+	if readOnly { serverArgs=append(serverArgs,"--read-only") }
+	server:=exec.Command("/usr/local/bin/kagi-volume-nbd",serverArgs...)
 	logFile,logErr:=os.OpenFile(filepath.Join(d.stateDir,safeID(id)+".log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0600)
 	if logErr==nil {server.Stdout=logFile;server.Stderr=logFile}
 	if err=server.Start();err!=nil{if logFile!=nil{_ = logFile.Close()};return nil,status.Errorf(codes.Unavailable,"start NBD frontend: %v",err)}
@@ -350,8 +353,8 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		if e=run(ctx,"nbd-client","-N","keyspace","127.0.0.1",strconv.Itoa(port),candidate,"-b",strconv.Itoa(int(vol.Block)));e==nil{device=candidate;break}
 	}
 	if device=="" { _=server.Process.Kill();return nil,status.Error(codes.ResourceExhausted,"no free NBD device; load the nbd kernel module and expose /dev/nbd* to the node plugin") }
-	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,ReadOnly:vol.ReadOnly,StagePath:stage}
-	if vol.ReadOnly && !fs {
+	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,ReadOnly:readOnly,StagePath:stage}
+	if readOnly && !fs {
 		if err=run(ctx,"blockdev","--setro",device);err!=nil {
 			_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
 			return nil,status.Errorf(codes.Internal,"set read-only block device: %v",err)
@@ -363,7 +366,7 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		if fsErr!=nil {
 			var exitErr *exec.ExitError
 			if errors.As(fsErr,&exitErr) && exitErr.ExitCode()==2 {
-				if vol.ReadOnly {
+				if readOnly {
 					_ = run(ctx,"nbd-client","-d",device); _ = server.Process.Kill()
 					return nil,status.Error(codes.FailedPrecondition,"cannot initialize a read-only volume with no filesystem")
 				}
