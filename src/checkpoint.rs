@@ -66,7 +66,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    let payload = serde_yaml::to_string(value)?;
+    let payload = serde_saphyr::to_string(value)?;
     Ok(serde_json::to_vec(&Envelope {
         format: FORMAT,
         hash: blake3::hash(payload.as_bytes()).to_hex().to_string(),
@@ -80,7 +80,7 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     {
         bail!("checkpoint format or checksum mismatch");
     }
-    Ok(serde_yaml::from_str(&record.payload)?)
+    Ok(serde_saphyr::from_str(&record.payload)?)
 }
 impl Store {
     pub fn open(root: PathBuf, resume: bool, interval: Duration, batch: u64) -> Result<Self> {
@@ -193,7 +193,7 @@ where
     let store = ACTIVE.get();
     let width = store.map_or(1024, |s| s.batch);
     let job = blake3::hash(
-        serde_yaml::to_string(&(env!("CARGO_PKG_VERSION"), width, key))
+        serde_saphyr::to_string(&(env!("CARGO_PKG_VERSION"), width, key))
             .expect("serialize checkpoint identity")
             .as_bytes(),
     )

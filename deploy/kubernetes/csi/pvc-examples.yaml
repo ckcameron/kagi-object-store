@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kagi-filesystem-example
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: kagi-retain
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kagi-raw-block-example
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Block
+  storageClassName: kagi-retain
+  resources:
+    requests:
+      storage: 20Gi

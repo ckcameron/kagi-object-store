@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: CC-BY-NC-SA-4.0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kagi-storage-smoke-test
+spec:
+  restartPolicy: Never
+  containers:
+    - name: storage-test
+      image: busybox:1.36
+      command: ["sh", "-c", "echo 'Kagi filesystem test' > /data/health.txt; dd if=/dev/zero of=/dev/kagi-block bs=4096 count=1; sync; sleep 3600"]
+      volumeMounts:
+        - name: filesystem
+          mountPath: /data
+      volumeDevices:
+        - name: raw-block
+          devicePath: /dev/kagi-block
+  volumes:
+    - name: filesystem
+      persistentVolumeClaim:
+        claimName: kagi-filesystem-example
+    - name: raw-block
+      persistentVolumeClaim:
+        claimName: kagi-raw-block-example

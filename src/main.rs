@@ -3627,7 +3627,7 @@ fn main() -> Result<()> {
             let config = run_wizard(&mut args)?;
             checkpoint::atomic_write(
                 &args.wizard_config_output,
-                serde_yaml::to_string(&config)?.as_bytes(),
+                serde_saphyr::to_string(&config)?.as_bytes(),
             )?;
             config
         } else {
@@ -3635,7 +3635,7 @@ fn main() -> Result<()> {
                 .config
                 .as_ref()
                 .context("--config is required unless --wizard or --resume is used")?;
-            serde_yaml::from_str(&fs::read_to_string(path).context("read config")?)
+            serde_saphyr::from_str(&fs::read_to_string(path).context("read config")?)
                 .context("parse YAML")?
         };
         normalize_topology(&mut config, args.mount_root.as_deref());
@@ -3875,7 +3875,7 @@ fn main() -> Result<()> {
             }
         },
     };
-    let yaml = serde_yaml::to_string(&out)?;
+    let yaml = serde_saphyr::to_string(&out)?;
     checkpoint::flush()?;
     checkpoint::atomic_write(&args.output, yaml.as_bytes())?;
     drop(progress);
@@ -4101,8 +4101,8 @@ mod tests {
     fn yaml_config_round_trip_preserves_topology() {
         let mut c = base_cfg();
         normalize_topology(&mut c, None);
-        let y = serde_yaml::to_string(&c).unwrap();
-        let d: Config = serde_yaml::from_str(&y).unwrap();
+        let y = serde_saphyr::to_string(&c).unwrap();
+        let d: Config = serde_saphyr::from_str(&y).unwrap();
         assert_eq!(d.topology.disks.len(), 36);
         assert_eq!(d.topology.network_domains.len(), 3);
     }
