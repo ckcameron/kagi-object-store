@@ -385,7 +385,7 @@ mod tests {
     }
     #[tokio::test]
     async fn deny_wins_and_privileged_rules_are_selective() {
-        let cfg: Config = serde_yaml::from_str("objects:\n - {key: secret, recursive: true, operations: [all], decision: allow}\n - {key: secret, recursive: true, operations: [write], decision: deny, privileged_only: true}\n").unwrap();
+        let cfg: Config = serde_saphyr::from_str("objects:\n - {key: secret, recursive: true, operations: [all], decision: allow}\n - {key: secret, recursive: true, operations: [write], decision: deny, privileged_only: true}\n").unwrap();
         let security = Security::new(cfg, Monitor::new(16)).unwrap();
         assert!(security.check("secret/a", common::OP_READ, true));
         assert!(security.check("secret/a", common::OP_WRITE, false));
@@ -437,14 +437,14 @@ mod action_tests {
     }
     #[test]
     fn invalid_actions_and_operations_fail_closed() {
-        let bad: Config = serde_yaml::from_str(
+        let bad: Config = serde_saphyr::from_str(
             "objects: [{key: x, operations: [read], decision: deny, action: unknown}]",
         )
         .unwrap();
         assert!(validate(&bad).is_err());
         assert!(parse_operations(&["typo".into()]).is_err());
         assert!(parse_operations(&[]).is_err());
-        let signal: Config = serde_yaml::from_str("objects: [{key: x, operations: [read], decision: deny, action: kill}]\nactions: {kill: {type: signal, signal: 9}}").unwrap();
+        let signal: Config = serde_saphyr::from_str("objects: [{key: x, operations: [read], decision: deny, action: kill}]\nactions: {kill: {type: signal, signal: 9}}").unwrap();
         assert!(validate(&signal).is_err());
     }
 }

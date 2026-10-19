@@ -368,7 +368,7 @@ fn pq_required() -> bool {
 }
 /// Implements the load step and keeps its validation and state transitions visible at the call site.
 fn load(p: &PathBuf) -> Result<NodeConfig> {
-    Ok(serde_yaml::from_str(&fs::read_to_string(p)?)?)
+    Ok(serde_saphyr::from_str(&fs::read_to_string(p)?)?)
 }
 /// Implements the validate pq step and keeps its validation and state transitions visible at the call site.
 fn validate_pq(c: &NodeConfig) -> Result<()> {
@@ -1586,6 +1586,57 @@ async fn volume_get(State(st): State<V6State>, Path(id): Path<String>) -> impl I
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+/// Return the small metadata envelope needed by block frontends without serializing every extent manifest.
+async fn volume_info(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st.meta.store.state().await.volumes.get(&id) {
+        Some(v) => Json(serde_json::json!({
+            "id": v.id,
+            "name": v.name,
+            "size_bytes": v.size_bytes,
+            "logical_block_bytes": v.logical_block_bytes,
+            "extent_bytes": v.extent_bytes,
+            "generation": v.generation,
+            "read_only": v.read_only,
+            "thin_provisioned": v.thin_provisioned,
+            "allocated_extents": v.extents.len()
+        }))
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Delete only an empty volume. Extents must be explicitly reclaimed before deleting metadata.
+async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let _serial = st.namespace_lock.lock().await;
+    let Some(volume) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if volume.persistent_reservation.reservation.is_some()
+        || !volume.persistent_reservation.registrations.is_empty()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "volume is still attached or has persistent-reservation registrations",
+        )
+            .into_response();
+    }
+    if !volume.extents.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            "volume contains allocated extents; reclaim data before deleting the volume",
+        )
+            .into_response();
+    }
+    match committed(&st, MetadataCommand::DeleteVolume { id }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
 /// Implements the volume create step and keeps its validation and state transitions visible at the call site.
 async fn volume_create(
     State(st): State<V6State>,
@@ -1598,13 +1649,22 @@ async fn volume_create(
     if let Err(e) = block::validate_create(&req) {
         return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
     }
+    // Serialize ID/name uniqueness checks with deletes and block writes.
+    let _serial = st.namespace_lock.lock().await;
     let id = req
         .id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let state = st.meta.store.state().await;
     if state.volumes.contains_key(&id) {
-        return (StatusCode::CONFLICT, "volume already exists").into_response();
+        return (StatusCode::CONFLICT, "volume ID already exists").into_response();
+    }
+    if state
+        .volumes
+        .values()
+        .any(|existing| existing.name == req.name)
+    {
+        return (StatusCode::CONFLICT, "volume name already exists").into_response();
     }
     drop(state);
     let v = VolumeRecord {
@@ -1647,6 +1707,15 @@ async fn volume_read(
     let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if block::presentation_requires_reservation(&v.presentations)
+        && v.persistent_reservation.reservation.is_none()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Kubernetes volume has no active persistent reservation",
+        )
+            .into_response();
+    }
     let initiator = headers
         .get("x-kagi-initiator")
         .and_then(|x| x.to_str().ok());
@@ -1674,6 +1743,18 @@ async fn volume_write(
     let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if v.read_only {
+        return (StatusCode::FORBIDDEN, "volume is read-only").into_response();
+    }
+    if block::presentation_requires_reservation(&v.presentations)
+        && v.persistent_reservation.reservation.is_none()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Kubernetes volume has no active persistent reservation",
+        )
+            .into_response();
+    }
     let initiator = headers
         .get("x-kagi-initiator")
         .and_then(|x| x.to_str().ok());
@@ -1778,6 +1859,18 @@ async fn volume_unmap(
     let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if v.read_only {
+        return (StatusCode::FORBIDDEN, "volume is read-only").into_response();
+    }
+    if block::presentation_requires_reservation(&v.presentations)
+        && v.persistent_reservation.reservation.is_none()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Kubernetes volume has no active persistent reservation",
+        )
+            .into_response();
+    }
     let initiator = headers
         .get("x-kagi-initiator")
         .and_then(|x| x.to_str().ok());
@@ -3618,7 +3711,8 @@ async fn main() -> Result<()> {
                 .route("/v1/snapshots/:id/object/*key", get(snapshot_object_get))
                 .route("/v1/maintenance/status", get(maintenance_status))
                 .route("/v1/volumes", get(volume_list).post(volume_create))
-                .route("/v1/volumes/:id", get(volume_get))
+                .route("/v1/volumes/:id", get(volume_get).delete(volume_delete))
+                .route("/v1/volumes/:id/info", get(volume_info))
                 .route("/v1/volumes/:id/data/:offset/:length", get(volume_read))
                 .route("/v1/volumes/:id/data/:offset", put(volume_write))
                 .route("/v1/volumes/:id/read-only", put(volume_readonly))
@@ -3855,7 +3949,7 @@ mod documented_config_tests {
     fn canonical_node_example_deserializes() {
         let input = include_str!("../../examples/node-v6.example.yaml");
         let config: NodeConfig =
-            serde_yaml::from_str(input).expect("examples/node-v6.example.yaml must stay valid");
+            serde_saphyr::from_str(input).expect("examples/node-v6.example.yaml must stay valid");
         assert_eq!(config.local_host, "host-a1");
         assert_eq!(config.cluster.transport.quic_min_bytes, 65_536);
         assert_eq!(config.telemetry.sample_interval_ms, 1_000);
@@ -3867,6 +3961,6 @@ mod documented_config_tests {
     fn unknown_node_option_is_rejected() {
         let input = include_str!("../../examples/node-v6.example.yaml");
         let mutated = format!("{input}\nnot_a_kagi_option: true\n");
-        assert!(serde_yaml::from_str::<NodeConfig>(&mutated).is_err());
+        assert!(serde_saphyr::from_str::<NodeConfig>(&mutated).is_err());
     }
 }

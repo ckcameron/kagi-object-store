@@ -96,7 +96,7 @@ pub struct ConsoleIdentity {
 /// Implements the load userdb step and keeps its validation and state transitions visible at the call site.
 pub fn load_userdb(path: &Path) -> Result<ConsoleUserDb> {
     match fs::read_to_string(path) {
-        Ok(s) => Ok(serde_yaml::from_str(&s).context("parse Kagi console userdb")?),
+        Ok(s) => Ok(serde_saphyr::from_str(&s).context("parse Kagi console userdb")?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ConsoleUserDb::default()),
         Err(e) => Err(e.into()),
     }
@@ -128,7 +128,7 @@ pub fn upsert_user(path: &Path, username: &str, password: &str, role: ConsoleRol
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, serde_yaml::to_string(&db)?)?;
+    fs::write(&tmp, serde_saphyr::to_string(&db)?)?;
     fs::rename(tmp, path)?;
     Ok(())
 }

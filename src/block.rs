@@ -257,6 +257,11 @@ pub enum VolumePresentation {
     Vhdx,
     Kubernetes,
 }
+/// Kubernetes-managed volumes must have an active persistent reservation before data I/O.
+pub fn presentation_requires_reservation(presentations: &[VolumePresentation]) -> bool {
+    presentations.contains(&VolumePresentation::Kubernetes)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// Kagi state or configuration used by the VolumeExtent path.
 pub struct VolumeExtent {
@@ -501,6 +506,30 @@ pub fn make_scsi_identity(id: &str) -> ScsiIdentity {
 mod tests {
     use super::*;
     #[test]
+    fn pr_api_json_matches_csi_client_contract() {
+        let register = serde_json::to_value(PrOut::Register {
+            initiator: "k8s:node-a".into(),
+            current_key: 0,
+            new_key: 7,
+            aptpl: false,
+            ignore_existing: false,
+        })
+        .unwrap();
+        assert_eq!(register["action"], "register");
+        assert_eq!(register["initiator"], "k8s:node-a");
+        assert_eq!(register["new_key"], 7);
+
+        let reserve = serde_json::to_value(PrOut::Reserve {
+            initiator: "k8s:node-a".into(),
+            key: 7,
+            reservation_type: PrType::ExclusiveAccess,
+        })
+        .unwrap();
+        assert_eq!(reserve["action"], "reserve");
+        assert_eq!(reserve["reservation_type"], "exclusive_access");
+    }
+
+    #[test]
     fn pr_register_reserve_and_release() {
         let mut pr = PersistentReservation::default();
         apply_pr_out(
@@ -617,6 +646,17 @@ mod tests {
         v.logical_block_bytes = 1000;
         assert!(validate_create(&v).is_err());
     }
+    #[test]
+    fn kubernetes_presentation_requires_active_reservation() {
+        assert!(presentation_requires_reservation(&[
+            VolumePresentation::Kubernetes
+        ]));
+        assert!(!presentation_requires_reservation(&[
+            VolumePresentation::Nbd
+        ]));
+        assert!(!presentation_requires_reservation(&[]));
+    }
+
     #[test]
     fn scsi_identity_is_stable() {
         assert_eq!(

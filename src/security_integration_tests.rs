@@ -8,7 +8,7 @@ pub(crate) async fn fixture() -> (V6State, PathBuf) {
     let root = std::env::temp_dir().join(format!("kagi-security-test-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let mut cfg: NodeConfig =
-        serde_yaml::from_str(include_str!("../examples/node-v6.example.yaml")).unwrap();
+        serde_saphyr::from_str(include_str!("../examples/node-v6.example.yaml")).unwrap();
     cfg.data_root = root.clone();
     cfg.cluster.metadata_key_b64 = Some(base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -22,7 +22,7 @@ pub(crate) async fn fixture() -> (V6State, PathBuf) {
         host.quic_endpoint = None;
     }
     cfg.web_console.userdb = root.join("users.yaml");
-    cfg.security = serde_yaml::from_str("objects:\n - {key: secret, recursive: true, operations: [all], decision: deny}\n - {key: classified, recursive: true, privileged_only: true, operations: [all], decision: deny}\n").unwrap();
+    cfg.security = serde_saphyr::from_str("objects:\n - {key: secret, recursive: true, operations: [all], decision: deny}\n - {key: classified, recursive: true, privileged_only: true, operations: [all], decision: deny}\n").unwrap();
     webui::upsert_user(
         &cfg.web_console.userdb,
         "viewer",

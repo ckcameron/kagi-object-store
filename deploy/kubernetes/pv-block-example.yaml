@@ -1,34 +1,31 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
-# Attach the Kagi volume to a Kubernetes worker with scripts/kagi-volume-attach first.
-# This presents the resulting /dev/nbd device as a raw Block PersistentVolume.
+# Static CSI claim for an existing Kagi volume. Replace the volume ID and API endpoint.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: keyspace-block-example
+  name: kagi-existing-block
 spec:
   capacity:
     storage: 100Gi
   volumeMode: Block
   accessModes: [ReadWriteOnce]
   persistentVolumeReclaimPolicy: Retain
-  local:
-    path: /dev/nbd0
-  nodeAffinity:
-    required:
-      nodeSelectorTerms:
-      - matchExpressions:
-        - key: kubernetes.io/hostname
-          operator: In
-          values: [REPLACE_WITH_NODE]
+  storageClassName: ""
+  csi:
+    driver: csi.kagi.io
+    volumeHandle: REPLACE_WITH_KAGI_VOLUME_ID
+    volumeAttributes:
+      apiEndpoint: http://kagi-cluster-host.kagi-system.svc.cluster.local:7400
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: keyspace-block-example
+  name: kagi-existing-block
 spec:
   volumeMode: Block
   accessModes: [ReadWriteOnce]
   resources:
     requests:
       storage: 100Gi
-  volumeName: keyspace-block-example
+  storageClassName: ""
+  volumeName: kagi-existing-block
