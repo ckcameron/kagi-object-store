@@ -62,10 +62,8 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(state)
 			return
 		}
-		var op map[string]json.RawMessage
-		if err:=json.NewDecoder(r.Body).Decode(&op);err!=nil{http.Error(w,err.Error(),400);return}
-		var action string
 		var payload struct {
+			Action string `json:"action"`
 			Initiator string `json:"initiator"`
 			CurrentKey uint64 `json:"current_key"`
 			NewKey uint64 `json:"new_key"`
@@ -74,8 +72,8 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 			APTPL bool `json:"aptpl"`
 			IgnoreExisting bool `json:"ignore_existing"`
 		}
-		for name,raw:=range op { action=name; if err:=json.Unmarshal(raw,&payload);err!=nil{http.Error(w,err.Error(),400);return} }
-		switch action {
+		if err:=json.NewDecoder(r.Body).Decode(&payload);err!=nil{http.Error(w,err.Error(),400);return}
+		switch payload.Action {
 		case "register":
 			if registrations[payload.Initiator] != payload.CurrentKey { http.Error(w,"key mismatch",http.StatusConflict);return }
 			if payload.NewKey==0 { delete(registrations,payload.Initiator) } else { registrations[payload.Initiator]=payload.NewKey }
