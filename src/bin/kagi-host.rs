@@ -331,7 +331,7 @@ fn validate(cfg: &Config) -> Result<()> {
 }
 /// Implements the load step and keeps its validation and state transitions visible at the call site.
 fn load(path: &PathBuf) -> Result<Config> {
-    serde_yaml::from_str(
+    serde_saphyr::from_str(
         &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
     )
     .context("parse host YAML")

@@ -70,13 +70,13 @@ rand_chacha = "0.3"
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde-saphyr = "1.3"
 statrs = { version = "0.18", default-features = false }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 base64 = "0.22"
 bytes = "1"
-rustls = { version = "0.23", features = ["aws_lc_rs", "prefer-post-quantum"] }
+rustls = { version = "0.23.46", features = ["aws_lc_rs", "prefer-post-quantum"] }
 tokio-rustls = "0.26"
 tower-http = { version = "0.6", features = ["trace"] }
 uuid = { version = "1", features = ["v4", "serde"] }
