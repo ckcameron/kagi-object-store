@@ -215,7 +215,8 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 	}
 	unlock := d.lock("volume:" + id)
 	defer unlock()
-	endpoint := endpointFromContext(req.GetVolumeContext(), d.endpoint)
+	// ControllerUnpublishVolumeRequest has no publish context; use the configured endpoint.
+	endpoint := d.endpoint
 	if endpoint == "" {
 		return nil, status.Error(codes.FailedPrecondition, "KAGI_API_ENDPOINT or volume apiEndpoint is required")
 	}
