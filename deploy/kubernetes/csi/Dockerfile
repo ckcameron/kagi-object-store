@@ -4,6 +4,7 @@ FROM rust:1-bookworm AS rust-build
 RUN apt-get update && apt-get install -y --no-install-recommends cmake pkg-config perl build-essential && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
+COPY benches ./benches
 COPY src ./src
 COPY vendor ./vendor
 RUN cargo build --release --locked --bin kagi-volume-nbd
