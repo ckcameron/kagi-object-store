@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 36518)
-Total output lines: 3966
-
 // SPDX-License-Identifier: CC-BY-NC-SA-4.0
 // Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi cluster daemon and administrative CLI.
@@ -895,7 +892,2357 @@ async fn fs_set_acl(
     {
         Ok(m) => match committed(
             &st,
-            Meta…21518 tokens truncated…rity.check(
+            MetadataCommand::PutManifest {
+                key: key.clone(),
+                manifest: m.clone(),
+            },
+        )
+        .await
+        {
+            Ok(_) => {
+                index_manifest(&st, &m).await;
+                Json(m).into_response()
+            }
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        },
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the index manifest step and keeps its validation and state transitions visible at the call site.
+async fn index_manifest(st: &V6State, m: &ObjectManifest) {
+    if let Some(fs) = &m.fs {
+        let _ = st
+            .fs_index
+            .upsert(IndexEntry {
+                path: fs.path.clone(),
+                key: m.key.clone(),
+                object_id: m.object_id.clone(),
+                version: m.version,
+                object_type: fs.object_type.clone(),
+                parent_key: fs.parent_key.clone(),
+                acl: fs.acl.clone(),
+                updated_ms: now_ms(),
+                origin: st.data.local_host.clone(),
+            })
+            .await;
+    }
+}
+/// Implements the fs mkdir step and keeps its validation and state transitions visible at the call site.
+async fn fs_mkdir(
+    State(st): State<V6State>,
+    Path(key): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<MkdirRequest>,
+) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let acl = req.acl.unwrap_or_else(|| default_acl(&headers));
+    let parent_key = parent_key_for(&key);
+    let parent = match &parent_key {
+        Some(p) => st.meta.store.get(p).await,
+        None => None,
+    };
+    if let Some(p) = &parent {
+        if p.fs.as_ref().map(|f| f.object_type.clone()) != Some(FsObjectType::Directory) {
+            return (StatusCode::CONFLICT, "parent is not a directory").into_response();
+        }
+        let id = AuthIdentity::from_headers(&headers);
+        if !id.allows(&p.fs.as_ref().unwrap().acl, "write_data")
+            && !id.allows(&p.fs.as_ref().unwrap().acl, "append_data")
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    let old_privileged = st
+        .meta
+        .store
+        .get(&key)
+        .await
+        .and_then(|m| m.fs)
+        .is_some_and(|m| m.privileged);
+    let privileged = headers
+        .get("x-kagi-privileged")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "true")
+        .unwrap_or(old_privileged);
+    let fs = FsMetadata {
+        privileged,
+        object_type: FsObjectType::Directory,
+        name: name_for(&key),
+        path: format!("/{}", key.trim_matches('/')),
+        parent_object_id: parent.as_ref().map(|m| m.object_id.clone()),
+        parent_key: parent_key.clone(),
+        children: vec![],
+        contents: vec![],
+        acl,
+    };
+    match put_filesystem_object(
+        &st.data,
+        &key,
+        &[],
+        Some(&st.health),
+        WormPolicy::default(),
+        fs,
+    )
+    .await
+    {
+        Ok(m) => match commit_child_parent(&st, m.clone()).await {
+            Ok(_) => (StatusCode::CREATED, Json(m)).into_response(),
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        },
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the fs index get step and keeps its validation and state transitions visible at the call site.
+async fn fs_index_get(State(st): State<V6State>) -> impl IntoResponse {
+    Json(st.fs_index.snapshot().await)
+}
+/// Implements the fs index merge step and keeps its validation and state transitions visible at the call site.
+async fn fs_index_merge(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Json(snap): Json<IndexSnapshot>,
+) -> impl IntoResponse {
+    if !verify_json(&st, &headers, "/internal/v1/fs-index/merge", &snap).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !request_authorized(&st.data.cfg, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match st.fs_index.merge(snap).await {
+        Ok(n) => Json(serde_json::json!( {
+            "merged":n
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+/// Implements the fs reconstruct step and keeps its validation and state transitions visible at the call site.
+async fn fs_reconstruct(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
+    let state = st.meta.store.state().await;
+    let Some(leaf) = state.manifests.get(&key) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    match reconstruct_bottom_up(leaf, &state.manifests) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
+    }
+}
+/// Implements the gossip fs index step and keeps its validation and state transitions visible at the call site.
+async fn gossip_fs_index(st: V6State) {
+    let mut t = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        t.tick().await;
+        let snap = st.fs_index.snapshot().await;
+        for h in &st.data.cfg.hosts {
+            if h.id == st.data.local_host {
+                continue;
+            }
+            if let Ok((body, auth)) =
+                signed_json(&st.data, "POST", "/internal/v1/fs-index/merge", &snap)
+            {
+                let b = st
+                    .data
+                    .client
+                    .post(format!(
+                        "{}/internal/v1/fs-index/merge",
+                        h.endpoint.trim_end_matches('/')
+                    ))
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body);
+                let _ = pq::apply_headers(b, auth).send().await;
+            }
+        }
+    }
+}
+/// Resolve native directory-backed Unix groups and optional AD SID principals.
+async fn identity_resolve(Path(user): Path<String>) -> impl IntoResponse {
+    match identity::resolve(user).await {
+        Ok(identity) => Json(identity).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)] // ---- Joint-consensus membership and post-quantum key administration ----------
+/// Kagi state or configuration used by the MembershipRequest path.
+struct MembershipRequest {
+    action: String,
+    scope: String,
+    id: String,
+    #[serde(default)]
+    members: Vec<RaftPeer>,
+}
+/// Implements the membership change step and keeps its validation and state transitions visible at the call site.
+async fn membership_change(
+    State(st): State<V6State>,
+    Json(req): Json<MembershipRequest>,
+) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let state = st.meta.store.state().await;
+    let mut m = if let Some(x) = state.membership {
+        x
+    } else {
+        let mut voters = BTreeMap::new();
+        voters.insert(
+            st.data.local_host.clone(),
+            RaftPeer {
+                id: st.data.local_host.clone(),
+                endpoint: String::new(),
+                site: None,
+                rack: None,
+                pq_public_key_b64: None,
+            },
+        );
+        for p in &st.meta.status().await.voters {
+            if p != &st.data.local_host {
+                if let Some(h) = st.data.cfg.hosts.iter().find(|h| &h.id == p) {
+                    voters.insert(
+                        p.clone(),
+                        RaftPeer {
+                            id: p.clone(),
+                            endpoint: h.endpoint.clone(),
+                            site: h.site.clone(),
+                            rack: h.rack.clone(),
+                            pq_public_key_b64: None,
+                        },
+                    );
+                }
+            }
+        }
+        Membership { voters }
+    };
+    let changed: Result<()> = match (req.action.as_str(), req.scope.as_str()) {
+        ("add", "node") => for_member_add(&st, &mut m, req.members.into_iter().next()).await,
+        ("add", "rack") | ("add", "site") => {
+            for x in req.members {
+                if let Err(e) = for_member_add(&st, &mut m, Some(x)).await {
+                    return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+                }
+            }
+            Ok(())
+        }
+        ("remove", "node") => {
+            m.voters.remove(&req.id);
+            Ok(())
+        }
+        ("remove", "rack") => {
+            m.voters
+                .retain(|_, p| p.rack.as_deref() != Some(req.id.as_str()));
+            Ok(())
+        }
+        ("remove", "site") => {
+            m.voters
+                .retain(|_, p| p.site.as_deref() != Some(req.id.as_str()));
+            Ok(())
+        }
+        _ => Err(anyhow::anyhow!(
+            "action must be add/remove and scope node/rack/site"
+        )),
+    };
+    if let Err(e) = changed {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    if m.voters.is_empty() {
+        return (StatusCode::BAD_REQUEST, "membership may not be empty").into_response();
+    }
+    match st.meta.change_membership(m).await {
+        Ok((a, b)) => Json(serde_json::json!( {
+            "joint_index":a,"final_index":b
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the for member add step and keeps its validation and state transitions visible at the call site.
+async fn for_member_add(st: &V6State, m: &mut Membership, member: Option<RaftPeer>) -> Result<()> {
+    let p = member.context("member required")?;
+    if p.endpoint.is_empty() {
+        anyhow::bail!("member endpoint required")
+    };
+    if let Some(pubk) = &p.pq_public_key_b64 {
+        let kid = pq::key_id_from_public_b64(pubk)?;
+        let key = TrustedPqKey {
+            node_id: p.id.clone(),
+            key_id: kid,
+            public_key_b64: pubk.clone(),
+            not_before_ms: now_ms(),
+            not_after_ms: None,
+            revoked: false,
+        };
+        st.meta
+            .propose(MetadataCommand::RotatePqKey {
+                key,
+                retiring: None,
+            })
+            .await?;
+    }
+    m.voters.insert(p.id.clone(), p);
+    Ok(())
+}
+#[derive(Debug, Clone, Serialize, Deserialize)] // ML-DSA trust rotation/revocation is committed through Raft so every voter
+                                                // evaluates the same active and retiring key set.
+struct RotatePqRequest {
+    node_id: String,
+    public_key_b64: String,
+    #[serde(default)]
+    retire_key_id: Option<String>,
+    #[serde(default = "default_pq_grace")]
+    grace_ms: u64,
+}
+/// Implements the default pq grace step and keeps its validation and state transitions visible at the call site.
+fn default_pq_grace() -> u64 {
+    300_000
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RevokePqRequest {
+    key_id: String,
+}
+/// Implements the pq rotate step and keeps its validation and state transitions visible at the call site.
+async fn pq_rotate(
+    State(st): State<V6State>,
+    Json(req): Json<RotatePqRequest>,
+) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let kid = match pq::key_id_from_public_b64(&req.public_key_b64) {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let now = now_ms();
+    let key = TrustedPqKey {
+        node_id: req.node_id,
+        key_id: kid.clone(),
+        public_key_b64: req.public_key_b64,
+        not_before_ms: now,
+        not_after_ms: None,
+        revoked: false,
+    };
+    let retire_after = req
+        .retire_key_id
+        .as_ref()
+        .map(|_| now.saturating_add(req.grace_ms as u128));
+    let retiring = if let Some(oldid) = &req.retire_key_id {
+        let mut old = st.data.pq_keys.keys.read().await.get(oldid).cloned();
+        if let Some(ref mut k) = old {
+            k.not_after_ms = retire_after;
+        }
+        old
+    } else {
+        None
+    };
+    match st
+        .meta
+        .propose(MetadataCommand::RotatePqKey { key, retiring })
+        .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "key_id":kid,"raft_index":i,"old_key_valid_until_ms":retire_after
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the pq revoke step and keeps its validation and state transitions visible at the call site.
+async fn pq_revoke(
+    State(st): State<V6State>,
+    Json(req): Json<RevokePqRequest>,
+) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st
+        .meta
+        .propose(MetadataCommand::RevokePqKey {
+            key_id: req.key_id,
+            revoked_at_ms: now_ms(),
+        })
+        .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "raft_index":i
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the pq keys get step and keeps its validation and state transitions visible at the call site.
+async fn pq_keys_get(State(st): State<V6State>) -> impl IntoResponse {
+    Json(st.meta.store.state().await.pq_keys)
+}
+/// Implements the raft vote step and keeps its validation and state transitions visible at the call site.
+async fn raft_vote(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<VoteRequest>,
+) -> impl IntoResponse {
+    if !verify_json(&st, &headers, "/internal/v1/raft/vote", &req).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !request_authorized(&st.data.cfg, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match st.meta.request_vote(req).await {
+        Ok(x) => Json(x).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+/// Implements the raft append step and keeps its validation and state transitions visible at the call site.
+async fn raft_append(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AppendRequest>,
+) -> impl IntoResponse {
+    if !verify_json(&st, &headers, "/internal/v1/raft/append", &req).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !request_authorized(&st.data.cfg, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match st.meta.append_entries(req).await {
+        Ok(x) => Json(x).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+/// Implements the raft status step and keeps its validation and state transitions visible at the call site.
+async fn raft_status(State(st): State<V6State>) -> impl IntoResponse {
+    Json(st.meta.status().await)
+}
+/// Implements the meta get step and keeps its validation and state transitions visible at the call site.
+async fn meta_get(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
+    match st.meta.store.get(&key).await {
+        Some(m) => Json(m).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Implements the v6 put step and keeps its validation and state transitions visible at the call site.
+async fn v6_put(
+    State(st): State<V6State>,
+    Path(key): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return (
+            StatusCode::TEMPORARY_REDIRECT,
+            format!(
+                "not raft leader; status={:?}",
+                st.meta.status().await.leader
+            ),
+        )
+            .into_response();
+    }
+    let explicit_worm = headers.contains_key("x-kagi-retention-mode")
+        || headers.contains_key("x-kagi-retain-until-ms")
+        || headers.contains_key("x-kagi-legal-hold");
+    let requested_mode = match headers
+        .get("x-kagi-retention-mode")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none")
+    {
+        "governance" => RetentionMode::Governance,
+        "compliance" => RetentionMode::Compliance,
+        _ => RetentionMode::None,
+    };
+    let requested_until = headers
+        .get("x-kagi-retain-until-ms")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u128>().ok());
+    let requested_hold = headers
+        .get("x-kagi-legal-hold")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+    let bucket_name = key.trim_matches('/').split('/').next().unwrap_or("");
+    let bucket_default = st
+        .meta
+        .store
+        .state()
+        .await
+        .buckets
+        .get(bucket_name)
+        .map(|b| b.default_worm.clone())
+        .unwrap_or_default();
+    let worm = if explicit_worm {
+        WormPolicy {
+            mode: requested_mode,
+            retain_until_unix_ms: requested_until,
+            legal_hold: requested_hold,
+        }
+    } else {
+        bucket_default
+    };
+    let parent_key = parent_key_for(&key);
+    let parent = match &parent_key {
+        Some(p) => st.meta.store.get(p).await,
+        None => None,
+    };
+    if let Some(p) = &parent {
+        if let Some(pfs) = &p.fs {
+            let ident = AuthIdentity::from_headers(&headers);
+            if !ident.allows(&pfs.acl, "write_data") && !ident.allows(&pfs.acl, "append_data") {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
+    let old_privileged = st
+        .meta
+        .store
+        .get(&key)
+        .await
+        .and_then(|m| m.fs)
+        .is_some_and(|m| m.privileged);
+    let privileged = headers
+        .get("x-kagi-privileged")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v == "true")
+        .unwrap_or(old_privileged);
+    let fs = FsMetadata {
+        privileged,
+        object_type: FsObjectType::File,
+        name: name_for(&key),
+        path: format!("/{}", key.trim_matches('/')),
+        parent_object_id: parent.as_ref().map(|m| m.object_id.clone()),
+        parent_key,
+        children: vec![],
+        contents: vec![],
+        acl: default_acl(&headers),
+    };
+    let data = effective_data(&st).await;
+    match put_filesystem_object(&data, &key, &body, Some(&st.health), worm, fs).await {
+        Ok(m) => match commit_child_parent(&st, m.clone()).await {
+            Ok(_) => (StatusCode::OK, Json(m)).into_response(),
+            Err(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("data written but namespace transaction failed: {e}"),
+            )
+                .into_response(),
+        },
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the v6 get step and keeps its validation and state transitions visible at the call site.
+async fn v6_get(
+    State(st): State<V6State>,
+    Path(key): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let Some(m) = st.meta.store.get(&key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if let Some(fs) = &m.fs {
+        if !AuthIdentity::from_headers(&headers).allows(&fs.acl, "read_data") {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    st.data.manifests.write().await.insert(key.clone(), m);
+    api_get(State(st.data), Path(key)).await.into_response()
+}
+/// Implements the v6 get version step and keeps its validation and state transitions visible at the call site.
+async fn v6_get_version(
+    State(st): State<V6State>,
+    Path((version, key)): Path<(u64, String)>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st.meta.store.get_version(&key, version).await {
+        Some(m) => match get_object_version(&st.data, &m).await {
+            Ok(v) => (StatusCode::OK, v).into_response(),
+            Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+        },
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Implements the v6 versions step and keeps its validation and state transitions visible at the call site.
+async fn v6_versions(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    Json(st.meta.store.versions(&key).await).into_response()
+}
+/// Implements the v6 delete step and keeps its validation and state transitions visible at the call site.
+async fn v6_delete(
+    State(st): State<V6State>,
+    Path(key): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    if let Some(m) = st.meta.store.get(&key).await {
+        if let Some(fs) = &m.fs {
+            if !AuthIdentity::from_headers(&headers).allows(&fs.acl, "delete") {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+        }
+    }
+    let v = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    match committed(
+        &st,
+        MetadataCommand::PutDeleteMarker {
+            key,
+            version: v,
+            created_unix_ms: v as u128 / 1_000_000,
+        },
+    )
+    .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the v6 delete version step and keeps its validation and state transitions visible at the call site.
+async fn v6_delete_version(
+    State(st): State<V6State>,
+    Path((version, key)): Path<(u64, String)>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let Some(m) = st.meta.store.get_version(&key, version).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let bypass = headers
+        .get("x-kagi-bypass-governance")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if m.worm.legal_hold {
+        return (StatusCode::LOCKED, "version is under legal hold").into_response();
+    }
+    if m.worm
+        .retain_until_unix_ms
+        .map(|x| x > now)
+        .unwrap_or(false)
+    {
+        match m.worm.mode {
+            RetentionMode::Compliance => {
+                return (StatusCode::LOCKED, "compliance retention is active").into_response()
+            }
+            RetentionMode::Governance if !bypass => {
+                return (
+                    StatusCode::LOCKED,
+                    "governance retention is active; privileged bypass required",
+                )
+                    .into_response()
+            }
+            _ => {}
+        }
+    }
+    let deleted_at = now;
+    let eligible_after = deleted_at.saturating_add(st.gc.grace_period_ms as u128);
+    match committed(
+        &st,
+        MetadataCommand::DeleteManifest {
+            key,
+            version,
+            deleted_at_unix_ms: deleted_at,
+            eligible_after_unix_ms: eligible_after,
+        },
+    )
+    .await
+    {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume list step and keeps its validation and state transitions visible at the call site.
+async fn volume_list(State(st): State<V6State>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    Json(st.meta.store.state().await.volumes).into_response()
+}
+/// Implements the volume get step and keeps its validation and state transitions visible at the call site.
+async fn volume_get(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st.meta.store.state().await.volumes.get(&id).cloned() {
+        Some(v) => Json(v).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Return the small metadata envelope needed by block frontends without serializing every extent manifest.
+async fn volume_info(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st.meta.store.state().await.volumes.get(&id) {
+        Some(v) => Json(serde_json::json!({
+            "id": v.id,
+            "name": v.name,
+            "size_bytes": v.size_bytes,
+            "logical_block_bytes": v.logical_block_bytes,
+            "extent_bytes": v.extent_bytes,
+            "generation": v.generation,
+            "read_only": v.read_only,
+            "thin_provisioned": v.thin_provisioned,
+            "allocated_extents": v.extents.len()
+        }))
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Delete only an empty volume. Extents must be explicitly reclaimed before deleting metadata.
+async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let _serial = st.namespace_lock.lock().await;
+    let Some(volume) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    if volume.persistent_reservation.reservation.is_some()
+        || !volume.persistent_reservation.registrations.is_empty()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "volume is still attached or has persistent-reservation registrations",
+        )
+            .into_response();
+    }
+    if !volume.extents.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            "volume contains allocated extents; reclaim data before deleting the volume",
+        )
+            .into_response();
+    }
+    match committed(&st, MetadataCommand::DeleteVolume { id }).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume create step and keeps its validation and state transitions visible at the call site.
+async fn volume_create(
+    State(st): State<V6State>,
+    Json(req): Json<VolumeCreate>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    if let Err(e) = block::validate_create(&req) {
+        return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    // Serialize ID/name uniqueness checks with deletes and block writes.
+    let _serial = st.namespace_lock.lock().await;
+    let id = req
+        .id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let state = st.meta.store.state().await;
+    if state.volumes.contains_key(&id) {
+        return (StatusCode::CONFLICT, "volume ID already exists").into_response();
+    }
+    if state
+        .volumes
+        .values()
+        .any(|existing| existing.name == req.name)
+    {
+        return (StatusCode::CONFLICT, "volume name already exists").into_response();
+    }
+    drop(state);
+    let v = VolumeRecord {
+        id: id.clone(),
+        name: req.name,
+        size_bytes: req.size_bytes,
+        logical_block_bytes: req.logical_block_bytes,
+        extent_bytes: req.extent_bytes,
+        generation: 0,
+        created_at_unix_ms: now_ms(),
+        read_only: false,
+        thin_provisioned: req.thin_provisioned,
+        scsi: block::make_scsi_identity(&id),
+        presentations: req.presentations,
+        extents: BTreeMap::new(),
+        persistent_reservation: Default::default(),
+    };
+    match committed(&st, MetadataCommand::CreateVolume { volume: v.clone() }).await {
+        Ok(i) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!( {
+                "volume":v,"raft_index":i
+            }
+            )),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume read step and keeps its validation and state transitions visible at the call site.
+async fn volume_read(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Path((id, offset, length)): Path<(String, u64, u64)>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if block::presentation_requires_reservation(&v.presentations)
+        && v.persistent_reservation.reservation.is_none()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Kubernetes volume has no active persistent reservation",
+        )
+            .into_response();
+    }
+    let initiator = headers
+        .get("x-kagi-initiator")
+        .and_then(|x| x.to_str().ok());
+    if !block::pr_allows_read(&v.persistent_reservation, initiator) {
+        return (StatusCode::CONFLICT, "SCSI reservation conflict").into_response();
+    }
+    let data = effective_data(&st).await;
+    match block::read_range(&data, &v, offset, length).await {
+        Ok(b) => (StatusCode::OK, b).into_response(),
+        Err(e) => (StatusCode::RANGE_NOT_SATISFIABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume write step and keeps its validation and state transitions visible at the call site.
+async fn volume_write(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Path((id, offset)): Path<(String, u64)>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let _serial = st.namespace_lock.lock().await;
+    let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if v.read_only {
+        return (StatusCode::FORBIDDEN, "volume is read-only").into_response();
+    }
+    if block::presentation_requires_reservation(&v.presentations)
+        && v.persistent_reservation.reservation.is_none()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Kubernetes volume has no active persistent reservation",
+        )
+            .into_response();
+    }
+    let initiator = headers
+        .get("x-kagi-initiator")
+        .and_then(|x| x.to_str().ok());
+    if !block::pr_allows_write(&v.persistent_reservation, initiator) {
+        return (StatusCode::CONFLICT, "SCSI reservation conflict").into_response();
+    }
+    let generation = v.generation.saturating_add(1);
+    let data = effective_data(&st).await;
+    let extents = match block::stage_write(&data, &v, offset, &body, generation).await {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    match committed(
+        &st,
+        MetadataCommand::CommitVolumeWrite {
+            id: id.clone(),
+            generation,
+            extents,
+        },
+    )
+    .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "id":id,"generation":generation,"raft_index":i,"bytes":body.len()
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume readonly step and keeps its validation and state transitions visible at the call site.
+async fn volume_readonly(
+    State(st): State<V6State>,
+    Path(id): Path<String>,
+    Json(v): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let ro = v.get("read_only").and_then(|x| x.as_bool()).unwrap_or(true);
+    match committed(
+        &st,
+        MetadataCommand::SetVolumeReadOnly { id, read_only: ro },
+    )
+    .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "raft_index":i,"read_only":ro
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume resize step and keeps its validation and state transitions visible at the call site.
+async fn volume_resize(
+    State(st): State<V6State>,
+    Path(id): Path<String>,
+    Json(v): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let Some(size) = v.get("size_bytes").and_then(|x| x.as_u64()) else {
+        return (StatusCode::BAD_REQUEST, "size_bytes required").into_response();
+    };
+    let Some(cur) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if size < cur.size_bytes {
+        return (StatusCode::BAD_REQUEST, "online shrink is not supported").into_response();
+    }
+    match committed(
+        &st,
+        MetadataCommand::ResizeVolume {
+            id,
+            size_bytes: size,
+        },
+    )
+    .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "raft_index":i,"size_bytes":size
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume unmap step and keeps its validation and state transitions visible at the call site.
+async fn volume_unmap(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Path((id, offset, length)): Path<(String, u64, u64)>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let _serial = st.namespace_lock.lock().await;
+    let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if v.read_only {
+        return (StatusCode::FORBIDDEN, "volume is read-only").into_response();
+    }
+    if block::presentation_requires_reservation(&v.presentations)
+        && v.persistent_reservation.reservation.is_none()
+    {
+        return (
+            StatusCode::CONFLICT,
+            "Kubernetes volume has no active persistent reservation",
+        )
+            .into_response();
+    }
+    let initiator = headers
+        .get("x-kagi-initiator")
+        .and_then(|x| x.to_str().ok());
+    if !block::pr_allows_write(&v.persistent_reservation, initiator) {
+        return (StatusCode::CONFLICT, "SCSI reservation conflict").into_response();
+    }
+    let generation = v.generation.saturating_add(1);
+    let data = effective_data(&st).await;
+    let (remove, replace) = match block::stage_unmap(&data, &v, offset, length, generation).await {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    match committed(
+        &st,
+        MetadataCommand::UnmapVolume {
+            id,
+            generation,
+            remove,
+            replace,
+        },
+    )
+    .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "raft_index":i,"generation":generation
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the volume pr in step and keeps its validation and state transitions visible at the call site.
+async fn volume_pr_in(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    match st.meta.store.state().await.volumes.get(&id).cloned() {
+        Some(v) => Json(block::PrIn {
+            generation: v.persistent_reservation.generation,
+            registrations: v.persistent_reservation.registrations,
+            reservation: v.persistent_reservation.reservation,
+        })
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Implements the volume pr out step and keeps its validation and state transitions visible at the call site.
+async fn volume_pr_out(
+    State(st): State<V6State>,
+    Path(id): Path<String>,
+    Json(op): Json<PrOut>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let _serial = st.namespace_lock.lock().await;
+    let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut trial = v.persistent_reservation.clone();
+    if let Err(e) = block::apply_pr_out(&mut trial, &op) {
+        return (StatusCode::CONFLICT, e.to_string()).into_response();
+    }
+    match committed(
+        &st,
+        MetadataCommand::PersistentReserveOut {
+            id,
+            expected_generation: v.persistent_reservation.generation,
+            op,
+        },
+    )
+    .await
+    {
+        Ok(i) => Json(serde_json::json!( {
+            "raft_index":i,"pr_generation":trial.generation
+        }
+        ))
+        .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+#[cfg(feature = "scsi-target")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrCdbRequest {
+    cdb: Vec<u8>,
+    #[serde(default)]
+    parameters: Vec<u8>,
+    initiator: String,
+}
+
+/// Administrative target bridge for SCSI PR CDBs. Uses the existing replicated
+/// reservation transaction, including conflict checks and generation fencing.
+#[cfg(feature = "scsi-target")]
+async fn volume_pr_cdb(
+    State(st): State<V6State>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PrCdbRequest>,
+) -> Response {
+    if console_auth(&st, &headers, true).is_none() {
+        return webui::unauthorized();
+    }
+    if req.initiator.is_empty() || req.initiator.len() > 1024 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match req.cdb.first() {
+        Some(&scsi_pr::OP_PERSISTENT_RESERVE_OUT) => {
+            match scsi_pr::decode_pr_out(&req.cdb, &req.parameters, &req.initiator) {
+                Ok(op) => volume_pr_out(State(st), Path(id), Json(op))
+                    .await
+                    .into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            }
+        }
+        Some(&scsi_pr::OP_PERSISTENT_RESERVE_IN) => {
+            let index = st.meta.status().await.commit_index;
+            if st.meta.linearizable_barrier(index).await.is_err() {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            let Some(v) = st.meta.store.state().await.volumes.get(&id).cloned() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let state = block::PrIn {
+                generation: v.persistent_reservation.generation,
+                registrations: v.persistent_reservation.registrations,
+                reservation: v.persistent_reservation.reservation,
+            };
+            match scsi_pr::encode_pr_in(&req.cdb, &state) {
+                Ok(bytes) => (
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+            }
+        }
+        _ => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+/// Bind a destructive GC fence to one recorded local replica and recheck retention
+/// against the currently applied metadata. A record ID alone is not authorization
+/// to delete an arbitrary path supplied by a worker.
+fn gc_delete_authorized(
+    ms: &raftmeta::MetadataState,
+    req: &GcDeleteRequest,
+    local_host: &str,
+    now: u128,
+) -> bool {
+    let Some(g) = ms.garbage.get(&req.garbage_id) else {
+        return false;
+    };
+    if req.fence_index == 0
+        || ms.applied_index < req.fence_index
+        || g.fence_index != req.fence_index
+        || g.id != req.garbage_id
+        || g.manifest.object_id != req.object_id
+        || g.version != req.version
+        || g.manifest.version != req.version
+        || g.eligible_after_unix_ms > now
+        || g.manifest.worm.immutable(now)
+    {
+        return false;
+    }
+    let matches = |m: &ObjectManifest| m.object_id == req.object_id && m.version == req.version;
+    if ms.manifests.values().any(matches)
+        || ms.versions.values().flatten().any(matches)
+        || ms
+            .s3_uploads
+            .values()
+            .any(|u| u.parts.values().any(|p| matches(&p.manifest)))
+        || ms.snapshots.values().any(|snapshot| {
+            snapshot.objects.values().any(|object| {
+                ((snapshot.mode != SnapshotMode::Archived || object.archived.is_none())
+                    && matches(&object.source))
+                    || object.archived.as_ref().is_some_and(matches)
+            })
+        })
+    {
+        return false;
+    }
+    normalize_chunks(&g.manifest).iter().any(|chunk| {
+        chunk.chunk == req.fragment
+            && chunk
+                .replicas
+                .iter()
+                .any(|replica| replica.host == local_host && replica.disk == req.disk)
+    })
+}
+
+/// Implements the gc delete in step and keeps its validation and state transitions visible at the call site.
+async fn gc_delete_in(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<GcDeleteRequest>,
+) -> impl IntoResponse {
+    if !verify_json(&st, &headers, "/internal/v1/gc/delete", &req).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !request_authorized(&st.data.cfg, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let status = st.meta.status().await;
+    if status.term != req.term || status.leader.as_deref() != Some(req.leader_id.as_str()) {
+        return (StatusCode::CONFLICT, "stale or non-leader GC fence").into_response();
+    }
+    let ms = st.meta.store.state().await;
+    if !gc_delete_authorized(&ms, &req, &st.data.local_host, now_ms()) {
+        return (
+            StatusCode::CONFLICT,
+            "GC fence does not authorize this unreferenced, retention-eligible local replica",
+        )
+            .into_response();
+    }
+    let p = fragment_path(
+        &st.data.root,
+        &req.disk,
+        &req.object_id,
+        req.version,
+        req.fragment,
+    );
+    match tokio::fs::remove_file(&p).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+/// Implements the gc status step and keeps its validation and state transitions visible at the call site.
+async fn gc_status(State(st): State<V6State>) -> impl IntoResponse {
+    let state = st.meta.store.state().await;
+    Json(state.garbage).into_response()
+}
+/// Implements the delete gc replica step and keeps its validation and state transitions visible at the call site.
+async fn delete_gc_replica(
+    st: &V6State,
+    g: &GarbageRecord,
+    chunk: u32,
+    r: &FragmentReplica,
+    term: u64,
+) -> Result<()> {
+    let req = GcDeleteRequest {
+        term,
+        leader_id: st.meta.node_id.clone(),
+        garbage_id: g.id.clone(),
+        fence_index: g.fence_index,
+        object_id: g.manifest.object_id.clone(),
+        version: g.version,
+        fragment: chunk,
+        disk: r.disk.clone(),
+    };
+    if r.host == st.data.local_host {
+        let status = st.meta.status().await;
+        anyhow::ensure!(
+            st.meta.is_leader().await
+                && status.term == req.term
+                && status.leader.as_deref() == Some(req.leader_id.as_str()),
+            "stale or non-leader GC fence"
+        );
+        let ms = st.meta.store.state().await;
+        anyhow::ensure!(
+            gc_delete_authorized(&ms, &req, &st.data.local_host, now_ms()),
+            "GC fence does not authorize this local replica"
+        );
+
+        let p = fragment_path(
+            &st.data.root,
+            &r.disk,
+            &g.manifest.object_id,
+            g.version,
+            chunk,
+        );
+        match tokio::fs::remove_file(p).await {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    } else {
+        let peer = st
+            .data
+            .cfg
+            .hosts
+            .iter()
+            .find(|h| h.id == r.host)
+            .context("GC replica host missing from topology")?;
+        let u = format!(
+            "{}/internal/v1/gc/delete",
+            peer.endpoint.trim_end_matches('/')
+        );
+        let (body, auth) = signed_json(&st.data, "POST", "/internal/v1/gc/delete", &req)?;
+        let resp = pq::apply_headers(
+            st.data
+                .client
+                .post(u)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body),
+            auth,
+        )
+        .send()
+        .await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "GC delete {}/{} chunk {} failed: {}",
+                r.host,
+                r.disk,
+                chunk,
+                resp.status()
+            )
+        }
+    }
+}
+/// Implements the run garbage collector step and keeps its validation and state transitions visible at the call site.
+async fn run_garbage_collector(st: V6State) {
+    if !st.gc.enabled {
+        return;
+    }
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+        st.gc.interval_ms.max(1000),
+    ));
+    loop {
+        tick.tick().await;
+        if !st.meta.is_leader().await {
+            continue;
+        }
+        let status = st.meta.status().await;
+        let term = status.term;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let ms = st.meta.store.state().await;
+        let pinned: std::collections::BTreeSet<(String, u64)> = ms
+            .snapshots
+            .values()
+            .filter(|x| x.mode != SnapshotMode::Archived)
+            .flat_map(|x| {
+                x.objects
+                    .values()
+                    .map(|o| (o.source.object_id.clone(), o.version))
+            })
+            .collect();
+        let pending = ms
+            .garbage
+            .into_values()
+            .filter(|g| {
+                g.eligible_after_unix_ms <= now
+                    && !pinned.contains(&(g.manifest.object_id.clone(), g.version))
+            })
+            .take(st.gc.max_versions_per_cycle)
+            .collect::<Vec<_>>();
+        for g in pending {
+            let Ok(_permit) = st
+                .maintenance
+                .acquire("garbage_collection", g.manifest.bytes.min(64 * 1024 * 1024))
+                .await
+            else {
+                break;
+            };
+            let started = std::time::Instant::now();
+            st.maintenance.charge_network(g.manifest.bytes).await;
+            if !st.meta.is_leader().await || st.meta.status().await.term != term {
+                break;
+            }
+            // Defense in depth: a queued record is never reclaimed while its captured WORM policy is active.
+            if g.manifest.worm.immutable(now) {
+                continue;
+            }
+            // Commit a per-record destructive-operation fence before touching bytes.
+            // Followers must have applied this exact authorization index before accepting deletion.
+            let fence_index = match st
+                .meta
+                .propose(MetadataCommand::AuthorizeGarbage { id: g.id.clone() })
+                .await
+            {
+                Ok(i) => i,
+                Err(_) => break,
+            };
+            let mut g = g;
+            g.fence_index = fence_index;
+            let mut err = None;
+            for c in normalize_chunks(&g.manifest) {
+                for r in &c.replicas {
+                    if let Err(e) = delete_gc_replica(&st, &g, c.chunk, r, term).await {
+                        err = Some(e.to_string());
+                        break;
+                    }
+                }
+                if err.is_some() {
+                    break;
+                }
+            }
+            if !st.meta.is_leader().await || st.meta.status().await.term != term {
+                break;
+            }
+            match err {
+                Some(error) => {
+                    let _ = st
+                        .meta
+                        .propose(MetadataCommand::GarbageFailed {
+                            id: g.id.clone(),
+                            error,
+                        })
+                        .await;
+                }
+                None => {
+                    let _ = st
+                        .meta
+                        .propose(MetadataCommand::GarbageCollected { id: g.id.clone() })
+                        .await;
+                }
+            }
+            st.maintenance.cpu_yield(started.elapsed()).await;
+        }
+    }
+}
+/// Implements the snapshot create step and keeps its validation and state transitions visible at the call site.
+async fn snapshot_create(
+    State(st): State<V6State>,
+    Json(req): Json<SnapshotCreateRequest>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "snapshot creation requires Raft leader",
+        )
+            .into_response();
+    }
+    let ms = st.meta.store.state().await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let prefix = req.prefix.clone();
+    let mut objects = BTreeMap::new();
+    let mut logical = 0u64;
+    for (k, m) in ms.manifests.iter() {
+        if prefix.as_ref().map(|p| k.starts_with(p)).unwrap_or(true) {
+            logical = logical.saturating_add(m.bytes);
+            objects.insert(
+                k.clone(),
+                SnapshotObject {
+                    key: k.clone(),
+                    version: m.version,
+                    source: m.clone(),
+                    archived: None,
+                },
+            );
+        }
+    }
+    let snap = SnapshotRecord {
+        id: id.clone(),
+        name: req.name.unwrap_or_else(|| id.clone()),
+        created_at_unix_ms: now_ms(),
+        raft_index: ms.applied_index,
+        prefix,
+        mode: SnapshotMode::PointInTime,
+        objects,
+        logical_bytes: logical,
+        delta_bytes: 0,
+        archived_bytes: 0,
+    };
+    match committed(
+        &st,
+        MetadataCommand::CreateSnapshot {
+            snapshot: snap.clone(),
+        },
+    )
+    .await
+    {
+        Ok(_) => (StatusCode::OK, Json(snap)).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the snapshot list step and keeps its validation and state transitions visible at the call site.
+async fn snapshot_list(State(st): State<V6State>) -> impl IntoResponse {
+    Json(st.meta.store.state().await.snapshots).into_response()
+}
+/// Implements the snapshot get step and keeps its validation and state transitions visible at the call site.
+async fn snapshot_get(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    match st.meta.store.state().await.snapshots.get(&id).cloned() {
+        Some(x) => Json(x).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+/// Implements the snapshot object get step and keeps its validation and state transitions visible at the call site.
+async fn snapshot_object_get(
+    State(st): State<V6State>,
+    Path((id, key)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let key = key.trim_start_matches('/');
+    let ms = st.meta.store.state().await;
+    let Some(s) = ms.snapshots.get(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(o) = s.objects.get(key) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let m = o.archived.as_ref().unwrap_or(&o.source);
+    match get_object_version(&st.data, m).await {
+        Ok(v) => (StatusCode::OK, v).into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the materialize snapshot step and keeps its validation and state transitions visible at the call site.
+async fn materialize_snapshot(st: &V6State, id: &str) -> Result<()> {
+    let snap = st
+        .meta
+        .store
+        .state()
+        .await
+        .snapshots
+        .get(id)
+        .cloned()
+        .context("snapshot not found")?;
+    if snap.mode == SnapshotMode::Archived {
+        return Ok(());
+    }
+    st.meta
+        .propose(MetadataCommand::BeginSnapshotArchive { id: id.into() })
+        .await?;
+    for (key, o) in snap.objects {
+        if o.archived.is_some() {
+            continue;
+        }
+        let data = get_object_version(&st.data, &o.source).await?;
+        let hidden = format!(
+            ".kagi/archive/{}/{}",
+            id,
+            blake3::hash(key.as_bytes()).to_hex()
+        );
+        let mut m = put_object(&st.data, &hidden, &data).await?;
+        m.key = key.clone();
+        st.meta
+            .propose(MetadataCommand::ArchiveSnapshotObject {
+                id: id.into(),
+                key,
+                manifest: m,
+            })
+            .await?;
+    }
+    st.meta
+        .propose(MetadataCommand::FinishSnapshotArchive { id: id.into() })
+        .await?;
+    Ok(())
+}
+/// Implements the snapshot archive step and keeps its validation and state transitions visible at the call site.
+async fn snapshot_archive(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    match materialize_snapshot(&st, &id).await {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the run snapshot controller step and keeps its validation and state transitions visible at the call site.
+async fn run_snapshot_controller(st: V6State) {
+    if !st.snapshots.enabled {
+        return;
+    }
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+        st.snapshots.check_interval_ms.max(1000),
+    ));
+    loop {
+        tick.tick().await;
+        if !st.meta.is_leader().await {
+            continue;
+        }
+        let ms = st.meta.store.state().await;
+        for snap in ms
+            .snapshots
+            .values()
+            .filter(|x| x.mode == SnapshotMode::PointInTime)
+        {
+            let mut delta = 0u64;
+            for (k, o) in &snap.objects {
+                if ms.manifests.get(k).map(|m| m.version) != Some(o.version) {
+                    delta = delta.saturating_add(o.source.bytes)
+                }
+            }
+            if delta != snap.delta_bytes {
+                let _ = st
+                    .meta
+                    .propose(MetadataCommand::UpdateSnapshotDelta {
+                        id: snap.id.clone(),
+                        delta_bytes: delta,
+                    })
+                    .await;
+            }
+            let ratio = if snap.logical_bytes == 0 {
+                0.0
+            } else {
+                delta as f64 / snap.logical_bytes as f64
+            };
+            if delta >= st.snapshots.archive_after_delta_bytes
+                || ratio >= st.snapshots.archive_after_delta_ratio
+            {
+                if let Ok(_permit) = st
+                    .maintenance
+                    .acquire(
+                        "snapshot_archive",
+                        snap.logical_bytes.min(256 * 1024 * 1024),
+                    )
+                    .await
+                {
+                    let started = std::time::Instant::now();
+                    st.maintenance.charge_network(snap.logical_bytes).await;
+                    let _ = materialize_snapshot(&st, &snap.id).await;
+                    st.maintenance.cpu_yield(started.elapsed()).await;
+                }
+            }
+        }
+    }
+}
+/// Implements the user repair step and keeps its validation and state transitions visible at the call site.
+async fn user_repair(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    let data = effective_data(&st).await;
+    if let Some(m) = st.meta.store.get(&key).await {
+        data.manifests.write().await.insert(key.clone(), m);
+    }
+    match repair_object_with_health(&data, &key, &st.health).await {
+        Ok(m) => match committed(
+            &st,
+            MetadataCommand::PutManifest {
+                key: key.clone(),
+                manifest: m.clone(),
+            },
+        )
+        .await
+        {
+            Ok(i) => {
+                webui::append_log(
+                    &st.web_console.log_path,
+                    &st.data.local_host,
+                    &format!("repair key={key} raft_index={i}"),
+                );
+                (StatusCode::OK, Json(m)).into_response()
+            }
+            Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+        },
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
+    }
+}
+/// Implements the user scrub step and keeps its validation and state transitions visible at the call site.
+async fn user_scrub(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    match scrub_object(&st.data, &key).await {
+        Ok(x) => {
+            webui::append_log(
+                &st.web_console.log_path,
+                &st.data.local_host,
+                &format!("scrub key={key}"),
+            );
+            if x.values().any(|ok| !*ok) {
+                st.monitor.emit(
+                    "error",
+                    "integrity",
+                    &key,
+                    "scrub found an invalid or unavailable fragment",
+                );
+            }
+            Json(x).into_response()
+        }
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+/// Implements the maintenance status step and keeps its validation and state transitions visible at the call site.
+async fn maintenance_status(State(st): State<V6State>) -> impl IntoResponse {
+    Json(st.maintenance.status())
+}
+/// Implements the run background scrubber step and keeps its validation and state transitions visible at the call site.
+async fn run_background_scrubber(st: V6State) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+        st.maintenance.scrub_interval_ms().max(1000),
+    ));
+    loop {
+        tick.tick().await;
+        if !st.meta.is_leader().await || !st.maintenance.allowed_now("scrub") {
+            continue;
+        }
+        let manifests: Vec<_> = st
+            .meta
+            .store
+            .state()
+            .await
+            .manifests
+            .into_values()
+            .collect();
+        for m in manifests {
+            let Ok(_permit) = st
+                .maintenance
+                .acquire("scrub", m.bytes.min(256 * 1024 * 1024))
+                .await
+            else {
+                break;
+            };
+            let started = std::time::Instant::now();
+            st.maintenance.charge_network(m.bytes).await;
+            st.data
+                .manifests
+                .write()
+                .await
+                .insert(m.key.clone(), m.clone());
+            match scrub_object(&st.data, &m.key).await {
+                Ok(chunks) if chunks.values().all(|ok| *ok) => {}
+                Ok(_) => st.monitor.emit(
+                    "error",
+                    "integrity",
+                    &m.key,
+                    "background scrub found an invalid or unavailable fragment",
+                ),
+                Err(error) => st.monitor.emit(
+                    "error",
+                    "integrity",
+                    &m.key,
+                    &format!("background scrub failed: {error}"),
+                ),
+            }
+            st.maintenance.cpu_yield(started.elapsed()).await;
+        }
+    }
+}
+#[derive(Debug, Deserialize)]
+struct AddCapacityRequest {
+    disk: PeerDisk,
+}
+/// Implements the capacity add step and keeps its validation and state transitions visible at the call site.
+async fn capacity_add(
+    State(st): State<V6State>,
+    Path(host): Path<String>,
+    Json(req): Json<AddCapacityRequest>,
+) -> impl IntoResponse {
+    let _foreground = st.maintenance.foreground();
+    if !st.meta.is_leader().await {
+        return StatusCode::TEMPORARY_REDIRECT.into_response();
+    }
+    if !st.data.cfg.hosts.iter().any(|h| h.id == host) {
+        return (StatusCode::NOT_FOUND, "unknown host").into_response();
+    }
+    if req.disk.capacity_bytes == 0 || req.disk.weight <= 0.0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "capacity_bytes and weight must be positive",
+        )
+            .into_response();
+    }
+    if host == st.data.local_host {
+        let dh = storage::probe(
+            req.disk.device_path.as_deref(),
+            &req.disk.storage_kind,
+            req.disk.serial_number.as_deref(),
+            req.disk.wwn.as_deref(),
+        );
+        if !dh.ok {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "backend device health/identity check failed: {}",
+                    dh.reason.unwrap_or_else(|| "unknown".into())
+                ),
+            )
+                .into_response();
+        }
+    }
+    let epoch = st
+        .meta
+        .store
+        .state()
+        .await
+        .placement_epoch
+        .saturating_add(1);
+    match committed(&st,MetadataCommand::AddCapacity {
+        host:host.clone(),disk:req.disk.clone()
+    }
+    ).await {
+        Ok(_)=>match committed(&st,MetadataCommand::SetPlacementEpoch {
+            epoch
+        }
+        ).await {
+            Ok(i)=>(StatusCode::OK,Json(serde_json::json!( {
+                "host":host,"disk":req.disk,"placement_epoch":epoch,"raft_index":i,"rebalance":"scheduled"
+            }
+            ))).into_response(),Err(e)=>(StatusCode::SERVICE_UNAVAILABLE,e.to_string()).into_response()
+        },
+        Err(e)=>(StatusCode::SERVICE_UNAVAILABLE,e.to_string()).into_response()
+    }
+}
+/// Implements the capacity get step and keeps its validation and state transitions visible at the call site.
+async fn capacity_get(State(st): State<V6State>) -> impl IntoResponse {
+    Json(serde_json::json!( {
+        "placement_epoch":st.meta.store.state().await.placement_epoch,"capacity_additions":st.meta.store.state().await.capacity_additions
+    }
+    ))
+}
+// ---- Background durability, rebalance, snapshot, GC, and maintenance loops ----
+async fn run_rebalancer(st: V6State) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut completed_epoch = 0u64;
+    loop {
+        tick.tick().await;
+        if !st.meta.is_leader().await {
+            continue;
+        }
+        let ms = st.meta.store.state().await;
+        if ms.placement_epoch <= completed_epoch {
+            continue;
+        }
+        let epoch = ms.placement_epoch;
+        let manifests: Vec<_> = ms.manifests.values().cloned().collect();
+        drop(ms);
+        let data = effective_data(&st).await;
+        let mut complete = true;
+        for old in manifests {
+            let Ok(_permit) = st
+                .maintenance
+                .acquire("rebalance", old.bytes.min(256 * 1024 * 1024))
+                .await
+            else {
+                complete = false;
+                break;
+            };
+            let started = std::time::Instant::now();
+            st.maintenance.charge_network(old.bytes).await;
+            data.manifests
+                .write()
+                .await
+                .insert(old.key.clone(), old.clone());
+            match repair_object_with_health(&data, &old.key, &st.health).await {
+                Ok(new) => match committed(
+                    &st,
+                    MetadataCommand::PutManifest {
+                        key: old.key.clone(),
+                        manifest: new.clone(),
+                    },
+                )
+                .await
+                {
+                    Ok(_) => {
+                        let _ = cleanup_rebalanced_replicas(&data, &old, &new).await;
+                    }
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                },
+                Err(_) => {
+                    complete = false;
+                    break;
+                }
+            }
+            st.maintenance.cpu_yield(started.elapsed()).await;
+        }
+        if complete {
+            completed_epoch = epoch
+        }
+    }
+}
+/// Implements the run cluster controller step and keeps its validation and state transitions visible at the call site.
+async fn run_cluster_controller(st: V6State, cfg: NodeConfig) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(
+        cfg.recovery.repair_interval_ms,
+    ));
+    loop {
+        tick.tick().await;
+        if !st.meta.is_leader().await {
+            continue;
+        }
+        st.health.age(&cfg.cluster.hosts, &cfg.recovery).await;
+        let snap = st.health.snapshot().await;
+        for (resource, h) in &snap {
+            let _ = st
+                .meta
+                .propose(MetadataCommand::SetResourceHealth {
+                    resource: resource.clone(),
+                    health: h.clone(),
+                })
+                .await;
+        }
+        let manifests: Vec<_> = st.data.manifests.read().await.values().cloned().collect();
+        let mut ranked = Vec::new();
+        for m in manifests {
+            ranked.push((
+                object_risk(&m, &st.health, &cfg.cluster.hosts).await,
+                m.key.clone(),
+            ));
+        }
+        ranked.sort_by_key(|x| x.0);
+        for (risk, key) in ranked.into_iter().take(cfg.recovery.max_parallel_repairs) {
+            let bytes = st
+                .data
+                .manifests
+                .read()
+                .await
+                .get(&key)
+                .map(|m| m.bytes)
+                .unwrap_or(0);
+            if risk == 0 {
+                /* system-necessary durability repair: never waits on maintenance policy */
+                if let Ok(m) = repair_object_with_health(&st.data, &key, &st.health).await {
+                    let _ = st
+                        .meta
+                        .propose(MetadataCommand::PutManifest { key, manifest: m })
+                        .await;
+                }
+            } else if let Ok(_permit) = st
+                .maintenance
+                .acquire("proactive_repair", bytes.min(256 * 1024 * 1024))
+                .await
+            {
+                let started = std::time::Instant::now();
+                st.maintenance.charge_network(bytes).await;
+                if let Ok(m) = repair_object_with_health(&st.data, &key, &st.health).await {
+                    let _ = st
+                        .meta
+                        .propose(MetadataCommand::PutManifest { key, manifest: m })
+                        .await;
+                }
+                st.maintenance.cpu_yield(started.elapsed()).await;
+            }
+        }
+    }
+}
+/// Implements the heartbeat in step and keeps its validation and state transitions visible at the call site.
+async fn heartbeat_in(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Json(hb): Json<Heartbeat>,
+) -> impl IntoResponse {
+    if !verify_json(&st, &headers, "/internal/v1/health/heartbeat", &hb).await {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if !request_authorized(&st.data.cfg, &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    st.health.apply_heartbeat(&hb, &st.recovery).await;
+    StatusCode::NO_CONTENT
+}
+/// Implements the health clear step and keeps its validation and state transitions visible at the call site.
+async fn health_clear(
+    State(st): State<V6State>,
+    Path(resource): Path<String>,
+) -> impl IntoResponse {
+    let resource = resource.trim_start_matches('/');
+    if st.health.clear_flap(resource).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+/// Implements the health get step and keeps its validation and state transitions visible at the call site.
+async fn health_get(State(st): State<V6State>) -> impl IntoResponse {
+    Json(st.health.snapshot().await)
+}
+/// Implements the send heartbeats step and keeps its validation and state transitions visible at the call site.
+async fn send_heartbeats(st: V6State, cfg: NodeConfig) {
+    let period = std::time::Duration::from_millis(cfg.recovery.heartbeat_ms);
+    let mut tick = tokio::time::interval(period);
+    loop {
+        tick.tick().await;
+        let mut disks = BTreeMap::new();
+        let mut disk_serials = BTreeMap::new();
+        let mut disk_media_errors = BTreeMap::new();
+        let mut disk_critical_warning = BTreeMap::new();
+        if let Some(h) = cfg.cluster.hosts.iter().find(|h| h.id == cfg.local_host) {
+            for d in &h.disks {
+                let p = cfg.data_root.join("disks").join(&d.id);
+                let fs_ok = tokio::fs::create_dir_all(&p).await.is_ok()
+                    && tokio::fs::metadata(&p).await.is_ok();
+                let dh = storage::probe(
+                    d.device_path.as_deref(),
+                    &d.storage_kind,
+                    d.serial_number.as_deref(),
+                    d.wwn.as_deref(),
+                );
+                disks.insert(d.id.clone(), fs_ok && dh.ok);
+                if let Some(x) = dh.serial {
+                    disk_serials.insert(d.id.clone(), x);
+                }
+                disk_media_errors.insert(
+                    d.id.clone(),
+                    dh.media_errors
+                        .saturating_add(dh.pending_sectors)
+                        .saturating_add(dh.uncorrectable_sectors),
+                );
+                disk_critical_warning.insert(
+                    d.id.clone(),
+                    dh.critical_warning
+                        .saturating_add(if dh.smart_passed == Some(false) { 1 } else { 0 }),
+                );
+            }
+        }
+        let hb = Heartbeat {
+            host: cfg.local_host.clone(),
+            boot_id: std::process::id().to_string(),
+            disks,
+            disk_serials,
+            disk_media_errors,
+            disk_critical_warning,
+            free_bytes: BTreeMap::new(),
+            io_pressure: 0.0,
+            unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        };
+        st.health.apply_heartbeat(&hb, &cfg.recovery).await;
+        for h in &cfg.cluster.hosts {
+            if h.id == cfg.local_host {
+                continue;
+            }
+            let u = format!(
+                "{}/internal/v1/health/heartbeat",
+                h.endpoint.trim_end_matches('/')
+            );
+            if let Ok((body, auth)) =
+                signed_json(&st.data, "POST", "/internal/v1/health/heartbeat", &hb)
+            {
+                let b = st
+                    .data
+                    .client
+                    .post(u)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(body);
+                let _ = pq::apply_headers(b, auth).send().await;
+            }
+        }
+    }
+}
+// ---- Kagi web operations console -------------------------------------------
+fn console_auth(
+    st: &V6State,
+    headers: &axum::http::HeaderMap,
+    admin: bool,
+) -> Option<webui::ConsoleIdentity> {
+    webui::authenticate_basic(headers, &st.web_console.userdb, admin)
+}
+/// Implements the kagi root step and keeps its validation and state transitions visible at the call site.
+async fn kagi_root() -> Redirect {
+    Redirect::temporary("/ui")
+}
+/// Implements the kagi ui step and keeps its validation and state transitions visible at the call site.
+async fn kagi_ui(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
+    if !st.web_console.enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if console_auth(&st, &headers, false).is_none() {
+        return webui::unauthorized();
+    }
+    Html(webui::INDEX_HTML).into_response()
+}
+/// Implements the host site rack step and keeps its validation and state transitions visible at the call site.
+fn host_site_rack(st: &V6State) -> (Option<String>, Option<String>) {
+    st.data
+        .cfg
+        .hosts
+        .iter()
+        .find(|h| h.id == st.data.local_host)
+        .map(|h| (h.site.clone(), h.rack.clone()))
+        .unwrap_or_default()
+}
+/// Implements the local console summary step and keeps its validation and state transitions visible at the call site.
+async fn local_console_summary(st: &V6State) -> serde_json::Value {
+    let ms = st.meta.store.state().await;
+    let raft = st.meta.status().await;
+    let hs = st.health.snapshot().await;
+    let objects = ms.manifests.len();
+    let logical_bytes = ms.manifests.values().map(|m| m.bytes).sum::<u64>();
+    let fragments = ms
+        .manifests
+        .values()
+        .map(|m| {
+            cluster::normalize_chunks(m)
+                .iter()
+                .map(|c| c.replicas.len())
+                .sum::<usize>()
+        })
+        .sum::<usize>();
+    let physical_bytes = ms
+        .manifests
+        .values()
+        .map(|m| {
+            cluster::normalize_chunks(m)
+                .iter()
+                .map(|c| c.bytes.saturating_mul(c.replicas.len() as u64))
+                .sum::<u64>()
+        })
+        .sum::<u64>();
+    let healthy = hs
+        .values()
+        .filter(|x| {
+            matches!(
+                x.state,
+                recovery::ResourceState::Healthy | recovery::ResourceState::Recovering
+            )
+        })
+        .count();
+    let capacity = st
+        .data
+        .cfg
+        .hosts
+        .iter()
+        .flat_map(|h| h.disks.iter())
+        .map(|d| d.capacity_bytes)
+        .sum::<u64>();
+    let (site, rack) = host_site_rack(st);
+    serde_json::json!( {
+        "node_id":st.data.local_host,"site":site,"rack":rack,"role":format!("{:?}",raft.role).to_lowercase(),"term":raft.term,"leader":raft.leader,"objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"fragments":fragments,"healthy_resources":healthy,"capacity_bytes":capacity,"placement_epoch":ms.placement_epoch,"pending_gc":ms.garbage.len(),"snapshots":ms.snapshots.len(),"buckets":ms.buckets.len(),"system":webui::system_stats(),"telemetry":st.telemetry.current(),"maintenance":st.maintenance.status()
+    }
+    )
+}
+/// Implements the internal ui node step and keeps its validation and state transitions visible at the call site.
+async fn internal_ui_node(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
+    let path = "/internal/v1/ui/node";
+    if pq::verify_request(&headers, "GET", path, &[], &st.data.pq_keys)
+        .await
+        .is_err()
+        || !request_authorized(&st.data.cfg, &headers)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(local_console_summary(&st).await).into_response()
+}
+/// Implements the cluster console summaries step and keeps its validation and state transitions visible at the call site.
+async fn cluster_console_summaries(st: &V6State) -> Vec<serde_json::Value> {
+    let mut out = vec![local_console_summary(st).await];
+    let Some(id) = st.data.pq_identity.as_ref() else {
+        return out;
+    };
+    for h in &st.data.cfg.hosts {
+        if h.id == st.data.local_host {
+            continue;
+        }
+        let path = "/internal/v1/ui/node";
+        let Ok(auth) = pq::signed_headers(id, "GET", path, &[]) else {
+            continue;
+        };
+        let req = st
+            .data
+            .client
+            .get(format!("{}{}", h.endpoint.trim_end_matches('/'), path));
+        if let Ok(r) = pq::apply_headers(req, auth).send().await {
+            if r.status().is_success() {
+                if let Ok(v) = r.json::<serde_json::Value>().await {
+                    out.push(v)
+                }
+            }
+        }
+    }
+    out
+}
+/// Implements the ui summary step and keeps its validation and state transitions visible at the call site.
+async fn ui_summary(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
+    if console_auth(&st, &headers, false).is_none() {
+        return webui::unauthorized();
+    }
+    let nodes = cluster_console_summaries(&st).await;
+    let objects = nodes
+        .iter()
+        .map(|n| n["objects"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let logical_bytes = nodes
+        .iter()
+        .map(|n| n["logical_bytes"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let fragments = nodes
+        .iter()
+        .map(|n| n["fragments"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let physical_bytes = nodes
+        .iter()
+        .map(|n| n["physical_bytes"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let capacity_bytes = nodes
+        .iter()
+        .map(|n| n["capacity_bytes"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let healthy_resources = nodes
+        .iter()
+        .map(|n| n["healthy_resources"].as_u64().unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let local = nodes.first().cloned().unwrap_or_default();
+    Json(serde_json::json!( {
+        "product":"Kagi","local":local,"nodes":nodes,"cluster": {
+            "objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"capacity_bytes":capacity_bytes,"fragments":fragments,"healthy_resources":healthy_resources
+        }
+    }
+    )).into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct TelemetryQuery {
+    #[serde(default)]
+    after_ms: u128,
+}
+
+/// Periodically sample kernel/device/network state. Sampling stays off the request path so
+/// a slow SMART/sysfs device never delays the browser or object I/O.
+async fn run_telemetry_sampler(st: V6State) {
+    let interval = std::time::Duration::from_millis(st.telemetry.config().sample_interval_ms);
+    loop {
+        let cfg = effective_cluster_config(&st).await;
+        st.telemetry.sample(&cfg, &st.data.local_host);
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Internal history endpoint used for authenticated cluster-wide dashboard aggregation.
+async fn internal_ui_telemetry(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    let path = "/internal/v1/ui/telemetry";
+    if pq::verify_request(&headers, "GET", path, &[], &st.data.pq_keys)
+        .await
+        .is_err()
+        || !request_authorized(&st.data.cfg, &headers)
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(serde_json::json!({
+        "node": st.data.local_host,
+        "samples": st.telemetry.history(query.after_ms),
+        "erasure_acceleration": st.data.erasure.acceleration_status(),
+        "erasure_metrics": st.data.erasure.metrics_snapshot()
+    }))
+    .into_response()
+}
+
+/// Return local and peer telemetry histories.  The hierarchy is explicit in every sample
+/// (site/rack/node/disk) so clients can aggregate without guessing topology names.
+async fn ui_telemetry(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TelemetryQuery>,
+) -> Response {
+    if console_auth(&st, &headers, false).is_none() {
+        return webui::unauthorized();
+    }
+
+    let mut nodes = vec![serde_json::json!({
+        "node": st.data.local_host,
+        "samples": st.telemetry.history(query.after_ms),
+        "erasure_acceleration": st.data.erasure.acceleration_status(),
+        "erasure_metrics": st.data.erasure.metrics_snapshot()
+    })];
+
+    if let Some(identity) = st.data.pq_identity.as_ref() {
+        for peer in &st.data.cfg.hosts {
+            if peer.id == st.data.local_host {
+                continue;
+            }
+            let path = "/internal/v1/ui/telemetry";
+            let Ok(auth) = pq::signed_headers(identity, "GET", path, &[]) else {
+                continue;
+            };
+            let url = format!(
+                "{}{}?after_ms={}",
+                peer.endpoint.trim_end_matches('/'),
+                path,
+                query.after_ms
+            );
+            let request = st.data.client.get(url);
+            if let Ok(response) = pq::apply_headers(request, auth).send().await {
+                if response.status().is_success() {
+                    if let Ok(value) = response.json::<serde_json::Value>().await {
+                        nodes.push(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "after_ms": query.after_ms,
+        "nodes": nodes
+    }))
+    .into_response()
+}
+
+/// Change scheduler/cache policy only for a disk configured on this node.  The operation
+/// requires an administrator identity and emits a security/operations event for auditability.
+async fn ui_disk_tune(
+    State(st): State<V6State>,
+    Path(disk): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(tuning): Json<storage::QueueTuning>,
+) -> Response {
+    let Some(identity) = console_auth(&st, &headers, true) else {
+        return webui::unauthorized();
+    };
+    let Some(host) = st
+        .data
+        .cfg
+        .hosts
+        .iter()
+        .find(|host| host.id == st.data.local_host)
+    else {
+        return (StatusCode::NOT_FOUND, "local host is not in topology").into_response();
+    };
+    let Some(configured) = host.disks.iter().find(|candidate| candidate.id == disk) else {
+        return (StatusCode::NOT_FOUND, "disk is not configured on this node").into_response();
+    };
+    let Some(device) = configured.device_path.as_deref() else {
+        return (StatusCode::BAD_REQUEST, "disk has no block device path").into_response();
+    };
+
+    match storage::apply_queue_tuning(device, &tuning) {
+        Ok(settings) => {
+            st.monitor.emit(
+                "info",
+                "storage",
+                &format!("disk/{disk}"),
+                &format!(
+                    "administrator {} changed block queue/cache settings",
+                    identity.username
+                ),
+            );
+            Json(serde_json::json!({
+                "disk": disk,
+                "device": device,
+                "settings": settings
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("unable to change disk settings: {error}"),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PrefixQuery {
+    #[serde(default)]
+    prefix: String,
+}
+/// Implements the ui objects step and keeps its validation and state transitions visible at the call site.
+async fn ui_objects(
+    State(st): State<V6State>,
+    headers: axum::http::HeaderMap,
+    Query(q): Query<PrefixQuery>,
+) -> Response {
+    if console_auth(&st, &headers, false).is_none() {
+        return webui::unauthorized();
+    }
+    let ms = st.meta.store.state().await;
+    let mut rows = ms
+        .manifests
+        .values()
+        .filter(|m| m.key.starts_with(&q.prefix))
+        .filter(|m| {
+            st.security.check(
                 &m.key,
                 security::common::OP_GETATTR,
                 m.fs.as_ref().is_some_and(|fs| fs.privileged),
