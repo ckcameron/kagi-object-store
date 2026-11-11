@@ -9,7 +9,7 @@ COPY src ./src
 COPY vendor ./vendor
 RUN cargo build --release --locked --bin kagi-volume-nbd
 
-FROM golang:1.24-bookworm AS go-build
+FROM golang:1.25-bookworm AS go-build
 WORKDIR /src
 COPY deploy/kubernetes/csi/go.mod ./
 COPY deploy/kubernetes/csi/*.go ./
