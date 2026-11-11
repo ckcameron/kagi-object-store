@@ -1,0 +1,1 @@
+{"format":1,"hash":"97456438b8d3b60cbf8dedd759adf0d9584a876ccc3afbb468e062b782f686cd","payload":"trials: 1024\nlosses: 1\nweighted_loss: 1.0\nweight_sum: 1024.0\nrare:\n  policy: default\n  failed_disks:\n  - site-01-rack-01-host-06-nvme-04\n  - site-01-rack-03-host-04-nvme-14\n  - site-01-rack-02-host-03-nvme-02\n  estimated_probability: 0.00008333333333333333\n"}
