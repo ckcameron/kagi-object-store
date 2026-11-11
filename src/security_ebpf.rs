@@ -116,7 +116,8 @@ pub fn start(security: Security) -> Result<Guard> {
             .with_context(|| format!("attach LSM {hook}"))?;
     }
     let ring = RingBuf::try_from(ebpf.take_map("EVENTS").context("EVENTS missing")?)?;
-    let mut ring = AsyncFd::new(ring)?;
+    // SAFETY: The ring owns its map FD, and reading records never replaces or closes it.
+    let mut ring = unsafe { AsyncFd::register(ring) }.map_err(std::io::Error::from)?;
     security
         .monitor
         .emit("info", "security", "kernel", "BPF LSM hooks attached");
