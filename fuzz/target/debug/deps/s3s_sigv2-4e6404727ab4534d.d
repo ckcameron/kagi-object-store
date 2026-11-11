@@ -1,0 +1,9 @@
+/ext/Src/kagi-object-store/fuzz/target/debug/deps/s3s_sigv2-4e6404727ab4534d.d: /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/lib.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/authorization.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/methods.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/post_signature.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/presigned_url.rs
+
+/ext/Src/kagi-object-store/fuzz/target/debug/deps/libs3s_sigv2-4e6404727ab4534d.rmeta: /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/lib.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/authorization.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/methods.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/post_signature.rs /home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/presigned_url.rs
+
+/home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/lib.rs:
+/home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/authorization.rs:
+/home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/methods.rs:
+/home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/post_signature.rs:
+/home/chase@ckcameron.net/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/s3s-sigv2-0.17.0/src/presigned_url.rs:

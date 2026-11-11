@@ -1,0 +1,7 @@
+cargo:rustc-check-cfg=cfg(fft_enabled)
+cargo:rustc-check-cfg=cfg(gf16_neon_enabled)
+cargo:rustc-check-cfg=cfg(gf16_x86_enabled)
+cargo:rustc-check-cfg=cfg(gf16_simd_enabled)
+cargo:rustc-cfg=fft_enabled
+cargo:rustc-cfg=gf16_x86_enabled
+cargo:rustc-cfg=gf16_simd_enabled
