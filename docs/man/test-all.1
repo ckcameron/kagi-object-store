@@ -1,8 +1,32 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH TEST-ALL 1 "September 2026" "Kagi 0.38.0" "Developer Commands"
+.TH TEST-ALL 1 "November 2026" "Kagi 0.39.0" "Developer Commands"
 .SH NAME
-test-all \- run the standard Kagi validation suite
+test-all \- run Kagi's standard local validation suite
 .SH SYNOPSIS
 .B scripts/test-all
 .SH DESCRIPTION
-Runs rustfmt check, cargo check, unit tests, and Clippy. Set STRICT=1 to deny warnings. If nvcc is present, it also validates the optional CUDA feature.
+Checks Rust formatting, compiles all targets, runs the test suite, and runs
+Clippy.
+On Linux it also checks the eBPF userspace loader and the optional ISA-L,
+IPP, and AOCL build paths.
+.PP
+The script checks CUDA, HIP, and OpenCL when it detects their development
+toolchains.
+A check on a host without a supported device can exercise CPU fallback.
+Use the repository's hardware validation workflow to establish execution on
+the device.
+.SH ENVIRONMENT
+.TP
+.B STRICT
+Set to 1 to deny warnings in the default Clippy pass.
+The feature-specific Clippy passes always deny warnings.
+.TP
+.B ROCM_PATH
+ROCm installation directory used to find
+.BR hipcc .
+The default is
+.IR /opt/rocm .
+.SH SEE ALSO
+.BR coverage (1),
+.BR kagi-build (1),
+.BR kagi-security-check (1)

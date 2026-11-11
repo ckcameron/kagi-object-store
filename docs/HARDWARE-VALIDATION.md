@@ -7,11 +7,13 @@ Use disposable dedicated runners labeled `self-hosted`, `linux` and
 reviewers and restrict dispatch to reviewed revisions. Checkout does not persist
 GitHub credentials. Each run uploads its execution log with the commit SHA.
 
-Supported backend selections are CUDA, HIP, OpenCL, ISA-L, IPP, AOCL, eBPF and
-directory. Install the corresponding SDK/runtime/library on its runner. GPU runs
+The [workflow](../.github/workflows/hardware.yml) accepts `cuda`, `hip`,
+`opencl`, `isa-l`, `ipp`, `aocl`, `avx2`, `avx512`, `ebpf`, and `directory`. Install the corresponding SDK/runtime/library on its runner. GPU runs
 set `KAGI_REQUIRE_GPU_TESTS=1`; CPU-library runs set
-`KAGI_REQUIRE_CPU_LIB_TESTS=1`. Missing execution support fails those test modes;
-compile success and CPU fallback do not establish accelerator execution.
+`KAGI_REQUIRE_CPU_LIB_TESTS=1`. AVX2 and AVX-512 runs set
+`KAGI_REQUIRE_CPU_ISA_TESTS` to the selected instruction set. Missing execution
+support fails those test modes. The device, library, or instruction set must
+execute the test to count as validated.
 
 The eBPF runner must expose kernel BTF and enable `bpf` in the LSM list, provide
 BPF loading capabilities, `aya-tool`, `bpf-linker`, nightly Rust and rust-src.

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <limits.h>
 
+// One thread evaluates a single trial using its own surviving-fragment mask.
 __global__ void kagi_readability_kernel(const uint8_t *alive, uint8_t *lost,
                                          uint64_t trials, uint32_t fragments,
                                          uint32_t mode, uint32_t k,
@@ -16,19 +17,34 @@ __global__ void kagi_readability_kernel(const uint8_t *alive, uint8_t *lost,
     bool readable = false;
     if (mode == 0) {
         readable = false;
-        for (uint32_t i = 0; i < fragments; ++i) if (a[i]) { readable = true; break; }
+        for (uint32_t i = 0; i < fragments; ++i) {
+            if (a[i]) {
+                readable = true;
+                break;
+            }
+        }
     } else if (mode == 1) {
-        uint32_t n = 0; for (uint32_t i = 0; i < fragments; ++i) n += a[i] ? 1u : 0u;
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < fragments; ++i)
+            n += a[i] ? 1u : 0u;
         readable = n >= k;
     } else {
-        if (local_groups == 0 || k % local_groups != 0) { lost[t] = 1; return; }
+        if (local_groups == 0 || k % local_groups != 0) {
+            lost[t] = 1;
+            return;
+        }
+        // The surviving global parity must cover the deficits left by the local groups.
         uint32_t per = k / local_groups, deficit = 0, idx = 0;
         for (uint32_t g = 0; g < local_groups; ++g) {
             uint32_t survivors = 0, len = per + local_parity;
-            for (uint32_t j = 0; j < len; ++j) survivors += a[idx + j] ? 1u : 0u;
-            deficit += survivors < per ? per - survivors : 0; idx += len;
+            for (uint32_t j = 0; j < len; ++j)
+                survivors += a[idx + j] ? 1u : 0u;
+            deficit += survivors < per ? per - survivors : 0;
+            idx += len;
         }
-        uint32_t gp = 0; for (uint32_t j = 0; j < global_parity; ++j) gp += a[idx + j] ? 1u : 0u;
+        uint32_t gp = 0;
+        for (uint32_t j = 0; j < global_parity; ++j)
+            gp += a[idx + j] ? 1u : 0u;
         readable = deficit <= gp;
     }
     lost[t] = readable ? 0 : 1;
@@ -52,12 +68,25 @@ extern "C" int kagi_mc_readability_cuda(const uint8_t *alive, uint8_t *lost,
     uint8_t *d_alive = nullptr, *d_lost = nullptr;
     size_t alive_bytes = (size_t)trials * fragments;
     if (cudaMalloc(&d_alive, alive_bytes) != cudaSuccess) return 2;
-    if (cudaMalloc(&d_lost, (size_t)trials) != cudaSuccess) { cudaFree(d_alive); return 3; }
-    if (cudaMemcpy(d_alive, alive, alive_bytes, cudaMemcpyHostToDevice) != cudaSuccess) { cudaFree(d_alive); cudaFree(d_lost); return 4; }
-    int threads = 256; int blocks = (int)blocks64;
-    kagi_readability_kernel<<<blocks, threads>>>(d_alive, d_lost, trials, fragments, mode, k, local_groups, local_parity, global_parity);
+    if (cudaMalloc(&d_lost, (size_t)trials) != cudaSuccess) {
+        cudaFree(d_alive);
+        return 3;
+    }
+    if (cudaMemcpy(d_alive, alive, alive_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        cudaFree(d_alive);
+        cudaFree(d_lost);
+        return 4;
+    }
+
+    int threads = 256;
+    int blocks = (int)blocks64;
+    kagi_readability_kernel<<<blocks, threads>>>(d_alive, d_lost, trials, fragments,
+                                                  mode, k, local_groups, local_parity,
+                                                  global_parity);
     int rc = 0;
     if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) rc = 5;
     else if (cudaMemcpy(lost, d_lost, (size_t)trials, cudaMemcpyDeviceToHost) != cudaSuccess) rc = 6;
-    cudaFree(d_alive); cudaFree(d_lost); return rc;
+    cudaFree(d_alive);
+    cudaFree(d_lost);
+    return rc;
 }

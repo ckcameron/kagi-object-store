@@ -36,17 +36,29 @@ fn finding(
 
 /// Configuration-only checks also work through the audit CLI before a node is started.
 pub fn audit_config(cfg: &NodeConfig) -> Vec<Finding> {
-    let mut findings = vec![finding("baseline.backups", "info", "cluster", "Durability modeling does not replace backups or restore exercises.", "Keep an independent backup, test restores, and protect configuration/key material from rollback.")];
+    let mut findings = vec![finding(
+        "baseline.backups",
+        "info",
+        "cluster",
+        "Durability modeling does not replace backups or restore exercises.",
+        "Keep an independent backup, test restores, and protect configuration/key material from rollback.",
+    )];
     if !cfg.listen.starts_with("127.0.0.1:") && !cfg.listen.starts_with("[::1]:") {
-        findings.push(finding("transport.public_listener", "warning", "listener", "The HTTP listener binds beyond loopback; tls config currently protects the internal client, not axum::serve.", "Bind loopback behind a TLS-authenticating reverse proxy or restrict the listener to a trusted private network. Never send Basic credentials over untrusted plaintext links."));
+        findings.push(finding(
+            "transport.public_listener",
+            "warning",
+            "listener",
+            "The API listener binds beyond loopback. It serves HTTPS when TLS is configured and plaintext HTTP otherwise.",
+            "Restrict access to trusted networks and use HTTPS for requests carrying credentials. If a TLS reverse proxy fronts Kagi, bind the backend to loopback.",
+        ));
     }
     if cfg.tls.is_none() {
         findings.push(finding(
             "transport.no_mtls",
             "warning",
             "cluster",
-            "Internal client transport has no mTLS configuration.",
-            "Configure CA, certificate and private key, and HTTPS peer endpoints.",
+            "The peer HTTP client has no configured TLS CA or client identity.",
+            "Configure the TLS CA, certificate, private key, and HTTPS peer endpoints. If mutual TLS is required, use a proxy that verifies client certificates.",
         ));
     }
     if cfg

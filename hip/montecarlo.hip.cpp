@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <limits.h>
 
+// One thread evaluates a single trial using its own surviving-fragment mask.
 __global__ void kagi_hip_readability_kernel(const uint8_t *alive, uint8_t *lost,
                                             uint64_t trials, uint32_t fragments,
                                             uint32_t mode, uint32_t k,
@@ -32,6 +33,7 @@ __global__ void kagi_hip_readability_kernel(const uint8_t *alive, uint8_t *lost,
       lost[t] = 1;
       return;
     }
+    // The surviving global parity must cover the deficits left by the local groups.
     uint32_t per = k / local_groups, deficit = 0, idx = 0;
     for (uint32_t g = 0; g < local_groups; ++g) {
       uint32_t survivors = 0, len = per + local_parity;

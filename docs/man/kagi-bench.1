@@ -1,0 +1,71 @@
+.\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
+.TH KAGI-BENCH 1 "November 2026" "Kagi 0.39.0" "Developer Commands"
+.SH NAME
+kagi-bench \- benchmark Kagi's erasure coding and reconstruction
+.SH SYNOPSIS
+.B kagi-bench
+.RI [ options ]
+.SH DESCRIPTION
+Generates reproducible in-memory payloads and measures erasure encoding
+and reconstruction throughput and latency.
+Every sample verifies the reconstructed payload.
+Use the report to compare compute backends and codec settings.
+Storage and network performance require their own measurements.
+.SH OPTIONS
+.TP
+.BI \-\-backend " auto|cpu|cuda|hip|opencl"
+Choose the requested compute backend.
+The default is
+.BR auto .
+Unavailable GPU backends can fall back to CPU.
+.TP
+.BI \-\-scheme " reed-solomon|lrc|clay|msr|all"
+Choose which erasure code to test.
+The default is
+.BR all .
+.TP
+.BI \-\-sizes " LIST"
+Comma-separated payload sizes.
+The default is
+.BR 1MiB,8MiB,64MiB .
+Accepted suffixes include B, KiB, MiB, GiB, K, M, and G.
+.TP
+.BI \-\-iterations " N"
+Timed repetitions per size after warmup.
+The default is 5.
+.TP
+.BI \-\-data-shards " N"
+Override the scheme-specific data shard count.
+.TP
+.BI \-\-parity-shards " N"
+Override the scheme-specific parity shard count.
+.TP
+.BI \-\-gpu-threshold-bytes " N"
+Minimum payload size for GPU dispatch.
+The default is 1048576.
+.TP
+.BI \-\-seed " N"
+Set the reproducible payload seed.
+The default is 1262569289.
+.TP
+.BI \-\-json " FILE"
+Write detailed timing, backend counters, and environment data as JSON in
+addition to the console table.
+.TP
+.B \-\-require-acceleration
+Fail unless GPU work executes without fallback.
+An explicit GPU backend must also match the selected device backend.
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.TP
+.BR \-V ", " \-\-version
+Show the Kagi version.
+.SH EXAMPLE
+.nf
+kagi-bench \-\-backend cpu \-\-scheme clay \-\-sizes 1MiB,8MiB \e
+    \-\-json benchmark.json
+.fi
+.SH SEE ALSO
+.BR kagi-build (1),
+.BR test-all (1)

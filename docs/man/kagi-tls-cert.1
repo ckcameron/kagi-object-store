@@ -1,0 +1,41 @@
+.\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
+.TH KAGI-TLS-CERT 1 "November 2026" "Kagi 0.39.0" "User Commands"
+.SH NAME
+kagi-tls-cert \- generate a self-signed ML-DSA-87 HTTPS identity
+.SH SYNOPSIS
+.B bash scripts/kagi-tls-cert
+.RI [ OUTPUT-DIRECTORY ]
+.SH DESCRIPTION
+Writes
+.I server-key.pem
+and
+.I server-cert.pem
+in the specified directory.
+The default directory is
+.IR /etc/kagi/tls .
+The script replaces files with those names if they exist.
+.PP
+The installed OpenSSL must advertise ML-DSA-87 signature support.
+The generated certificate is self-signed.
+Configure explicit trust in peers and clients that support ML-DSA X.509.
+Keep the private key readable only by the user that needs it.
+.SH ENVIRONMENT
+.TP
+.B KAGI_TLS_NAME
+Certificate common name.
+The default is
+.BR kagi.local .
+.TP
+.B KAGI_TLS_DAYS
+Certificate validity in days.
+The default is 825.
+.TP
+.B KAGI_TLS_SAN
+OpenSSL subjectAltName value.
+The default is the certificate name with a
+.B DNS:
+prefix.
+.SH SEE ALSO
+.BR kagi-cluster-host (1),
+.BR kagi-install (1),
+.BR openssl-req (1)

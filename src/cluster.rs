@@ -4,13 +4,9 @@
 //!
 //! This module owns immutable object versions, fragment placement, checksums, metadata
 //! encryption, replicated and erasure-coded writes, reads, repair, and peer fragment RPC.
-//! Placement is deterministic for a fixed cluster configuration so every healthy node can
-//! independently derive the same candidate locations. A successful foreground write only
-//! returns after the configured durability/metadata commit requirements have been met.
+//! Placement is deterministic for a fixed topology and health view. The data plane
+//! stages fragments and produces manifests that the cluster daemon publishes through Raft.
 
-// Distributed object data plane: placement, immutable versions, erasure coding, encryption metadata, repair, and fragment RPC.
-//! Cluster data plane: deterministic placement, replicated chunks, EC, encrypted metadata,
-//! checksum validation, repair, and health-aware rebalancing.
 use crate::erasure::{ErasureBackend, ErasureConfig, ErasureLayout, ErasureScheme, RepairFetch};
 use crate::filesystem::FsMetadata;
 use crate::pq::{LocalPqIdentity, RuntimeKeyring};
@@ -97,10 +93,11 @@ fn default_transport_frame_bytes() -> usize {
     256 * 1024 * 1024
 }
 
+// Cluster topology and immutable object metadata
+
+/// Runtime cluster topology, protection policy and transport configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-// ---- Cluster topology and immutable object metadata ----------------------------
-/// Runtime cluster topology, protection policy and transport configuration.
 pub struct ClusterConfig {
     /// Stable cluster identifier shared by every member.
     pub id: String,
@@ -136,15 +133,15 @@ pub struct ClusterConfig {
     #[serde(default)]
     pub transport: DataTransportConfig,
 }
-/// Implements the default replication step and keeps its validation and state transitions visible at the call site.
+
 fn default_replication() -> usize {
     3
 }
-/// Implements the default quorum step and keeps its validation and state transitions visible at the call site.
+
 fn default_quorum() -> usize {
     2
 }
-/// Implements the one usize step and keeps its validation and state transitions visible at the call site.
+
 fn one_usize() -> usize {
     1
 }
@@ -198,7 +195,7 @@ pub struct PeerDisk {
     #[serde(default)]
     pub storage_kind: StorageKind,
 }
-/// Implements the one step and keeps its validation and state transitions visible at the call site.
+
 fn one() -> f64 {
     1.0
 }
@@ -285,7 +282,8 @@ pub struct ProtectedObjectMetadata {
     pub fs: Option<FsMetadata>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ObjectManifest path.
+/// Metadata for one immutable object version. The persisted layout and checksums
+/// determine how this version can be read or repaired after policy changes.
 pub struct ObjectManifest {
     pub key: String,
     pub object_id: String,
@@ -338,7 +336,7 @@ pub struct ClusterState {
     #[cfg(feature = "quic")]
     pub quic: Option<Arc<crate::quic_transport::Client>>,
 }
-/// Implements the hash64 step and keeps its validation and state transitions visible at the call site.
+
 fn hash64(parts: &[&[u8]]) -> u64 {
     let mut h = Hasher::new();
     for p in parts {
@@ -346,7 +344,7 @@ fn hash64(parts: &[&[u8]]) -> u64 {
     }
     u64::from_le_bytes(h.finalize().as_bytes()[0..8].try_into().unwrap())
 }
-/// Implements the score step and keeps its validation and state transitions visible at the call site.
+
 fn score(pos: u64, frag: u32, replica: u32, salt: u64, h: &PeerHost, d: &PeerDisk) -> f64 {
     let x = hash64(&[
         &pos.to_le_bytes(),
@@ -359,7 +357,9 @@ fn score(pos: u64, frag: u32, replica: u32, salt: u64, h: &PeerHost, d: &PeerDis
     let u = ((x as f64) + 1.0) / ((u64::MAX as f64) + 2.0);
     u.powf(1.0 / (d.capacity_bytes as f64 * d.weight).max(1.0))
 }
-/// Implements the placement health step and keeps its validation and state transitions visible at the call site.
+
+/// Rank candidates by weighted rendezvous score. Prefer an unused host within the
+/// chunk and an unused disk across the object, relaxing those preferences as needed.
 async fn placement_health(
     cfg: &ClusterConfig,
     pos: u64,
@@ -416,7 +416,7 @@ async fn placement_health(
     }
     Ok(all)
 }
-/// Implements the placement step and keeps its validation and state transitions visible at the call site.
+
 pub fn placement(cfg: &ClusterConfig, pos: u64, n: usize) -> Result<Vec<FragmentLocation>> {
     // compatibility: one replica per chunk
     let rt = tokio::runtime::Handle::try_current();
@@ -443,7 +443,7 @@ pub fn placement(cfg: &ClusterConfig, pos: u64, n: usize) -> Result<Vec<Fragment
     }
     futures_free_placement(cfg, pos, n)
 }
-/// Implements the futures free placement step and keeps its validation and state transitions visible at the call site.
+
 fn futures_free_placement(
     cfg: &ClusterConfig,
     pos: u64,
@@ -474,7 +474,7 @@ fn futures_free_placement(
     }
     Ok(out)
 }
-/// Implements the object id step and keeps its validation and state transitions visible at the call site.
+
 fn object_id(cluster: &str, key: &str, version: u64) -> String {
     let mut h = Hasher::new();
     h.update(cluster.as_bytes());
@@ -482,7 +482,7 @@ fn object_id(cluster: &str, key: &str, version: u64) -> String {
     h.update(&version.to_le_bytes());
     h.finalize().to_hex().to_string()
 }
-/// Implements the fragment path step and keeps its validation and state transitions visible at the call site.
+
 pub fn fragment_path(root: &FsPath, disk: &str, obj: &str, ver: u64, frag: u32) -> PathBuf {
     root.join("disks")
         .join(disk)
@@ -491,12 +491,12 @@ pub fn fragment_path(root: &FsPath, disk: &str, obj: &str, ver: u64, frag: u32) 
         .join(&obj[2..4])
         .join(format!("{obj}.{ver}.{frag}.frag"))
 }
-/// Implements the manifest path step and keeps its validation and state transitions visible at the call site.
+
 fn manifest_path(root: &FsPath, key: &str) -> PathBuf {
     root.join("manifests")
         .join(format!("{}.json", blake3::hash(key.as_bytes()).to_hex()))
 }
-/// Implements the metadata key step and keeps its validation and state transitions visible at the call site.
+
 fn metadata_key(cfg: &ClusterConfig) -> Result<[u8; 32]> {
     let s = cfg
         .metadata_key_b64
@@ -893,6 +893,8 @@ async fn read_fragment_at_rest(
     unprotect_fragment_at_rest(cfg, object, version, fragment, disk, &envelope)
 }
 
+/// Authenticate each intersecting encrypted chunk before copying bytes to the result.
+/// The generation header selects the key for fragments written before rotation.
 async fn read_fragment_range_at_rest(
     fragment_ref: FragmentAtRestRef<'_>,
     range_start: usize,
@@ -1003,7 +1005,8 @@ async fn read_subchunks_at_rest(
     }
     Ok(out)
 }
-// ---- Protected metadata envelopes ----------------------------------------------
+
+// Protected metadata envelopes
 fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<EncryptedMetadata> {
     let root = metadata_key(&key_generation(cfg, cfg.active_key_id)?)?;
     let mut salt = [0u8; 32];
@@ -1040,7 +1043,7 @@ fn protect_metadata(cfg: &ClusterConfig, m: &ProtectedObjectMetadata) -> Result<
         kdf_salt_b64: Some(salt_b64),
     })
 }
-/// Implements the unprotect metadata step and keeps its validation and state transitions visible at the call site.
+
 pub fn unprotect_metadata(
     cfg: &ClusterConfig,
     e: &EncryptedMetadata,
@@ -1090,7 +1093,8 @@ pub fn unprotect_metadata(
         .map_err(|_| anyhow::anyhow!("metadata authentication failed"))?;
     Ok(serde_json::from_slice(&pt)?)
 }
-// ---- Authenticated fragment transport ------------------------------------------
+
+// Authenticated fragment transport
 #[cfg(feature = "quic")]
 async fn quic_request(
     st: &ClusterState,
@@ -1212,7 +1216,7 @@ async fn rpc_store(
     }
     Ok(())
 }
-/// Implements the rpc get step and keeps its validation and state transitions visible at the call site.
+
 async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) -> Result<Vec<u8>> {
     if loc.host == st.local_host {
         let path = fragment_path(&st.root, &loc.disk, &m.object_id, m.version, loc.fragment);
@@ -1261,18 +1265,16 @@ async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) 
     Ok(r.bytes().await?.to_vec())
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the SubchunkRequest path.
 struct SubchunkRequest {
     alpha: usize,
     indices: Vec<usize>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ProjectionRequest path.
 struct ProjectionRequest {
     rows: usize,
     coeff_b64: String,
 }
-/// Implements the read subchunks step and keeps its validation and state transitions visible at the call site.
+
 /// Read only the CLAY subchunks named by the exact-repair plan. Remote peers
 /// receive a signed request and perform positioned reads, so unused subchunks
 /// never cross either the disk or network repair path.
@@ -1395,11 +1397,12 @@ async fn rpc_project(
     }
     Ok(r.bytes().await?.to_vec())
 }
-// ---- Object create/read/repair/scrub operations --------------------------------
+
+// Object create/read/repair/scrub operations
 pub async fn put_object(st: &ClusterState, key: &str, data: &[u8]) -> Result<ObjectManifest> {
     put_object_inner(st, key, data, None, WormPolicy::default(), None).await
 }
-/// Implements the put filesystem object step and keeps its validation and state transitions visible at the call site.
+
 pub async fn put_filesystem_object(
     st: &ClusterState,
     key: &str,
@@ -1410,7 +1413,10 @@ pub async fn put_filesystem_object(
 ) -> Result<ObjectManifest> {
     put_object_inner(st, key, data, health, worm, Some(fs)).await
 }
-/// Implements the put object inner step and keeps its validation and state transitions visible at the call site.
+
+/// Stage fragments, enforce the data-write quorum, and build a manifest containing
+/// only the replicas that acknowledged the write. Cluster API callers commit the
+/// authoritative namespace entry through Raft separately.
 async fn put_object_inner(
     st: &ClusterState,
     key: &str,
@@ -1547,7 +1553,8 @@ async fn put_object_inner(
     st.manifests.write().await.insert(key.into(), m.clone());
     Ok(m)
 }
-/// Implements the normalize chunks step and keeps its validation and state transitions visible at the call site.
+
+/// Read older manifests with a flat fragment list through the current chunk/replica model.
 pub fn normalize_chunks(m: &ObjectManifest) -> Vec<ChunkMetadata> {
     if !m.chunks.is_empty() {
         return m.chunks.clone();
@@ -1568,7 +1575,7 @@ pub fn normalize_chunks(m: &ObjectManifest) -> Vec<ChunkMetadata> {
     }
     x.into_values().collect()
 }
-/// Implements the get object step and keeps its validation and state transitions visible at the call site.
+
 pub async fn get_object(st: &ClusterState, key: &str) -> Result<Vec<u8>> {
     let m = if let Some(x) = st.manifests.read().await.get(key).cloned() {
         x
@@ -1641,16 +1648,16 @@ pub async fn get_object(st: &ClusterState, key: &str) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
-/// Implements the get object version step and keeps its validation and state transitions visible at the call site.
+
 pub async fn get_object_version(st: &ClusterState, m: &ObjectManifest) -> Result<Vec<u8>> {
     st.manifests.write().await.insert(m.key.clone(), m.clone());
     get_object(st, &m.key).await
 }
-/// Implements the repair object step and keeps its validation and state transitions visible at the call site.
+
 pub async fn repair_object(st: &ClusterState, key: &str) -> Result<ObjectManifest> {
     repair_object_inner(st, key, None).await
 }
-/// Implements the repair object with health step and keeps its validation and state transitions visible at the call site.
+
 pub async fn repair_object_with_health(
     st: &ClusterState,
     key: &str,
@@ -1694,7 +1701,8 @@ async fn replica_valid(
         .map(|data| blake3::hash(&data).to_hex().as_str() == c.checksum)
         .unwrap_or(false)
 }
-/// Implements the read valid chunk step and keeps its validation and state transitions visible at the call site.
+
+/// Try each eligible replica until one matches the manifest's immutable chunk checksum.
 async fn read_valid_chunk(
     st: &ClusterState,
     m: &ObjectManifest,
@@ -1999,7 +2007,7 @@ async fn repair_object_inner(
     .await?;
     Ok(old)
 }
-/// Implements the scrub object step and keeps its validation and state transitions visible at the call site.
+
 pub async fn scrub_object(st: &ClusterState, key: &str) -> Result<BTreeMap<String, bool>> {
     let m = st
         .manifests
@@ -2026,7 +2034,8 @@ pub async fn scrub_object(st: &ClusterState, key: &str) -> Result<BTreeMap<Strin
     }
     Ok(out)
 }
-// ---- Internal fragment service and authorization -------------------------------
+
+// Internal fragment service and authorization
 fn join_authorized(cfg: &ClusterConfig, headers: &axum::http::HeaderMap) -> bool {
     let Some(want) = cfg.join_key_hash_hex.as_deref() else {
         return false;

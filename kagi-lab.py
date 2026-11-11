@@ -31,7 +31,6 @@ The dedicated nftables table blocks forwarding to/from lab bridges; it does
 not flush or replace existing firewall tables. Same-segment L2 remains allowed.
 
 Repository: https://github.com/ckcameron/kagi-object-store.git
-Cargo.toml, build.rs and CI inspected at d58ed26d5cb3226c8bd7933f111914db20c92372.
 Native packages cover the CPU build plus QUIC/eBPF; other packages include
 storage development/debugging tools. Cargo resolves Rust dependencies.
 Use --extra-package repeatedly for additional Ubuntu packages and --features
@@ -69,6 +68,7 @@ https://www.qemu.org/docs/master/system/invocation.html
 https://docs.cloud-init.io/en/latest/reference/datasources/nocloud.html
 https://cloud-images.ubuntu.com/releases/noble/release/
 """
+
 import argparse
 import base64
 import fcntl
@@ -100,8 +100,13 @@ python3 python3-dev openssh-server nvme-cli jq linux-tools-generic'''.split()
 
 
 def run(*cmd, check=True, capture=False, input=None):
-    return subprocess.run([str(x) for x in cmd], check=check, text=True,
-                          capture_output=capture, input=input)
+    return subprocess.run(
+        [str(x) for x in cmd],
+        check=check,
+        text=True,
+        capture_output=capture,
+        input=input,
+    )
 
 
 def write(path, data, mode=0o600):
@@ -111,19 +116,30 @@ def write(path, data, mode=0o600):
 
 def node(i):
     segment = 1 if i <= 4 else 2
-    return f'10.{segment}.0.{10 + (i-1) % 4 + 1}', BRIDGES[segment-1]
+    return f'10.{segment}.0.{10 + (i-1) % 4 + 1}', BRIDGES[segment - 1]
 
 
 def active(i):
-    return run('systemctl', 'is-active', '--quiet', f'kagi-lab-{i:02}',
-               check=False, capture=True).returncode == 0
+    return (
+        run(
+            'systemctl',
+            'is-active',
+            '--quiet',
+            f'kagi-lab-{i:02}',
+            check=False,
+            capture=True,
+        ).returncode
+        == 0
+    )
 
 
 def firmware():
-    pairs = [('/usr/share/OVMF/OVMF_CODE_4M.fd', '/usr/share/OVMF/OVMF_VARS_4M.fd'),
-             ('/usr/share/edk2/x64/OVMF_CODE.4m.fd', '/usr/share/edk2/x64/OVMF_VARS.4m.fd'),
-             ('/usr/share/edk2/x64/OVMF_CODE.fd', '/usr/share/edk2/x64/OVMF_VARS.fd'),
-             ('/usr/share/OVMF/OVMF_CODE.fd', '/usr/share/OVMF/OVMF_VARS.fd')]
+    pairs = [
+        ('/usr/share/OVMF/OVMF_CODE_4M.fd', '/usr/share/OVMF/OVMF_VARS_4M.fd'),
+        ('/usr/share/edk2/x64/OVMF_CODE.4m.fd', '/usr/share/edk2/x64/OVMF_VARS.4m.fd'),
+        ('/usr/share/edk2/x64/OVMF_CODE.fd', '/usr/share/edk2/x64/OVMF_VARS.fd'),
+        ('/usr/share/OVMF/OVMF_CODE.fd', '/usr/share/OVMF/OVMF_VARS.fd'),
+    ]
     for code, variables in pairs:
         if Path(code).is_file() and Path(variables).is_file():
             return code, variables
@@ -131,25 +147,40 @@ def firmware():
 
 
 def fetch(url, dest):
-    run('curl', '--fail', '--location', '--retry', '4', '--proto', '=https',
-        '--tlsv1.2', '--output', str(dest) + '.part', url)
+    run(
+        'curl',
+        '--fail',
+        '--location',
+        '--retry',
+        '4',
+        '--proto',
+        '=https',
+        '--tlsv1.2',
+        '--output',
+        str(dest) + '.part',
+        url,
+    )
     Path(str(dest) + '.part').replace(dest)
 
 
 def base_image():
+    # Publish the base image only after verifying the downloaded bytes.
     dest = STATE / 'ubuntu.qcow2'
     if dest.exists():
         return dest
     sums = STATE / 'SHA256SUMS'
     fetch(IMAGE_BASE + 'SHA256SUMS', sums)
-    entries = {line.split()[-1].lstrip('*'): line.split()[0]
-               for line in sums.read_text().splitlines() if line.strip()}
+    entries = {
+        line.split()[-1].lstrip('*'): line.split()[0]
+        for line in sums.read_text().splitlines()
+        if line.strip()
+    }
     expected = entries[IMAGE_NAME]
     download = STATE / 'ubuntu.download'
     fetch(IMAGE_BASE + IMAGE_NAME, download)
     digest = hashlib.sha256()
     with download.open('rb') as source:
-        for block in iter(lambda: source.read(8*1024*1024), b''):
+        for block in iter(lambda: source.read(8 * 1024 * 1024), b''):
             digest.update(block)
     if digest.hexdigest() != expected:
         download.unlink()
@@ -165,8 +196,15 @@ def build_script(config):
         packages += ['ocl-icd-opencl-dev', 'opencl-headers', 'pocl-opencl-icd']
     if config['cuda_toolkit']:
         packages.append('nvidia-cuda-toolkit')
-    build = ['cargo', 'build', '--locked', '--release', '--workspace',
-             '--jobs', str(config['jobs'])]
+    build = [
+        'cargo',
+        'build',
+        '--locked',
+        '--release',
+        '--workspace',
+        '--jobs',
+        str(config['jobs']),
+    ]
     if config['features']:
         build += ['--features', config['features']]
     user_script = f'''set -euo pipefail
@@ -233,31 +271,61 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 '''
+
     def wf(path, content, mode='0644'):
-        return dict(path=path, permissions=mode, encoding='b64',
-                    content=base64.b64encode(content.encode()).decode())
-    return {'hostname': f'kagi-{i:02}', 'manage_etc_hosts': True,
-            'users': [{'name': 'admin', 'shell': '/bin/bash', 'groups': ['sudo'],
-                       'sudo': 'ALL=(ALL) NOPASSWD:ALL', 'lock_passwd': False,
-                       'ssh_authorized_keys': [key]}],
-            'disable_root': False, 'ssh_pwauth': True,
-            'chpasswd': {'expire': False, 'users': [
+        return dict(
+            path=path,
+            permissions=mode,
+            encoding='b64',
+            content=base64.b64encode(content.encode()).decode(),
+        )
+
+    return {
+        'hostname': f'kagi-{i:02}',
+        'manage_etc_hosts': True,
+        'users': [
+            {
+                'name': 'admin',
+                'shell': '/bin/bash',
+                'groups': ['sudo'],
+                'sudo': 'ALL=(ALL) NOPASSWD:ALL',
+                'lock_passwd': False,
+                'ssh_authorized_keys': [key],
+            }
+        ],
+        'disable_root': False,
+        'ssh_pwauth': True,
+        'chpasswd': {
+            'expire': False,
+            'users': [
                 {'name': 'admin', 'password': 'admin', 'type': 'text'},
-                {'name': 'root', 'password': 'admin', 'type': 'text'}]},
-            'swap': {'filename': '/swapfile', 'size': 4294967296, 'maxsize': 4294967296},
-            'write_files': [wf('/usr/local/sbin/kagi-build', build_script(config), '0755'),
-                            wf('/etc/systemd/system/kagi-build.service', unit),
-                            wf('/etc/ssh/sshd_config.d/00-kagi-lab.conf',
-                               f'PasswordAuthentication yes\nPermitRootLogin yes\nListenAddress {ip}\n')],
-            'runcmd': [['systemctl', 'disable', '--now', 'ssh.socket'],
-                       ['systemctl', 'enable', '--now', 'ssh.service'],
-                       ['systemctl', 'restart', 'ssh.service'],
-                       ['systemctl', 'daemon-reload'],
-                       ['systemctl', 'enable', '--now', '--no-block', 'kagi-build.service']]}
+                {'name': 'root', 'password': 'admin', 'type': 'text'},
+            ],
+        },
+        'swap': {'filename': '/swapfile', 'size': 4294967296, 'maxsize': 4294967296},
+        'write_files': [
+            wf('/usr/local/sbin/kagi-build', build_script(config), '0755'),
+            wf('/etc/systemd/system/kagi-build.service', unit),
+            wf(
+                '/etc/ssh/sshd_config.d/00-kagi-lab.conf',
+                f'PasswordAuthentication yes\nPermitRootLogin yes\nListenAddress {ip}\n',
+            ),
+        ],
+        'runcmd': [
+            ['systemctl', 'disable', '--now', 'ssh.socket'],
+            ['systemctl', 'enable', '--now', 'ssh.service'],
+            ['systemctl', 'restart', 'ssh.service'],
+            ['systemctl', 'daemon-reload'],
+            ['systemctl', 'enable', '--now', '--no-block', 'kagi-build.service'],
+        ],
+    }
 
 
 def networks():
-    routes = json.loads(run('ip', '-j', '-4', 'route', 'show', 'table', 'all', capture=True).stdout)
+    # Refuse overlapping routes and leave interfaces owned by other tooling alone.
+    routes = json.loads(
+        run('ip', '-j', '-4', 'route', 'show', 'table', 'all', capture=True).stdout
+    )
     for segment, bridge in enumerate(BRIDGES, 1):
         target = ipaddress.ip_network(f'10.{segment}.0.0/24')
         for route in routes:
@@ -265,11 +333,16 @@ def networks():
             if dest == 'default' or route.get('dev') == bridge:
                 continue
             if ipaddress.ip_network(dest, strict=False).overlaps(target):
-                raise RuntimeError(f'Network conflict: {route}; refusing to alter routing')
+                raise RuntimeError(
+                    f'Network conflict: {route}; refusing to alter routing'
+                )
         if not Path('/sys/class/net/' + bridge).exists():
             run('ip', 'link', 'add', bridge, 'type', 'bridge')
             run('ip', 'link', 'set', bridge, 'alias', 'kagi-lab-owned')
-        elif Path('/sys/class/net/' + bridge + '/ifalias').read_text().strip() != 'kagi-lab-owned':
+        elif (
+            Path('/sys/class/net/' + bridge + '/ifalias').read_text().strip()
+            != 'kagi-lab-owned'
+        ):
             raise RuntimeError(f'Refusing to reuse unrelated interface {bridge}')
         run('ip', 'addr', 'replace', f'10.{segment}.0.1/24', 'dev', bridge)
         run('ip', 'link', 'set', bridge, 'up')
@@ -292,7 +365,10 @@ def networks():
         if not Path('/sys/class/net/' + tap).exists():
             run('ip', 'tuntap', 'add', 'dev', tap, 'mode', 'tap', 'user', USER)
             run('ip', 'link', 'set', tap, 'alias', 'kagi-lab-owned')
-        elif Path('/sys/class/net/' + tap + '/ifalias').read_text().strip() != 'kagi-lab-owned':
+        elif (
+            Path('/sys/class/net/' + tap + '/ifalias').read_text().strip()
+            != 'kagi-lab-owned'
+        ):
             raise RuntimeError(f'Refusing to reuse unrelated interface {tap}')
         run('ip', 'link', 'set', tap, 'master', node(i)[1])
         run('ip', 'link', 'set', tap, 'up')
@@ -300,26 +376,57 @@ def networks():
 
 def qemu_args(i, config):
     directory = STATE / f'node-{i:02}'
-    cmd = ['qemu-system-x86_64', '-name', f'kagi-{i:02}', '-machine', 'q35,accel=kvm',
-           '-cpu', 'host', '-smp', str(config['cpus']), '-m', str(config['memory']),
-           '-display', 'none', '-monitor', 'none', '-serial', f'file:{directory}/serial.log',
-           '-qmp', f'unix:{directory}/qmp.sock,server=on,wait=off',
-           '-drive', f'if=pflash,format=raw,readonly=on,file={config["ovmf_code"]}',
-           '-drive', f'if=pflash,format=raw,file={directory}/VARS.fd',
-           '-drive', f'file={directory}/os.qcow2,if=virtio,format=qcow2',
-           '-drive', f'file={directory}/seed.iso,if=none,id=seed,format=raw,readonly=on',
-           '-device', 'virtio-blk-pci,drive=seed',
-           '-netdev', f'tap,id=lab,ifname=kagi-tap{i},script=no,downscript=no',
-           '-device', f'virtio-net-pci,netdev=lab,mac=52:54:00:11:00:{i:02x}',
-           '-netdev', 'user,id=wan,ipv6=off',
-           '-device', f'virtio-net-pci,netdev=wan,mac=52:54:00:22:00:{i:02x}']
+    cmd = [
+        'qemu-system-x86_64',
+        '-name',
+        f'kagi-{i:02}',
+        '-machine',
+        'q35,accel=kvm',
+        '-cpu',
+        'host',
+        '-smp',
+        str(config['cpus']),
+        '-m',
+        str(config['memory']),
+        '-display',
+        'none',
+        '-monitor',
+        'none',
+        '-serial',
+        f'file:{directory}/serial.log',
+        '-qmp',
+        f'unix:{directory}/qmp.sock,server=on,wait=off',
+        '-drive',
+        f'if=pflash,format=raw,readonly=on,file={config["ovmf_code"]}',
+        '-drive',
+        f'if=pflash,format=raw,file={directory}/VARS.fd',
+        '-drive',
+        f'file={directory}/os.qcow2,if=virtio,format=qcow2',
+        '-drive',
+        f'file={directory}/seed.iso,if=none,id=seed,format=raw,readonly=on',
+        '-device',
+        'virtio-blk-pci,drive=seed',
+        '-netdev',
+        f'tap,id=lab,ifname=kagi-tap{i},script=no,downscript=no',
+        '-device',
+        f'virtio-net-pci,netdev=lab,mac=52:54:00:11:00:{i:02x}',
+        '-netdev',
+        'user,id=wan,ipv6=off',
+        '-device',
+        f'virtio-net-pci,netdev=wan,mac=52:54:00:22:00:{i:02x}',
+    ]
     for disk in range(1, 7):
-        cmd += ['-drive', f'file={directory}/nvme-{disk}.raw,if=none,id=nvme{disk},format=raw,discard=unmap',
-                '-device', f'nvme,drive=nvme{disk},serial=KAGI{i:02}D{disk:02}']
+        cmd += [
+            '-drive',
+            f'file={directory}/nvme-{disk}.raw,if=none,id=nvme{disk},format=raw,discard=unmap',
+            '-device',
+            f'nvme,drive=nvme{disk},serial=KAGI{i:02}D{disk:02}',
+        ]
     return cmd
 
 
 def prepare_node(i, config):
+    # Keep each VM's writable disks and UEFI state separate from the shared base image.
     directory = STATE / f'node-{i:02}'
     directory.mkdir(exist_ok=True)
     if (directory / 'ready').exists():
@@ -327,8 +434,18 @@ def prepare_node(i, config):
     if active(i):
         raise RuntimeError('Cannot provision an active incomplete VM')
     if not (directory / 'os.qcow2').exists():
-        run('qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2', '-b', STATE / 'ubuntu.qcow2',
-            directory / 'os.qcow2', f'{config["os_gib"]}G')
+        run(
+            'qemu-img',
+            'create',
+            '-f',
+            'qcow2',
+            '-F',
+            'qcow2',
+            '-b',
+            STATE / 'ubuntu.qcow2',
+            directory / 'os.qcow2',
+            f'{config["os_gib"]}G',
+        )
     if not (directory / 'VARS.fd').exists():
         shutil.copyfile(config['ovmf_vars'], directory / 'VARS.fd')
     for disk in range(1, 7):
@@ -338,23 +455,65 @@ def prepare_node(i, config):
                 stream.truncate(5_000_000_000)
     seed = directory / 'seed'
     seed.mkdir(exist_ok=True)
-    write(seed / 'user-data', '#cloud-config\n' + json.dumps(cloud_config(i, config,
-          (STATE / 'id_ed25519.pub').read_text().strip()), indent=2))
-    write(seed / 'meta-data', json.dumps({'instance-id': f'kagi-lab-{i:02}',
-                                        'local-hostname': f'kagi-{i:02}'}))
-    write(seed / 'network-config', json.dumps({'version': 2, 'ethernets': {
-        'lab0': {'match': {'macaddress': f'52:54:00:11:00:{i:02x}'}, 'set-name': 'lab0',
-                 'dhcp4': False, 'dhcp6': False, 'accept-ra': False,
-                 'addresses': [node(i)[0] + '/24']},
-        'wan0': {'match': {'macaddress': f'52:54:00:22:00:{i:02x}'}, 'set-name': 'wan0',
-                 'dhcp4': True, 'dhcp6': False, 'accept-ra': False}}}, indent=2))
+    write(
+        seed / 'user-data',
+        '#cloud-config\n'
+        + json.dumps(
+            cloud_config(i, config, (STATE / 'id_ed25519.pub').read_text().strip()),
+            indent=2,
+        ),
+    )
+    write(
+        seed / 'meta-data',
+        json.dumps(
+            {'instance-id': f'kagi-lab-{i:02}', 'local-hostname': f'kagi-{i:02}'}
+        ),
+    )
+    write(
+        seed / 'network-config',
+        json.dumps(
+            {
+                'version': 2,
+                'ethernets': {
+                    'lab0': {
+                        'match': {'macaddress': f'52:54:00:11:00:{i:02x}'},
+                        'set-name': 'lab0',
+                        'dhcp4': False,
+                        'dhcp6': False,
+                        'accept-ra': False,
+                        'addresses': [node(i)[0] + '/24'],
+                    },
+                    'wan0': {
+                        'match': {'macaddress': f'52:54:00:22:00:{i:02x}'},
+                        'set-name': 'wan0',
+                        'dhcp4': True,
+                        'dhcp6': False,
+                        'accept-ra': False,
+                    },
+                },
+            },
+            indent=2,
+        ),
+    )
     if not (seed / 'source.bundle').exists():
         os.link(STATE / 'source.bundle', seed / 'source.bundle')
-    run('xorriso', '-as', 'mkisofs', '-quiet', '-volid', 'cidata', '-joliet', '-rock',
-        '-output', directory / 'seed.iso', seed)
+    run(
+        'xorriso',
+        '-as',
+        'mkisofs',
+        '-quiet',
+        '-volid',
+        'cidata',
+        '-joliet',
+        '-rock',
+        '-output',
+        directory / 'seed.iso',
+        seed,
+    )
     account = pwd.getpwnam(USER)
     for path in [directory, *directory.rglob('*')]:
         os.chown(path, account.pw_uid, account.pw_gid)
+    # Mark the VM reusable only after its disks and seed are ready.
     write(directory / 'ready', 'provisioned\n')
 
 
@@ -368,7 +527,9 @@ def powerdown(i):
             if 'QMP' not in greeting:
                 raise RuntimeError('Invalid QMP greeting')
             for command in ('qmp_capabilities', 'system_powerdown'):
-                stream.write((json.dumps({'execute': command, 'id': command}) + '\n').encode())
+                stream.write(
+                    (json.dumps({'execute': command, 'id': command}) + '\n').encode()
+                )
                 stream.flush()
                 while True:
                     reply = json.loads(stream.readline())
@@ -379,10 +540,25 @@ def powerdown(i):
 
 
 def ssh_cmd(i, command=None):
-    cmd = ['ssh', '-i', str(STATE / 'id_ed25519'), '-o', 'IdentitiesOnly=yes',
-           '-o', 'StrictHostKeyChecking=accept-new', '-o', f'UserKnownHostsFile={STATE}/known_hosts',
-           '-o', 'ConnectTimeout=5', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=10',
-           '-o', 'ServerAliveCountMax=2']
+    cmd = [
+        'ssh',
+        '-i',
+        str(STATE / 'id_ed25519'),
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        f'UserKnownHostsFile={STATE}/known_hosts',
+        '-o',
+        'ConnectTimeout=5',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'ServerAliveInterval=10',
+        '-o',
+        'ServerAliveCountMax=2',
+    ]
     if command is None:
         cmd += ['-t']
     return cmd + [f'admin@{node(i)[0]}'] + ([] if command is None else [command])
@@ -391,14 +567,35 @@ def ssh_cmd(i, command=None):
 def up(args):
     if platform.machine() not in ('x86_64', 'amd64') or not Path('/dev/kvm').exists():
         raise RuntimeError('Requires an x86-64 Linux host with /dev/kvm enabled')
-    for program in ('qemu-system-x86_64', 'qemu-img', 'ip', 'nft', 'xorriso', 'curl',
-                    'ssh', 'ssh-keygen', 'git', 'systemd-run', 'systemctl'):
+    for program in (
+        'qemu-system-x86_64',
+        'qemu-img',
+        'ip',
+        'nft',
+        'xorriso',
+        'curl',
+        'ssh',
+        'ssh-keygen',
+        'git',
+        'systemd-run',
+        'systemctl',
+    ):
         if not shutil.which(program):
-            raise RuntimeError(f'Missing {program}; see --help host package list (also install git)')
+            raise RuntimeError(
+                f'Missing {program}; see --help host package list (also install git)'
+            )
     try:
         account = pwd.getpwnam(USER)
     except KeyError:
-        run('useradd', '--system', '--user-group', '--no-create-home', '--shell', '/usr/sbin/nologin', USER)
+        run(
+            'useradd',
+            '--system',
+            '--user-group',
+            '--no-create-home',
+            '--shell',
+            '/usr/sbin/nologin',
+            USER,
+        )
         account = pwd.getpwnam(USER)
     os.chown(STATE, 0, account.pw_gid)
     STATE.chmod(0o750)
@@ -410,8 +607,13 @@ def up(args):
         config = vars(args).copy()
         if bool(args.ovmf_code) != bool(args.ovmf_vars):
             raise RuntimeError('Supply both firmware paths')
-        code, variables = (args.ovmf_code, args.ovmf_vars) if args.ovmf_code else firmware()
-        config.update(ovmf_code=str(Path(code).resolve()), ovmf_vars=str(Path(variables).resolve()))
+        code, variables = (
+            (args.ovmf_code, args.ovmf_vars) if args.ovmf_code else firmware()
+        )
+        config.update(
+            ovmf_code=str(Path(code).resolve()),
+            ovmf_vars=str(Path(variables).resolve()),
+        )
         # Resolve and bundle once so every node builds the exact same revision.
         source = STATE / 'source.bundle'
         if args.repo_bundle:
@@ -427,8 +629,15 @@ def up(args):
         if inspect.exists():
             shutil.rmtree(inspect)
         run('git', 'clone', '--bare', source, inspect)
-        config['commit'] = run('git', '-C', inspect, 'rev-parse', '--verify',
-                               (args.ref or 'HEAD') + '^{commit}', capture=True).stdout.strip()
+        config['commit'] = run(
+            'git',
+            '-C',
+            inspect,
+            'rev-parse',
+            '--verify',
+            (args.ref or 'HEAD') + '^{commit}',
+            capture=True,
+        ).stdout.strip()
         write(config_path, json.dumps(config, indent=2))
     image = base_image()
     image.chmod(0o644)
@@ -438,19 +647,38 @@ def up(args):
     for i in range(1, 9):
         prepare_node(i, config)
         if not active(i):
-            run('systemctl', 'reset-failed', f'kagi-lab-{i:02}', check=False, capture=True)
-            run('systemd-run', '--collect', f'--unit=kagi-lab-{i:02}',
-                '--property=Type=exec', f'--property=User={USER}',
-                '--property=SupplementaryGroups=kvm', '--property=KillSignal=SIGTERM',
-                '--property=TimeoutStopSec=120', *qemu_args(i, config))
-    print('VMs launched. Run wait to verify all eight guest builds. Credentials: admin/admin; root/admin.')
+            run(
+                'systemctl',
+                'reset-failed',
+                f'kagi-lab-{i:02}',
+                check=False,
+                capture=True,
+            )
+            run(
+                'systemd-run',
+                '--collect',
+                f'--unit=kagi-lab-{i:02}',
+                '--property=Type=exec',
+                f'--property=User={USER}',
+                '--property=SupplementaryGroups=kvm',
+                '--property=KillSignal=SIGTERM',
+                '--property=TimeoutStopSec=120',
+                *qemu_args(i, config),
+            )
+    print(
+        'VMs launched. Run wait to verify all eight guest builds. Credentials: admin/admin; root/admin.'
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument('action', choices=['up', 'wait', 'status', 'stop', 'ssh'])
     parser.add_argument('node', nargs='?', type=int, choices=range(1, 9))
-    parser.add_argument('--memory', type=int, default=4096, help='MiB per VM, first creation only')
+    parser.add_argument(
+        '--memory', type=int, default=4096, help='MiB per VM, first creation only'
+    )
     parser.add_argument('--cpus', type=int, default=2)
     parser.add_argument('--jobs', type=int, default=2, help='Cargo build jobs per VM')
     parser.add_argument('--os-gib', type=int, default=80)
@@ -463,13 +691,23 @@ def main():
     parser.add_argument('--ovmf-code')
     parser.add_argument('--ovmf-vars')
     parser.add_argument('--timeout', type=int, default=7200)
-    parser.add_argument('--force', action='store_true', help='Permit forced stop after graceful shutdown timeout')
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Permit forced stop after graceful shutdown timeout',
+    )
     args = parser.parse_args()
     if os.geteuid() != 0:
-        parser.error('Run with sudo; this script creates KVM services and host-only networks')
+        parser.error(
+            'Run with sudo; this script creates KVM services and host-only networks'
+        )
     if min(args.memory, args.cpus, args.jobs, args.os_gib, args.timeout) <= 0:
         parser.error('Resource sizes and timeout must be positive')
-    if args.action == 'up' and 'cuda' in args.features.replace(',', ' ').split() and not args.cuda_toolkit:
+    if (
+        args.action == 'up'
+        and 'cuda' in args.features.replace(',', ' ').split()
+        and not args.cuda_toolkit
+    ):
         parser.error('--features cuda requires --cuda-toolkit')
     STATE.mkdir(mode=0o750, parents=True, exist_ok=True)
     with (STATE / 'lock').open('a') as lock:
@@ -484,15 +722,24 @@ def main():
                     try:
                         powerdown(i)
                     except (OSError, RuntimeError, ValueError):
-                        run(*ssh_cmd(i, 'sudo shutdown -h now'), check=False, capture=True)
+                        run(
+                            *ssh_cmd(i, 'sudo shutdown -h now'),
+                            check=False,
+                            capture=True,
+                        )
             deadline = time.monotonic() + 90
             while any(active(i) for i in range(1, 9)) and time.monotonic() < deadline:
                 time.sleep(2)
             remaining = [f'kagi-lab-{i:02}' for i in range(1, 9) if active(i)]
             if remaining:
                 if not args.force:
-                    raise RuntimeError(f'Graceful shutdown timed out: {remaining}; use stop --force to terminate')
-                print('Guest shutdown timed out; stopping remaining QEMU processes:', remaining)
+                    raise RuntimeError(
+                        f'Graceful shutdown timed out: {remaining}; use stop --force to terminate'
+                    )
+                print(
+                    'Guest shutdown timed out; stopping remaining QEMU processes:',
+                    remaining,
+                )
                 run('systemctl', 'kill', '--signal=SIGTERM', *remaining)
         elif args.action == 'ssh':
             if args.node is None:
@@ -501,22 +748,37 @@ def main():
         else:
             pending = set(range(1, 9))
             deadline = time.monotonic() + args.timeout
-            probe = ('if test -f /var/lib/kagi-build/success; then echo BUILT; '
-                     'cat /var/lib/kagi-build/success; '
-                     'elif test -f /var/lib/kagi-build/failed; then echo FAILED; '
-                     'elif systemctl is-failed --quiet kagi-build.service; then echo FAILED; '
-                     'elif cloud-init status 2>/dev/null | grep -q "status: error"; then echo FAILED; '
-                     'else echo PROVISIONING; fi')
+            probe = (
+                'if test -f /var/lib/kagi-build/success; then echo BUILT; '
+                'cat /var/lib/kagi-build/success; '
+                'elif test -f /var/lib/kagi-build/failed; then echo FAILED; '
+                'elif systemctl is-failed --quiet kagi-build.service; then echo FAILED; '
+                'elif cloud-init status 2>/dev/null | grep -q "status: error"; then echo FAILED; '
+                'else echo PROVISIONING; fi'
+            )
             while pending:
                 for i in sorted(pending):
-                    result = run(*ssh_cmd(i, probe), check=False, capture=True) if active(i) else None
-                    state = ('STOPPED' if result is None else
-                             (result.stdout.strip() if result.returncode == 0 else 'SSH-NOT-READY'))
+                    result = (
+                        run(*ssh_cmd(i, probe), check=False, capture=True)
+                        if active(i)
+                        else None
+                    )
+                    state = (
+                        'STOPPED'
+                        if result is None
+                        else (
+                            result.stdout.strip()
+                            if result.returncode == 0
+                            else 'SSH-NOT-READY'
+                        )
+                    )
                     print(f'kagi-{i:02} {node(i)[0]:14} {state}', flush=True)
                     if state.startswith('BUILT'):
                         pending.remove(i)
                     elif state in ('FAILED', 'STOPPED') and args.action == 'wait':
-                        raise RuntimeError(f'Node {i}: {state}; inspect serial.log and /var/log/kagi-build.log')
+                        raise RuntimeError(
+                            f'Node {i}: {state}; inspect serial.log and /var/log/kagi-build.log'
+                        )
                 if args.action == 'status' or not pending:
                     break
                 if time.monotonic() >= deadline:

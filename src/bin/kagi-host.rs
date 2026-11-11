@@ -7,7 +7,6 @@
 //! It preserves atomic temporary-write/sync/rename semantics so local testing follows the
 //! same durability assumptions used by the distributed node.
 
-// Standalone/local host object server and deterministic local-disk placement endpoint.
 use anyhow::{bail, Context, Result};
 use axum::{
     body::Body,
@@ -27,7 +26,8 @@ use std::{
     sync::Arc,
 };
 use tokio::{io::AsyncWriteExt, net::TcpListener};
-// ---- CLI and local-host configuration -----------------------------------------
+
+// CLI and local-host configuration
 #[derive(Parser)]
 #[command(
     name = "kagi-host",
@@ -41,7 +41,7 @@ struct Cli {
     command: Command,
 }
 #[derive(Subcommand)]
-/// Supported Command states or operations.
+/// Local disk initialization, inspection, and serving commands.
 enum Command {
     Serve,
     Validate,
@@ -53,7 +53,6 @@ enum Command {
     Delete { key: String },
 }
 #[derive(Debug, Clone, Deserialize)]
-/// Kagi state or configuration used by the Config path.
 struct Config {
     cluster: Cluster,
     host: Host,
@@ -63,14 +62,12 @@ struct Config {
     placement: Placement,
 }
 #[derive(Debug, Clone, Deserialize)]
-/// Kagi state or configuration used by the Cluster path.
 struct Cluster {
     id: String,
     #[serde(default)]
     placement_salt: u64,
 }
 #[derive(Debug, Clone, Deserialize)]
-/// Kagi state or configuration used by the Host path.
 struct Host {
     id: String,
     #[serde(default)]
@@ -80,7 +77,6 @@ struct Host {
     disks: Vec<Disk>,
 }
 #[derive(Debug, Clone, Deserialize)]
-/// Kagi state or configuration used by the Disk path.
 struct Disk {
     id: String,
     path: PathBuf,
@@ -89,12 +85,11 @@ struct Disk {
     #[serde(default)]
     expected_capacity_bytes: Option<u64>,
 }
-/// Implements the one step and keeps its validation and state transitions visible at the call site.
+
 fn one() -> f64 {
     1.0
 }
 #[derive(Debug, Clone, Deserialize)]
-/// Kagi state or configuration used by the Server path.
 struct Server {
     #[serde(default = "listen_default")]
     listen: String,
@@ -109,16 +104,15 @@ impl Default for Server {
         }
     }
 }
-/// Implements the listen default step and keeps its validation and state transitions visible at the call site.
+
 fn listen_default() -> String {
     "0.0.0.0:7400".into()
 }
-/// Implements the admin default step and keeps its validation and state transitions visible at the call site.
+
 fn admin_default() -> String {
     "127.0.0.1:7401".into()
 }
 #[derive(Debug, Clone, Deserialize)]
-/// Kagi state or configuration used by the Placement path.
 struct Placement {
     #[serde(default = "slot_bits")]
     slot_bits: u8,
@@ -133,15 +127,16 @@ impl Default for Placement {
         }
     }
 }
-/// Implements the slot bits step and keeps its validation and state transitions visible at the call site.
+
 fn slot_bits() -> u8 {
     24
 }
-/// Implements the maxfrag step and keeps its validation and state transitions visible at the call site.
+
 fn maxfrag() -> usize {
     1
 }
-// ---- Runtime status and local placement model ---------------------------------
+
+// Runtime status and local placement model
 #[derive(Debug, Serialize)]
 struct DiskStatus {
     id: String,
@@ -154,7 +149,6 @@ struct DiskStatus {
     state: String,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the Status path.
 struct Status {
     cluster: String,
     host: String,
@@ -165,11 +159,11 @@ struct Status {
     disks: Vec<DiskStatus>,
 }
 #[derive(Clone)]
-/// Kagi state or configuration used by the App path.
 struct App {
     cfg: Arc<Config>,
 }
-// ---- Deterministic 64-bit key position and disk selection ---------------------
+
+// Deterministic 64-bit key position and disk selection
 fn hash64(parts: &[&[u8]]) -> u64 {
     let mut h = Hasher::new();
     for p in parts {
@@ -177,20 +171,21 @@ fn hash64(parts: &[&[u8]]) -> u64 {
     }
     u64::from_le_bytes(h.finalize().as_bytes()[0..8].try_into().unwrap())
 }
-/// Implements the keypos step and keeps its validation and state transitions visible at the call site.
+
 fn keypos(cluster: &str, key: &str) -> u64 {
     hash64(&[cluster.as_bytes(), b"\0", key.as_bytes()])
 }
-/// Implements the u01 step and keeps its validation and state transitions visible at the call site.
+
 fn u01(x: u64) -> f64 {
     ((x as f64) + 1.0) / ((u64::MAX as f64) + 2.0)
 }
-/// Implements the score step and keeps its validation and state transitions visible at the call site.
+
 fn score(pos: u64, salt: u64, d: &Disk) -> f64 {
     let h = hash64(&[&pos.to_le_bytes(), &salt.to_le_bytes(), d.id.as_bytes()]);
     u01(h).powf(1.0 / d.weight.max(1e-12))
 }
-/// Implements the local disk step and keeps its validation and state transitions visible at the call site.
+
+/// Choose the highest-scoring configured local disk for a key position.
 fn local_disk(cfg: &Config, pos: u64) -> Option<&Disk> {
     cfg.host.disks.iter().max_by(|a, b| {
         score(pos, cfg.cluster.placement_salt, a).total_cmp(&score(
@@ -200,7 +195,7 @@ fn local_disk(cfg: &Config, pos: u64) -> Option<&Disk> {
         ))
     })
 }
-/// Implements the object path step and keeps its validation and state transitions visible at the call site.
+
 fn object_path(d: &Disk, pos: u64, key: &str) -> PathBuf {
     let digest = blake3::hash(key.as_bytes()).to_hex().to_string();
     d.path
@@ -210,12 +205,11 @@ fn object_path(d: &Disk, pos: u64, key: &str) -> PathBuf {
         .join(format!("{:02x}", (pos >> 48) & 0xff))
         .join(digest)
 }
-/// Implements the identity path step and keeps its validation and state transitions visible at the call site.
+
 fn identity_path(d: &Disk) -> PathBuf {
     d.path.join(".keyspace").join("disk-id")
 }
 #[cfg(unix)]
-/// Implements the statvfs step and keeps its validation and state transitions visible at the call site.
 fn statvfs(path: &FsPath) -> (u64, u64) {
     use std::process::Command;
     let out = Command::new("df")
@@ -236,11 +230,10 @@ fn statvfs(path: &FsPath) -> (u64, u64) {
     (0, 0)
 }
 #[cfg(not(unix))]
-/// Implements the statvfs step and keeps its validation and state transitions visible at the call site.
 fn statvfs(_: &FsPath) -> (u64, u64) {
     (0, 0)
 }
-/// Implements the disk status step and keeps its validation and state transitions visible at the call site.
+
 fn disk_status(d: &Disk) -> DiskStatus {
     let mounted = d.path.exists();
     let writable = if mounted {
@@ -276,7 +269,7 @@ fn disk_status(d: &Disk) -> DiskStatus {
         state: state.into(),
     }
 }
-/// Implements the validate step and keeps its validation and state transitions visible at the call site.
+
 fn validate(cfg: &Config) -> Result<()> {
     if cfg.host.disks.is_empty() {
         bail!("host has no disks")
@@ -329,14 +322,14 @@ fn validate(cfg: &Config) -> Result<()> {
     }
     Ok(())
 }
-/// Implements the load step and keeps its validation and state transitions visible at the call site.
+
 fn load(path: &PathBuf) -> Result<Config> {
     serde_saphyr::from_str(
         &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
     )
     .context("parse host YAML")
 }
-/// Implements the health step and keeps its validation and state transitions visible at the call site.
+
 async fn health(State(a): State<App>) -> impl IntoResponse {
     let disks = a.cfg.host.disks.iter().map(disk_status).collect::<Vec<_>>();
     let ok = disks.iter().all(|d| d.state == "online");
@@ -360,7 +353,7 @@ async fn health(State(a): State<App>) -> impl IntoResponse {
         body,
     )
 }
-/// Implements the locate step and keeps its validation and state transitions visible at the call site.
+
 async fn locate(State(a): State<App>, Path(key): Path<String>) -> impl IntoResponse {
     let pos = keypos(&a.cfg.cluster.id, &key);
     let disk = local_disk(&a.cfg, pos).map(|d| d.id.clone());
@@ -369,7 +362,8 @@ async fn locate(State(a): State<App>, Path(key): Path<String>) -> impl IntoRespo
     }
     ))
 }
-/// Implements the put obj step and keeps its validation and state transitions visible at the call site.
+
+/// Sync a temporary file on the target disk before publishing it with rename.
 async fn put_obj(
     State(a): State<App>,
     Path(key): Path<String>,
@@ -413,7 +407,7 @@ async fn put_obj(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the get obj step and keeps its validation and state transitions visible at the call site.
+
 async fn get_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
     let pos = keypos(&a.cfg.cluster.id, &key);
     let Some(d) = local_disk(&a.cfg, pos) else {
@@ -430,7 +424,7 @@ async fn get_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the head obj step and keeps its validation and state transitions visible at the call site.
+
 async fn head_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
     let pos = keypos(&a.cfg.cluster.id, &key);
     let Some(d) = local_disk(&a.cfg, pos) else {
@@ -446,7 +440,7 @@ async fn head_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the delete obj step and keeps its validation and state transitions visible at the call site.
+
 async fn delete_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
     let pos = keypos(&a.cfg.cluster.id, &key);
     let Some(d) = local_disk(&a.cfg, pos) else {
@@ -458,7 +452,7 @@ async fn delete_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the serve step and keeps its validation and state transitions visible at the call site.
+
 async fn serve(cfg: Config) -> Result<()> {
     validate(&cfg)?;
     let addr: SocketAddr = cfg.server.listen.parse().context("invalid server.listen")?;
@@ -477,7 +471,6 @@ async fn serve(cfg: Config) -> Result<()> {
     Ok(())
 }
 #[tokio::main]
-/// Implements the main step and keeps its validation and state transitions visible at the call site.
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg = load(&cli.config)?;

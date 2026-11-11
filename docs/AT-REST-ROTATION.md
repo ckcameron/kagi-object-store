@@ -41,5 +41,6 @@ cluster:
     2: "ACTIVE_BASE64_32_BYTE_KEY"
 ```
 
-Configuration changes take effect on process restart. The keyring is local
-configuration, never replicated in Raft metadata or returned by the API.
+Restart the process to load keyring changes. Each node reads keys from its local
+configuration. The keyring is absent from Raft metadata and API responses.
+See the [node configuration reference](CONFIGURATION.md#runtime-node-configuration).

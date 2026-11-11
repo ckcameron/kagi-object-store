@@ -4,17 +4,13 @@
 //!
 //! This module decodes PR IN/OUT commands, validates service actions, updates the replicated
 //! reservation model, and produces standards-shaped response payloads. The decoder keeps
-//! wire-format handling separate from the higher-level reservation policy in `block.rs`.
+//! wire-format handling separate from the reservation policy in `block.rs`.
+//! Target frontends handle transport and commit reservation updates through Raft.
 
-// SPC-3/4 Persistent Reservation CDB decoding/encoding helpers.
-//! SPC-3/4 Persistent Reservation wire helpers for target frontends.
-//! This module deliberately contains no transport code: virtio-scsi, iSCSI/TCMU,
-//! or another SCSI target maps CDBs to these operations and commits them through Raft.
 use crate::block::{PrIn, PrOut, PrType};
 use anyhow::{bail, Result};
 pub const OP_PERSISTENT_RESERVE_IN: u8 = 0x5e;
 pub const OP_PERSISTENT_RESERVE_OUT: u8 = 0x5f;
-/// Implements the type from code step and keeps its validation and state transitions visible at the call site.
 pub fn type_from_code(c: u8) -> Result<PrType> {
     Ok(match c & 0x0f {
         1 => PrType::WriteExclusive,
@@ -26,7 +22,7 @@ pub fn type_from_code(c: u8) -> Result<PrType> {
         _ => bail!("unsupported SCSI PR type {c:#x}"),
     })
 }
-/// Implements the type code step and keeps its validation and state transitions visible at the call site.
+
 pub fn type_code(t: PrType) -> u8 {
     match t {
         PrType::WriteExclusive => 1,

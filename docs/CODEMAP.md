@@ -2,7 +2,8 @@
 
 # Source Code Map
 
-The source files carry module-level comments; this document provides an additional map for reviewers navigating the code.
+Start at a binary for command-line or service wiring. Follow the relevant module
+for the persistence, protocol, or compute path.
 
 | Path | Responsibility |
 | --- | --- |
@@ -17,20 +18,31 @@ The source files carry module-level comments; this document provides an addition
 | `src/recovery.rs` | Resource health states, heartbeat processing, failure-domain inference, quarantine/reinclusion, repair risk. |
 | `src/maintenance.rs` | Schedules, network/CPU/memory/concurrency budgets, and maintenance-vs-foreground priority. |
 | `src/pq.rs` | ML-DSA identities, signed request envelopes, key IDs, Raft-fed keyring, nonce replay cache, persistent session epoch/sequence anti-replay. |
-| `src/tls.rs` | rustls TLS/mTLS provider and certificate/key loading. |
+| `src/tls.rs` | rustls/AWS-LC provider, native TLS server configuration, and certificate/key loading. |
+| `src/quic_transport.rs`, `src/wire.rs` | Optional QUIC client, stream framing, and frame-length limits. |
 | `src/erasure.rs` | Reed-Solomon, canonical product-matrix MSR, CLAY reference/linearized transforms, LRC rank reconstruction/local repair, exact-repair plans, CPU/GPU adaptive dispatch and metrics. |
 | `src/storage.rs` | NVMe/SATA/SAS/FC device type detection, SMART/SCSI health normalization and identity matching. |
 | `src/filesystem.rs` | File/directory metadata, NFSv4-like ACL evaluation, local overlay index and bottom-up tree reconstruction. |
 | `src/block.rs` | Sparse object-backed zvol-like volume extents, SCSI identity, UNMAP, SCSI-3 PR state/semantics. |
 | `src/scsi_pr.rs` | SCSI Persistent Reserve IN/OUT wire parsing and response encoding. |
+| `src/security.rs`, `src/runtime_security.rs` | Logical rules, side actions, request gates, and configuration/runtime audits. |
+| `src/security_ebpf.rs`, `security/kagi-guard-ebpf/` | Userspace kernel-policy loader, event reader, and target-kernel BPF program. |
+| `src/checkpoint.rs`, `src/durability.rs` | Atomic planner checkpoints and loss/durability reporting. |
+| `src/monitoring.rs`, `src/telemetry.rs`, `src/webui.rs` | Security events, bounded node telemetry, console authentication, and embedded UI. |
+| `src/cpu_isa.rs`, `src/cpu_libraries.rs` | SIMD feature detection, CPU arithmetic, and optional runtime-loaded compute libraries. |
+| `src/bin/kagi-bench.rs`, `benches/erasure.rs` | Correctness-checked compute benchmarks and Criterion regression benchmarks. |
+| `src/bin/kagi-run.rs` | Linux scheduler and affinity launcher. |
+| `deploy/kubernetes/csi/main.go` | CSI controller and node service, including reservation fencing and NBD staging. |
 
 ## Review order
 
-For placement work start with `src/main.rs`, then `src/cluster.rs`. For consistency and topology changes start with `src/raftmeta.rs`, then `kagi-cluster-host.rs`. For VM storage start with `src/block.rs`, `src/scsi_pr.rs`, and `kagi-volume-nbd.rs`. For security review start with `src/pq.rs`, `src/tls.rs`, and the internal endpoint handlers in `cluster.rs`/`kagi-cluster-host.rs`.
+For placement work start with `src/main.rs`, then `src/cluster.rs`. For consistency and topology changes start with `src/raftmeta.rs`, then `kagi-cluster-host.rs`. For VM or Kubernetes storage, start with `src/block.rs`, `src/scsi_pr.rs`, and
+`src/bin/kagi-volume-nbd.rs`. Follow the CSI entry points in
+`deploy/kubernetes/csi/main.go` when tracing a Kubernetes publish request. For security review start with `src/pq.rs`, `src/tls.rs`, and the internal endpoint handlers in `cluster.rs`/`kagi-cluster-host.rs`.
 
-## Monte Carlo additions
+## Planner
 
-`src/main.rs` now contains three distinct planning layers:
+`src/main.rs` organizes planning into three layers.
 
 1. **Topology acquisition and normalization** — quick/full wizard input, deterministic names/mounts, sequential private IPv4 allocation, disk-class AFR resolution, and six-host/six-disk validation.
 2. **Failure simulation and placement** — capacity-weighted rendezvous placement, site/rack/host/disk/network failure sampling, correlated events, importance sampling, repair trajectories, and explicit slot maps.
@@ -52,8 +64,15 @@ Key pieces:
 
 The renderer writes ANSI line-clearing/cursor movement only to stderr and only when stderr reports `IsTerminal`. Non-TTY execution keeps the simulation/output path clean and bypasses counter updates.
 
-### `src/webui.rs`
-Kagi embedded operations-console support: Argon2id local user database, viewer/admin role verification, system telemetry, bounded log tailing, and the embedded dark teal/electric-blue browser application. The live API handlers are in `kagi-cluster-host.rs` because they operate directly on the daemon's Raft/health/data-plane state.
+### Operations console
 
-### `cuda/montecarlo.cu`
-Optional CUDA bulk-readability evaluator for Monte Carlo EC geometry search. CPU/Rayon code generates topology-aware failure/placement scenarios; the GPU evaluates batched fragment-survival vectors for replication, MDS-style Reed-Solomon/MSR/CLAY, and LRC readability.
+`src/webui.rs` owns the Argon2id user database, viewer/admin role verification,
+bounded log tailing, and the embedded browser application. Live API handlers
+in `src/bin/kagi-cluster-host.rs` read Raft, health, and storage state.
+
+### Accelerator boundaries
+
+The planner generates failure and placement scenarios on the CPU with Rayon.
+The CUDA kernel in `cuda/montecarlo.cu` evaluates batches of fragment-survival
+vectors. HIP/ROCm and OpenCL have parallel implementations in `hip/montecarlo.hip.cpp`
+and `native/opencl.cpp`. See [acceleration](ACCELERATION.md) for backend requirements.
