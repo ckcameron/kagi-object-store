@@ -5,11 +5,9 @@
 //! Storage devices are classified by media/backend type and checked against configured
 //! identity information before use. Unknown or mismatched volumes are kept out of placement
 //! until an administrator explicitly admits them, which prevents accidental reuse of a
-//! mounted filesystem or a disk moved from another node.
+//! mounted filesystem or a disk moved from another node. The rotational backend supports
+//! local SATA/SAS disks and Fibre Channel SCSI LUNs.
 
-// Physical-device discovery and health normalization for NVMe, SATA, SAS and Fibre Channel storage.
-//! Physical backend discovery and health for NVMe and rotational block devices.
-//! Rotational backends support direct-attached SATA/SAS and Fibre Channel SCSI LUNs.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,7 +17,7 @@ use std::{
 };
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-/// Supported StorageKind states or operations.
+/// Configured device type used for admission and health reporting.
 pub enum StorageKind {
     #[default]
     Auto,
@@ -171,7 +169,6 @@ pub fn apply_queue_tuning(device: &str, tuning: &QueueTuning) -> Result<QueueSet
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-/// Kagi state or configuration used by the DeviceHealth path.
 pub struct DeviceHealth {
     pub ok: bool,
     pub kind: StorageKind,
@@ -191,20 +188,20 @@ pub struct DeviceHealth {
     pub temperature_c: Option<i64>,
     pub reason: Option<String>,
 }
-/// Implements the text step and keeps its validation and state transitions visible at the call site.
+
 fn text(v: Option<&serde_json::Value>) -> Option<String> {
     v.and_then(|x| x.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
-/// Implements the u64v step and keeps its validation and state transitions visible at the call site.
+
 fn u64v(v: Option<&serde_json::Value>) -> Option<u64> {
     v.and_then(|x| x.as_u64()).or_else(|| {
         v.and_then(|x| x.as_i64())
             .and_then(|x| u64::try_from(x).ok())
     })
 }
-/// Implements the attr raw step and keeps its validation and state transitions visible at the call site.
+
 fn attr_raw(table: &serde_json::Value, name: &str) -> u64 {
     table
         .get("ata_smart_attributes")
@@ -224,7 +221,7 @@ fn attr_raw(table: &serde_json::Value, name: &str) -> u64 {
         .and_then(|value| value.as_u64())
         .unwrap_or(0)
 }
-/// Implements the smartctl step and keeps its validation and state transitions visible at the call site.
+
 fn smartctl(device: &str) -> Option<serde_json::Value> {
     // smartctl auto-detects NVMe, ATA/SATA, SAS/SCSI and most FC-attached SCSI devices.
     let out = Command::new("smartctl")
@@ -234,7 +231,7 @@ fn smartctl(device: &str) -> Option<serde_json::Value> {
     // smartctl uses exit bits for SMART findings, so parse useful JSON even on non-zero status.
     serde_json::from_slice(&out.stdout).ok()
 }
-/// Implements the lsblk step and keeps its validation and state transitions visible at the call site.
+
 fn lsblk(device: &str) -> Option<serde_json::Value> {
     let out = Command::new("lsblk")
         .args([
@@ -252,7 +249,7 @@ fn lsblk(device: &str) -> Option<serde_json::Value> {
     }
     serde_json::from_slice(&out.stdout).ok()
 }
-/// Implements the norm transport step and keeps its validation and state transitions visible at the call site.
+
 fn norm_transport(s: Option<String>) -> Option<String> {
     s.map(|x| match x.to_ascii_lowercase().as_str() {
         "ata" => "sata".into(),
@@ -260,7 +257,7 @@ fn norm_transport(s: Option<String>) -> Option<String> {
         x => x.into(),
     })
 }
-/// Implements the inferred kind step and keeps its validation and state transitions visible at the call site.
+
 fn inferred_kind(transport: Option<&str>, rotational: Option<bool>, device: &str) -> StorageKind {
     if device.contains("nvme") {
         return StorageKind::Nvme;
@@ -272,7 +269,7 @@ fn inferred_kind(transport: Option<&str>, rotational: Option<bool>, device: &str
         _ => StorageKind::Auto,
     }
 }
-/// Implements the compatible step and keeps its validation and state transitions visible at the call site.
+
 fn compatible(expected: &StorageKind, actual: &StorageKind, rotational: Option<bool>) -> bool {
     match expected {
         StorageKind::Auto => true,

@@ -2,11 +2,13 @@
 
 # Kagi Web Operations Console
 
-The Kagi node daemon serves an embedded operations console at `/ui` on every node. The console is dark-themed with teal/electric-blue accents and is intentionally backed by live Raft/health/data-plane state rather than a separate monitoring database.
+`kagi-cluster-host` serves the operations console at `/ui` when enabled. The
+console reads live Raft, health, and storage state.
 
 ## Authentication
 
-The initial authentication provider is a local YAML user database using Argon2id password hashes and `viewer` / `admin` roles. Configure:
+The console uses a local YAML user database with Argon2id password hashes and
+`viewer` and `admin` roles. The node configuration selects the database and log paths.
 
 ```yaml
 web_console:
@@ -25,7 +27,10 @@ kagi-cluster-host --config /etc/kagi/node.yaml web-user-add admin --role admin -
 rm /root/kagi-admin.pass
 ```
 
-Browser authentication currently uses HTTP Basic against the Argon2id user database. Do not expose it over cleartext networks. Use the node behind TLS or a trusted TLS reverse proxy until native server-side TLS termination is enabled in the daemon.
+The browser uses HTTP Basic authentication against the local database. Serve
+it over HTTPS. Setting the node's [`tls` configuration](CONFIGURATION.md#transport-caveats)
+enables native TLS for the web and API listener. A trusted reverse proxy can
+also terminate TLS with a private upstream connection to the daemon.
 
 ## Views
 
@@ -33,17 +38,20 @@ Browser authentication currently uses HTTP Basic against the Argon2id user datab
 - **Object explorer** — prefix search, immutable manifest metadata, EC family/geometry, every chunk replica, host/rack/site/disk locality, current resource health, checksum metadata, and known pending GC or snapshot-archive work.
 - **Buckets & Lifecycle** — viewer inspection plus admin creation/update of Raft-replicated bucket metadata, versioning intent and default WORM mode/retain-until/legal-hold properties. Object PUTs inherit the bucket WORM default if no per-object retention header is supplied.
 - **Logs** — local console-event tail or keyspace-wide aggregation. Inter-node aggregation uses the existing ML-DSA signed internal request protocol plus cluster admission key.
+- **Security & Integrity** — audit findings and recent live events, including policy decisions and action outcomes.
 
 ## Internal aggregation endpoints
 
-`/internal/v1/ui/node` and `/internal/v1/ui/logs` are not user-authenticated web APIs. They require the same signed ML-DSA envelope and join-key admission used by other Kagi internal protocols. A node uses these endpoints to aggregate peer state for its locally authenticated browser session.
+`/internal/v1/ui/node`, `/internal/v1/ui/telemetry`, and `/internal/v1/ui/logs`
+require the signed ML-DSA envelope and join-key admission used by other internal
+protocols. A node uses these endpoints to aggregate peer state for its locally authenticated browser session.
 
 ## Current pending-operation scope
 
 Object detail currently reports durable operations that are explicitly represented in Raft metadata: fenced garbage-collection records and in-progress snapshot archive work. Proactive repair/rebalance loops are currently controller-driven rather than queued as per-object Raft records, so they are reflected in health/placement state but are not yet shown as a durable per-object queue item.
 
 
-## security and monitoring
+## Security and monitoring
 
 See [security policy and monitoring](SECURITY-POLICY.md) for node YAML rules, the
 optional BPF build, privileged metadata, authenticated REST/SSE endpoints, the

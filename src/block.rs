@@ -7,9 +7,6 @@
 //! persistent reservations so the same protected storage can be presented safely to VM and
 //! clustered-host consumers.
 
-// Sparse zvol-like block-volume layer, SCSI identity, thin extents, and persistent reservations.
-//! Sparse virtual block volumes built from immutable Kagi objects.
-//! The block map is Raft metadata; data extents are ordinary protected objects.
 use crate::cluster::{get_object_version, put_object, ClusterState, ObjectManifest};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -17,7 +14,7 @@ use std::collections::BTreeMap;
 pub const DEFAULT_EXTENT_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Supported PrType states or operations.
+/// Reservation types define which initiators can read or write.
 pub enum PrType {
     WriteExclusive,
     ExclusiveAccess,
@@ -27,21 +24,18 @@ pub enum PrType {
     ExclusiveAccessAllRegistrants,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-/// Kagi state or configuration used by the PrRegistration path.
 pub struct PrRegistration {
     pub key: u64,
     pub aptpl: bool,
     pub registered_at_unix_ms: u128,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the PrReservation path.
 pub struct PrReservation {
     pub holder: String,
     pub key: u64,
     pub reservation_type: PrType,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-/// Kagi state or configuration used by the PersistentReservation path.
 pub struct PersistentReservation {
     pub generation: u64,
     pub registrations: BTreeMap<String, PrRegistration>,
@@ -49,7 +43,7 @@ pub struct PersistentReservation {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
-/// Supported PrOut states or operations.
+/// A persistent-reservation change submitted to the metadata state machine.
 pub enum PrOut {
     Register {
         initiator: String,
@@ -84,17 +78,18 @@ pub enum PrOut {
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the PrIn path.
 pub struct PrIn {
     pub generation: u64,
     pub registrations: BTreeMap<String, PrRegistration>,
     pub reservation: Option<PrReservation>,
 }
-/// Implements the is reg step and keeps its validation and state transitions visible at the call site.
+
 fn is_reg(pr: &PersistentReservation, i: &str) -> bool {
     pr.registrations.contains_key(i)
 }
-/// Implements the pr allows read step and keeps its validation and state transitions visible at the call site.
+
+/// Apply the read rule for the active reservation type. An active reservation requires
+/// an initiator even for types that allow reads from unregistered initiators.
 pub fn pr_allows_read(pr: &PersistentReservation, initiator: Option<&str>) -> bool {
     let Some(r) = &pr.reservation else {
         return true;
@@ -110,7 +105,7 @@ pub fn pr_allows_read(pr: &PersistentReservation, initiator: Option<&str>) -> bo
         _ => true,
     }
 }
-/// Implements the pr allows write step and keeps its validation and state transitions visible at the call site.
+
 pub fn pr_allows_write(pr: &PersistentReservation, initiator: Option<&str>) -> bool {
     let Some(r) = &pr.reservation else {
         return true;
@@ -124,7 +119,9 @@ pub fn pr_allows_write(pr: &PersistentReservation, initiator: Option<&str>) -> b
         | PrType::ExclusiveAccessAllRegistrants => is_reg(pr, i),
     }
 }
-/// Implements the apply pr out step and keeps its validation and state transitions visible at the call site.
+
+/// Apply one persistent-reservation update. The Raft caller checks the expected
+/// reservation generation before applying it to committed volume metadata.
 pub fn apply_pr_out(pr: &mut PersistentReservation, op: &PrOut) -> Result<()> {
     match op {
         PrOut::Register {
@@ -243,7 +240,7 @@ pub fn apply_pr_out(pr: &mut PersistentReservation, op: &PrOut) -> Result<()> {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Supported VolumePresentation states or operations.
+/// How a volume is exposed to clients and hypervisors.
 pub enum VolumePresentation {
     Raw,
     Nbd,
@@ -263,14 +260,15 @@ pub fn presentation_requires_reservation(presentations: &[VolumePresentation]) -
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the VolumeExtent path.
+/// One allocated extent, pinned to an immutable object manifest and a volume generation.
 pub struct VolumeExtent {
     pub extent: u64,
     pub manifest: ObjectManifest,
     pub generation: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the VolumeRecord path.
+/// Committed volume geometry, extent map, and persistent-reservation state. Missing
+/// extent numbers are holes and read as zeroes.
 pub struct VolumeRecord {
     pub id: String,
     pub name: String,
@@ -293,7 +291,6 @@ pub struct VolumeRecord {
     pub persistent_reservation: PersistentReservation,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ScsiIdentity path.
 pub struct ScsiIdentity {
     pub vendor: String,
     pub product: String,
@@ -312,7 +309,7 @@ impl Default for ScsiIdentity {
         }
     }
 }
-/// Implements the thin default step and keeps its validation and state transitions visible at the call site.
+
 fn thin_default() -> bool {
     true
 }
@@ -330,15 +327,15 @@ pub struct VolumeCreate {
     #[serde(default)]
     pub presentations: Vec<VolumePresentation>,
 }
-/// Implements the lbs step and keeps its validation and state transitions visible at the call site.
+
 fn lbs() -> u32 {
     4096
 }
-/// Implements the extent step and keeps its validation and state transitions visible at the call site.
+
 fn extent() -> u64 {
     DEFAULT_EXTENT_BYTES
 }
-/// Implements the validate create step and keeps its validation and state transitions visible at the call site.
+
 pub fn validate_create(v: &VolumeCreate) -> Result<()> {
     if v.size_bytes == 0 {
         bail!("volume size must be non-zero")
@@ -354,7 +351,8 @@ pub fn validate_create(v: &VolumeCreate) -> Result<()> {
     }
     Ok(())
 }
-/// Implements the validate io step and keeps its validation and state transitions visible at the call site.
+
+/// Reject ranges whose end overflows or extends beyond the logical volume.
 pub fn validate_io(v: &VolumeRecord, offset: u64, len: u64) -> Result<()> {
     let end = offset
         .checked_add(len)
@@ -364,11 +362,13 @@ pub fn validate_io(v: &VolumeRecord, offset: u64, len: u64) -> Result<()> {
     }
     Ok(())
 }
-/// Implements the extent key step and keeps its validation and state transitions visible at the call site.
+
 pub fn extent_key(id: &str, n: u64) -> String {
     format!(".__keyspace/volumes/{id}/extents/{n:016x}")
 }
-/// Implements the read range step and keeps its validation and state transitions visible at the call site.
+
+/// Read through the supplied extent-map snapshot. A partial read copies only the
+/// intersecting bytes, and holes retain their zero-filled output.
 pub async fn read_range(
     st: &ClusterState,
     v: &VolumeRecord,
@@ -397,7 +397,9 @@ pub async fn read_range(
     }
     Ok(out)
 }
-/// Implements the stage write step and keeps its validation and state transitions visible at the call site.
+
+/// Write replacement objects for the affected extents, preserving bytes outside the
+/// requested range. The caller commits the returned references as one extent-map update.
 pub async fn stage_write(
     st: &ClusterState,
     v: &VolumeRecord,
@@ -490,7 +492,7 @@ pub async fn stage_unmap(
     }
     Ok((remove, replace))
 }
-/// Implements the make scsi identity step and keeps its validation and state transitions visible at the call site.
+
 pub fn make_scsi_identity(id: &str) -> ScsiIdentity {
     let h = blake3::hash(id.as_bytes());
     let hx = h.to_hex().to_string();

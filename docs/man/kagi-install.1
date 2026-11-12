@@ -1,13 +1,103 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-INSTALL 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-INSTALL 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-install \- initialize a Kagi node and optionally bootstrap remote hosts over SSH
+kagi-install \- stage Kagi node configuration and identity files
 .SH SYNOPSIS
-.B kagi-install
-[OPTIONS]
+.B scripts/kagi-install
+.RI [ options ]
 .SH DESCRIPTION
-Creates local configuration/state directories, installs binaries/service files, generates node post-quantum identity material, initializes cluster credentials as appropriate, starts the service, and can repeat bootstrap steps on additional SSH-accessible hosts.
-.SH SECURITY
-Transferred bootstrap credentials are sensitive. Use trusted SSH host keys and remove temporary copies after installation.
+Run this helper as root from a Kagi source or package tree.
+It looks for prebuilt
+.BR kagi-cluster-host ,
+.BR kagi-host ,
+.BR kagi-config ,
+and
+.B kagi-run
+binaries in the tree root and requires
+.B kagi-cluster-host
+on the executable search path.
+If the tree includes manual pages, the helper copies them to
+.IR $PREFIX/share/man/man1/ .
+.PP
+The helper creates the configuration and data directories and writes
+.IR $ETC/node.yaml .
+It replaces any existing file at that path.
+It generates missing ML-DSA-87 identity files and uses the supplied admission
+credentials or creates new ones.
+The generated YAML contains a one-host, one-disk topology scaffold.
+Complete the topology and transport configuration before serving traffic.
+The runtime requires at least six hosts and six disks per host.
+.PP
+If the package includes a
+.I kagi-host.service
+unit in the tree root, the helper installs it and attempts to enable and start
+it.
+The optional SSH bootstrap also attempts to add each remote node to Raft.
+That operation requires a working cluster and the current leader.
+.SH OPTIONS
+.TP
+.B \-\-non-interactive
+Skip the prompt for additional SSH targets.
+Explicit remote specifications still run.
+.TP
+.BI \-\-node-id " ID"
+Set the node ID.
+The default is the short hostname.
+.TP
+.BI \-\-site " SITE"
+Set the failure-domain site.
+The default is
+.BR site-a .
+.TP
+.BI \-\-rack " RACK"
+Set the failure-domain rack.
+The default is
+.BR rack-a .
+.TP
+.BI \-\-endpoint " URL"
+Set the node endpoint advertised to peers.
+The default uses the first address reported by
+.B hostname \-I
+and the configured port.
+.TP
+.BI \-\-remote " user@host,node,site,rack,endpoint"
+Attempt to bootstrap a remote node over SSH.
+Repeat the option for additional nodes.
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.SH ENVIRONMENT
+.TP
+.BR PREFIX ", " ETC ", " DATA
+Installation, configuration, and state paths.
+Defaults are
+.IR /usr/local ,
+.IR /etc/kagi ,
+and
+.IR /var/lib/kagi .
+.TP
+.B PORT
+Local API listen port.
+The default is 7400.
+.TP
+.BR NODE_ID ", " SITE ", " RACK ", " ENDPOINT
+Defaults for the corresponding options.
+.TP
+.BR JOIN_KEY_B64 ", " JOIN_KEY_HASH ", " METADATA_KEY_B64
+Admission and metadata credentials.
+OpenSSL generates missing keys.
+The helper uses
+.B b3sum
+to derive the admission hash unless
+.B JOIN_KEY_HASH
+is set.
+.TP
+.BR LEADER_ID ", " LEADER_ENDPOINT ", " LEADER_PQ_PUB
+Leader identity, URL, and public key file for a joining node.
+.PP
+Use trusted SSH hosts for bootstrap and protect temporary credentials and
+generated private keys.
 .SH SEE ALSO
-kagi-cluster-host(1), kagi-config(1)
+.BR kagi-cluster-host (1),
+.BR kagi-config (1),
+.BR kagi-tls-cert (1)

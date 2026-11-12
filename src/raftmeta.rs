@@ -7,10 +7,6 @@
 //! volumes, and reservations. Mutations are applied in log order and persisted before they
 //! become visible, which keeps every metadata consumer working from the same committed view.
 
-// Raft metadata state machine, joint-consensus membership, snapshots, GC fencing, topology and volume metadata.
-//! Durable Raft metadata consensus for manifests, placement epochs and health state.
-//! Implements leader election, RequestVote, AppendEntries, majority commit, ordered
-//! state-machine application and persistent term/vote/log state.
 use crate::{
     block::{apply_pr_out, PrOut, VolumeExtent, VolumeRecord},
     cluster::{ObjectManifest, PeerDisk, WormPolicy},
@@ -26,7 +22,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
-// ---- Consensus identities, membership, and durable state ----------------------
+
+// Consensus identities, membership, and durable state
 pub type NodeId = String;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RaftPeer {
@@ -147,9 +144,10 @@ pub enum NamespaceMutation {
         created_unix_ms: u128,
     },
 }
-#[derive(Debug, Clone, Serialize, Deserialize)] // ---- Replicated state-machine commands -----------------------------------------
-                                                // Every externally visible metadata mutation is represented here so commit/apply
-                                                // ordering can be shared by objects, snapshots, topology, volumes, and PR state.
+
+/// Replicated mutations share a single commit and apply order across the namespace,
+/// topology, snapshots, and block-volume metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetadataCommand {
     S3 {
         mutation: crate::s3::Mutation,
@@ -355,7 +353,7 @@ pub struct AppendResponse {
     pub success: bool,
     pub match_index: u64,
 }
-/// Implements the now ms step and keeps its validation and state transitions visible at the call site.
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -367,7 +365,7 @@ pub struct MetadataStore {
     root: PathBuf,
     state: Arc<RwLock<MetadataState>>,
 }
-/// Implements the apply namespace mutation step and keeps its validation and state transitions visible at the call site.
+
 pub(crate) fn apply_namespace_mutation(s: &mut MetadataState, m: NamespaceMutation) {
     match m {
         NamespaceMutation::PutManifest { key, manifest } => {
@@ -417,8 +415,11 @@ pub(crate) fn apply_namespace_mutation(s: &mut MetadataState, m: NamespaceMutati
         }
     }
 }
-// ---- Metadata state-machine persistence and ordered application ----------------
+
+// Metadata state-machine persistence and ordered application
 impl MetadataStore {
+    /// Load the applied metadata snapshot. Backfill historical version lists for snapshots
+    /// written before they recorded the current manifest as a version.
     pub async fn open(root: PathBuf) -> Result<Self> {
         tokio::fs::create_dir_all(&root).await?;
         let p = root.join("state.json");
@@ -438,6 +439,9 @@ impl MetadataStore {
             state: Arc::new(RwLock::new(state)),
         })
     }
+
+    /// Skip an index already applied after restart. Hold the write lock until the new
+    /// snapshot has been written, synced, and renamed.
     pub async fn apply(&self, index: u64, cmd: MetadataCommand) -> Result<()> {
         let mut s = self.state.write().await;
         if index <= s.applied_index {
@@ -731,7 +735,8 @@ pub struct RaftNode {
     proposal_lock: Arc<tokio::sync::Mutex<()>>,
     persistence_lock: Arc<tokio::sync::Mutex<()>>,
 }
-// ---- Raft election, replication, barriers, and joint consensus -----------------
+
+// Raft election, replication, barriers, and joint consensus
 impl RaftNode {
     pub async fn open(
         node_id: String,
@@ -802,6 +807,8 @@ impl RaftNode {
         tokio::fs::rename(tmp, self.root.join("raft.json")).await?;
         Ok(())
     }
+
+    /// Replay only committed entries, advancing the state machine one log index at a time.
     async fn apply_committed(&self) -> Result<()> {
         loop {
             let applied = self.store.state().await.applied_index;
@@ -953,6 +960,9 @@ impl RaftNode {
         .send()
         .await?)
     }
+
+    /// Serialize local proposals through replication and application so commit order stays
+    /// aligned with log order. Joint membership requires a majority of both voter sets.
     pub async fn propose(&self, cmd: MetadataCommand) -> Result<u64> {
         let _guard = self.proposal_lock.lock().await;
         if !self.is_leader().await {
@@ -1037,6 +1047,9 @@ impl RaftNode {
         self.send_heartbeat().await;
         Ok(entry.index)
     }
+
+    /// Confirm this node still leads the current term and a quorum has acknowledged at
+    /// least the requested commit index.
     pub async fn linearizable_barrier(&self, index: u64) -> Result<()> {
         if !self.is_leader().await {
             bail!("not raft leader")

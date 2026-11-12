@@ -31,5 +31,6 @@ Local identity and malformed-input tests run in normal CI. The ignored
 `directory_provider_matches_expected_user_and_groups` test requires a configured
 directory runner and explicit `KAGI_DIRECTORY_TEST_USER`,
 `KAGI_DIRECTORY_EXPECT_UID` and comma-separated `KAGI_DIRECTORY_EXPECT_GIDS`.
-Optional expected user/group SID variables make AD assertions mandatory. An
-unconfigured domain is not counted as a successful directory integration test.
+Set `KAGI_DIRECTORY_EXPECT_SID` and comma-separated
+`KAGI_DIRECTORY_EXPECT_GROUP_SIDS` to assert AD SIDs as well. Use the
+[`directory` hardware workflow](HARDWARE-VALIDATION.md) for a configured provider.

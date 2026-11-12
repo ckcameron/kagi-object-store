@@ -1,13 +1,12 @@
 <!-- SPDX-License-Identifier: CC-BY-NC-SA-4.0 -->
 
-# Kagi security policy and monitoring (0.38)
+# Kagi security policy and monitoring
 
-The distributed `kagi-cluster-host` now owns kernel policy loading, logical-object
+The distributed `kagi-cluster-host` handles kernel policy loading, logical-object
 policy, side-action dispatch, event monitoring, and configuration/integrity audits.
 Local cluster CLI put/get/repair/scrub commands also evaluate logical rules.
-The existing Raft, placement, erasure, ACL, WORM and immutable-version architecture
-remains in place. The smaller `kagi-host` is still a local development daemon; it
-does not load these cluster security settings.
+Use `kagi-cluster-host` for cluster security policy. The local development
+daemon `kagi-host` does not load these settings.
 
 ## Two identities, two enforcement boundaries
 
@@ -18,7 +17,7 @@ and rename hooks. Earlier LSM denials are preserved. An exact inode policy wins
 before the nearest matching recursive ancestor; ancestry is limited to 32 parents
 and does not cross mount roots. Hard links share identity. Create checks the
 parent, delete checks the target, and rename checks the source and destination
-parent, as in the uploaded implementation. Kernel rules do not mediate mmap.
+parent. Kernel rules do not mediate mmap.
 
 Userspace translates the stat device encoding to kernel dev_t before loading the
 map. Duplicate inode policies, including hardlink aliases, are rejected rather
@@ -153,7 +152,7 @@ events using text rendering. Existing authenticated log views remain available.
 `kagi-cluster-host --config node.yaml audit` reports configuration findings without
 starting Raft, opening the server, or attaching BPF. The runtime repeats audits
 once per minute and emits changed/resolved findings. Checks include exposed
-plaintext listeners, missing mTLS/HTTPS or metadata encryption, security-file
+plaintext listeners, TLS and peer endpoints, metadata encryption, security-file
 permissions, disabled/empty kernel or logical policy, unsafe quorum, limited site
 separation, disabled scrub, short GC grace, broad write ACLs and unprotected chunks.
 Runtime output caps findings at approximately 1,024 to bound response growth.

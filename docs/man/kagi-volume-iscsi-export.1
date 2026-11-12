@@ -1,13 +1,27 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-VOLUME-ISCSI-EXPORT 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-VOLUME-ISCSI-EXPORT 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-volume-iscsi-export \- expose a Kagi volume as a Linux LIO iSCSI LUN
+kagi-volume-iscsi-export \- export an attached Kagi block device with Linux LIO
 .SH SYNOPSIS
-.B kagi-volume-iscsi-export
-[ARGS]
+.B scripts/kagi-volume-iscsi-export
+.I /dev/nbdN IQN PORTAL-IP
+.RI [ LUN ]
 .SH DESCRIPTION
-Attaches a Kagi-backed block device locally and exports it through Linux LIO so VMware, Hyper-V, and other initiators can consume a conventional SCSI LUN.
-.SH PERSISTENT RESERVATIONS
-Kagi Raft state is intended to remain reservation authority. A transport frontend should map guest/initiator SCSI-3 PR commands into Kagi rather than relying on an unrelated local-only reservation database.
+Use this helper after attaching a Kagi volume to a Linux NBD device.
+With
+.BR targetcli ,
+it creates an LIO block backstore and an iSCSI target, adds the device at
+the requested LUN, attempts to configure the portal on port 3260, and
+saves the target configuration.
+The default LUN number is 0.
+The helper needs permission to modify the kernel target configuration.
+.PP
+Verify the active portal, initiator ACLs, and authentication before exposing
+the target to initiators.
+Raft remains the authority for Kagi persistent reservations.
+Use a reservation-aware SCSI bridge when initiators must send persistent
+reservation commands to Kagi.
 .SH SEE ALSO
-kagi-volume-nbd(1), targetcli(8)
+.BR kagi-volume-attach (1),
+.BR kagi-volume-nbd (1),
+.BR targetcli (8)

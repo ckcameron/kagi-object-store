@@ -6,7 +6,9 @@
 
 `kagi-config` turns physical failure domains into a deployable 64-bit Kagi placement plan. It models sites, racks, hosts, network paths, disk classes, repair behavior, correlated failures, and data-protection geometry. The generated YAML contains the selected placement salt, exact per-disk slot/key ranges, mount paths, failure estimates, and the best tested chunk geometry for every supported erasure-code family.
 
-The planner is advisory: it evaluates placement and recoverability policy. The runtime data-plane codec remains the authoritative implementation boundary. The runtime implements Reed-Solomon, canonical product-matrix MSR (`d=2k-2`), and CLAY; LRC remains planner-only.
+Use the planner to compare placement and protection policies. The runtime
+supports Reed-Solomon, product-matrix MSR (`d = 2k - 2`), CLAY, and [LRC v1](LRC.md).
+The planner can explore LRC geometries beyond the runtime's fixed layout.
 
 ## Invocation modes
 
@@ -24,13 +26,9 @@ kagi-config --wizard \
   --output kagi.generated.yaml
 ```
 
-The wizard begins with:
-
-```text
-Use quick defaults (sites/racks/hosts/disks only) (Y/n):
-```
-
-Answer `Y` for quick mode or `N` for the full topology questionnaire.
+First choose the simulation workload (`full`, `quick30`, or `quick60`). At the
+`Use quick topology defaults (sites/racks/hosts/disks only)` prompt, choose the
+short topology questionnaire or decline it to enter the full configuration.
 
 ## Hard topology minimums
 
@@ -215,11 +213,14 @@ kagi-config -c topology.yaml --no-progress -o kagi.generated.yaml \
   > keyspace.stdout.yaml
 ```
 
-## Kagi CUDA Monte Carlo acceleration
+## Monte Carlo acceleration
 
-Build with `cargo build --release --features cuda` and select `--mc-backend auto` (default) or `--mc-backend cuda`.
+`--mc-backend` accepts `auto` (the default), `cpu`, `cuda`, `hip`, or `opencl`.
+For a CUDA build, run `cargo build --locked --release --features cuda` and select
+`--mc-backend cuda` to require an available CUDA device. See [acceleration](ACCELERATION.md)
+for build prerequisites and provider selection.
 
-The GPU path intentionally accelerates the regular, massively parallel portion of EC geometry evaluation: Kagi generates topology-aware failure scenarios and placements on the CPU, batches the resulting fragment-survival vectors, and evaluates replication, Reed-Solomon/MSR/CLAY MDS readability and LRC local/global parity readability in CUDA. Placement generation, correlated-domain selection, deterministic tolerance validation, rare-event weighting and time-domain repair trajectories remain CPU/Rayon work. `auto` falls back to Rayon if CUDA is unavailable or a kernel call fails. `cuda` requires a CUDA-enabled build.
+The GPU path intentionally accelerates the regular, massively parallel portion of EC geometry evaluation: Kagi generates topology-aware failure scenarios and placements on the CPU, batches the resulting fragment-survival vectors, and evaluates replication, Reed-Solomon/MSR/CLAY MDS readability and LRC local/global parity readability using the selected backend. Placement generation, correlated-domain selection, deterministic tolerance validation, rare-event weighting and time-domain repair trajectories remain CPU/Rayon work. `auto` uses a supported GPU when available and falls back to the CPU. An explicit GPU selection requires a build with that feature and a device at startup.
 
 ### Runtime presets
 
@@ -233,7 +234,7 @@ kagi-config --config topology.yaml --run-mode quick60 --mc-backend cuda
 ```
 
 
-## loss and durability presentation
+## Loss and durability presentation
 
 Each ordinary/importance/adaptive estimate includes a `durability` record. The
 continuous-time estimate uses `durability_within_horizon` because its probability
@@ -274,6 +275,4 @@ batch results reduce in a fixed order, independent of worker scheduling.
 Resume reuses saved settings and refuses conflicting simulation options or a
 different Kagi version. Corrupt committed records stop the run. Completed batches
 are reused while deterministic orchestration is replayed. Final outputs and the
-admission key are also written atomically. Saved output paths are resolved to absolute paths, so resume does not depend on
-the caller's working directory. The planner's binary
-name is now `kagi-config`; older `kagi-montecarlo` commands must be updated.
+admission key are also written atomically. Saved output paths are absolute, so a resume can start from another working directory.

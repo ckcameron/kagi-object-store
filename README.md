@@ -4,20 +4,20 @@
 
 **Development release 0.39.0 — experimental; not production-ready.**
 
-Kagi: a GPU-accelerated, CPU-optimized, CLAY/MSR Erasure-coded Enterprise Object Store.
-**Kagi** is a distributed object-storage, filesystem, block-volume, durability-planning, and cluster-operations system written primarily in Rust.
+Kagi is a distributed object store written in Rust, with a filesystem namespace,
+object-backed block volumes, a durability planner, and an operations console.
 
 > **Licensed under [CC BY-NC-SA 4.0](LICENSE).** Copyright (c) 2026 CK Cameron. Third-party exceptions are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-Current source edition: **0.39.0**.
+Kagi distributes a deterministic 64-bit keyspace across failure domains. It
+protects data with replication or erasure coding, commits authoritative metadata
+through Raft, and exposes the same storage through object, namespace, and
+virtual block interfaces. The `kagi-config` planner models placement and
+durability before deployment.
 
-The planner is now `kagi-config`, with atomic periodic checkpoints and resume.
-Optional HIP/ROCm, OpenCL, ISA-L, IPP and AOCL paths supplement CUDA and the
-runtime-dispatched x86-64 CPU implementation. See [acceleration details](docs/ACCELERATION.md)
-for implemented paths and explicitly deferred frameworks, and [scheduling](docs/SCHEDULING.md)
-for the opt-in `kagi-run` real-time launcher.
-
-Kagi distributes a deterministic 64-bit keyspace across failure-aware storage locations, protects data with replication or erasure coding, keeps authoritative metadata in Raft, and exposes the same storage substrate through object, namespace, and virtual-block abstractions. The project also includes a Monte Carlo topology planner, CUDA acceleration paths, failure/recovery control, lifecycle and immutability features, post-quantum authenticated internal traffic, and an embedded browser-based operations console.
+Start with the [Kagi wiki](https://github.com/ckcameron/kagi-object-store/wiki)
+for a guided overview, or use the [documentation index](#documentation-index)
+for the source-controlled reference.
 
 ## What is in this edition
 
@@ -32,8 +32,8 @@ decimal durability percentages and fractional nines without rounding 1e-20 loss 
 See [security policy, build and monitoring](docs/SECURITY-POLICY.md),
 [example security configuration](examples/security.example.yaml), and
 [validation results and limitations](BUILD-VALIDATION.md). Kernel protection is
-opt-in and requires the separate BPF build plus target-kernel validation. The
-existing v35 architecture, features, prior fixes and release history are retained.
+opt-in and requires the separate BPF build plus target-kernel validation. See the
+[release history](CHANGELOG.md) for earlier changes.
 
 ## Implementation status
 
@@ -71,20 +71,13 @@ See `BUILD-VALIDATION.md` for the validation environment and known execution lim
 
 ## SysML architecture and planning
 
-Kagi's architecture/planning workflow includes a **SysML v2 modelling integration design** for expressing system structure, interfaces, requirements, constraints, and verification evidence alongside the existing topology and durability planner. This is an architecture-planning layer, not a claim that a SysML parser, solver, or model execution engine is already bundled into the runtime.
+The version-controlled SysML v2 model describes system components, deployment
+constraints, and requirements. CI checks the model with a pinned syntax checker
+and verifies a versioned JSON exchange format. The planner adapter applies the
+model's topology minimums and protection family to an existing topology file.
+`kagi-config` still calculates placement, feasible geometry, and loss estimates.
 
-The intended model exchange uses the OMG SysML v2 textual notation and machine-readable API representations where supported. Models should describe:
-- requirements and traceability to implementation, tests, and validation evidence;
-- logical components and ports, including object, namespace, block-volume, metadata/Raft, security, and maintenance services;
-- deployment topology and constraints across site/rack/host/disk and network failure domains;
-- protection-policy parameters and resource budgets, linked to—but not replacing—the Monte Carlo planner's calculations;
-- verification cases, assumptions, unresolved risks, and evidence provenance.
-
-The integration boundary should remain tool-neutral: version SysML models with the source, validate them with a declared compatible SysML v2 toolchain, and exchange derived constraints with `kagi-config` through a documented schema. Do not treat generated diagrams or an unvalidated model as proof of runtime behavior or durability. SysML validation must report tool/version, model revision, checks run, and failures.
-
-## SysML modelling workflow
-
-Kagi now includes a version-controlled SysML v2 architecture model, requirement traceability map, versioned planner-interchange schema, structural validator, regression tests, and CI validation. The structural validator is not a full SysML v2 semantic validator; see [the SysML workflow](docs/SYSML.md) for scope and commands.
+See the [SysML workflow](docs/SYSML.md) for commands and validation scope.
 
 ## Feature inventory
 
@@ -105,7 +98,7 @@ Kagi now includes a version-controlled SysML v2 architecture model, requirement 
 ### Erasure coding and repair
 
 - Reed-Solomon runtime coding.
-- Local Reconstruction Code geometry in the topology planner for smaller/ephemeral policy selection.
+- [Runtime LRC v1](docs/LRC.md) and a broader set of LRC geometries in the planner.
 - Product-matrix MSR runtime coding and exact repair.
 - CLAY runtime coding and exact repair.
 - CLAY as the default runtime erasure family.
@@ -350,6 +343,8 @@ kagi-cluster-host \
 | `kagi-cluster-host` | Full distributed node daemon and administrative CLI. |
 | `kagi-host` | Smaller host-local storage daemon/validation endpoint. |
 | `kagi-volume-nbd` | NBD frontend for Kagi sparse virtual volumes. |
+| `kagi-bench` | Correctness-checked codec benchmark with execution counters. |
+| `kagi-run` | Linux launcher for explicit scheduling policy and CPU affinity. |
 
 ## Helper scripts
 
@@ -378,18 +373,20 @@ not be added without updating both the canonical example and configuration refer
 
 ## Build
 
-Rust stable is expected. CUDA is optional.
+Build from the repository root with stable Rust, a C/C++ toolchain, CMake,
+and Perl. CUDA, HIP, and OpenCL builds also require their respective SDKs.
+See [acceleration](docs/ACCELERATION.md).
 
 ```sh
 rustup default stable
 rustup component add rustfmt clippy
-cargo build --release
+cargo build --locked --release
 ```
 
 Build CUDA paths when `nvcc` and the CUDA development environment are available:
 
 ```sh
-cargo build --release --features cuda
+cargo build --locked --release --features cuda
 ```
 
 ## Validation
@@ -409,7 +406,7 @@ cargo test --all-targets
 cargo clippy --all-targets
 ```
 
-Set `STRICT=1` to promote default-path Clippy warnings to errors. On Linux the suite also compiles/tests/clippies the runtime-loaded ISA-L, IPP, and AOCL integrations. CUDA, HIP/ROCm, and OpenCL feature checks are added automatically when their development toolchains are present; physical accelerator execution is verified separately by the `hardware-execution` workflow.
+Set `STRICT=1` to promote default-path Clippy warnings to errors. On Linux the suite also checks, tests, and lints the userspace eBPF loader and the runtime-loaded ISA-L, IPP, and AOCL integrations. CUDA, HIP/ROCm, and OpenCL feature checks are added automatically when their development toolchains are present; physical accelerator execution is verified separately by the `hardware-execution` workflow.
 
 The exact validation status of this packaged edition is recorded in `BUILD-VALIDATION.md`.
 
@@ -442,18 +439,16 @@ The generated YAML includes the full keyspace slot geometry, per-disk slot range
 
 ## Documentation index
 
-- `docs/ARCHITECTURE.md` — architecture and subsystem boundaries.
-- `docs/CONFIGURATION.md` — topology, policy, failure, repair, and runtime YAML reference.
-- `docs/MONTECARLO.md` — optimizer, statistics, quick modes, CUDA scoring, and slot-plan semantics.
-- `docs/OPERATIONS.md` — deployment, maintenance, capacity, snapshots, recovery, and virtual volumes.
-- `docs/SECURITY.md` — admission, encryption, PQ signatures, replay protection, and transport notes.
-- `docs/TESTING.md` — test/Clippy/CUDA/coverage procedures.
-- `docs/SECURITY-VALIDATION.md` — Miri, sanitizers, fuzzing, dependency/exploit checks, and performance regression workflow.
-- `docs/CODEMAP.md` — source responsibilities and review paths.
-- `docs/WEB-CONSOLE.md` — console configuration and operations.
-- `docs/man/` — command manual pages.
-- `CHANGELOG.md` — release history.
-
+| Topic | Reference |
+| --- | --- |
+| Cluster design and source | [Architecture](docs/ARCHITECTURE.md), [source map](docs/CODEMAP.md) |
+| Plan a deployment | [Configuration](docs/CONFIGURATION.md), [Monte Carlo planner](docs/MONTECARLO.md), [SysML](docs/SYSML.md) |
+| Run a cluster | [Operations](docs/OPERATIONS.md), [web console](docs/WEB-CONSOLE.md), [VM lab and Kubernetes CSI](deploy/kubernetes/csi/README.md) |
+| Storage and identity | [LRC v1](docs/LRC.md), [S3 compatibility](docs/S3.md), [directory identities](docs/DIRECTORY-IDENTITY.md) |
+| Security | [Security notes](docs/SECURITY.md), [policy and monitoring](docs/SECURITY-POLICY.md), [at-rest key rotation](docs/AT-REST-ROTATION.md) |
+| Tuning | [Acceleration](docs/ACCELERATION.md), [Linux scheduling](docs/SCHEDULING.md) |
+| Validation | [Testing and coverage](docs/TESTING.md), [security validation](docs/SECURITY-VALIDATION.md), [hardware execution](docs/HARDWARE-VALIDATION.md), [recorded build evidence](BUILD-VALIDATION.md) |
+| Command reference and changes | [Man pages](docs/man/README.md), [release history](CHANGELOG.md) |
 
 ## Security validation and performance analysis
 
@@ -477,19 +472,11 @@ The repository includes integration boundaries for hypervisors, iSCSI, identity 
 
 Kagi is provided **AS IS**, with **no warranty whatsoever**, express, implied, statutory, or otherwise. This includes, without limitation, any warranties of **merchantability**, fitness for a particular purpose, title, non-infringement, accuracy, reliability, availability, security, or freedom from defects. To the fullest extent permitted by applicable law, the authors, copyright holders, and contributors disclaim all warranties and make no representation that the software will meet any requirements or operate without interruption, error, data loss, or other failure.
 
-## Licensing
-
-Kagi source and documentation are licensed under CC BY-NC-SA 4.0; see `LICENSE`. Third-party Rust/CUDA dependencies retain their upstream licenses; see `THIRD-PARTY-NOTICES.md`.
-
 ## License
 
 Copyright (c) 2026 CK Cameron. Kagi source code, scripts, configuration examples, and documentation are licensed under the [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](LICENSE). Attribute CK Cameron and Kagi, retain notices, identify modifications, and follow the noncommercial and share-alike terms of the license. The canonical project is https://github.com/ckcameron/kagi-object-store.
 
 The fileguard-derived security workspace and third-party dependencies retain their upstream licenses; see [Third-Party Notices](THIRD-PARTY-NOTICES.md). Generated validation logs are historical evidence, not new license declarations.
-
-## SysML v2 integration
-
-The SysML v2 model is syntax-checked in CI and generates a versioned, schema-validated planner interchange. Apply the modelled topology minimums and protection family to a topology file before running `kagi-config`; see [the SysML workflow](docs/SYSML.md).
 
 ## VM lab and Kubernetes storage
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate Kagi's SysML bundle and emit versioned planner interchange."""
+
 import argparse
 import json
 import re
@@ -34,7 +35,9 @@ def main():
 
     if not re.search(r"\bpackage\s+KagiArchitecture\s*\{", model):
         fail("model package KagiArchitecture not found")
-    model_ids = set(re.findall(r"requirement\s+(?:def\s+)?<['\"]?([^>'\"]+)['\"]?>", model))
+    model_ids = set(
+        re.findall(r"requirement\s+(?:def\s+)?<['\"]?([^>'\"]+)['\"]?>", model)
+    )
     requirements = trace.get("requirements")
     if not isinstance(requirements, list) or not requirements:
         fail("traceability must contain a non-empty requirements array")
@@ -67,7 +70,9 @@ def main():
             fail(f"missing integer constraint in model: {name}")
         return int(match.group(1))
 
-    match = re.search(r'attribute\s+protectionScheme\s*:\s*String\s*=\s*"([^"]+)"\s*;', model)
+    match = re.search(
+        r'attribute\s+protectionScheme\s*:\s*String\s*=\s*"([^"]+)"\s*;', model
+    )
     if not match:
         fail("missing protectionScheme string constraint in model")
     scheme = match.group(1)
@@ -84,14 +89,24 @@ def main():
         "schema_version": schema["properties"]["schema_version"]["const"],
         "model_revision": args.revision,
         "requirements": [
-            {"id": r["id"], "title": r["title"], "evidence_status": r["evidence_status"]}
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "evidence_status": r["evidence_status"],
+            }
             for r in requirements
         ],
         "constraints": constraints,
     }
-    errors = sorted(Draft202012Validator(schema).iter_errors(interchange), key=lambda e: list(e.path))
+    errors = sorted(
+        Draft202012Validator(schema).iter_errors(interchange),
+        key=lambda e: list(e.path),
+    )
     if errors:
-        fail("interchange schema validation failed: " + "; ".join(e.message for e in errors))
+        fail(
+            "interchange schema validation failed: "
+            + "; ".join(e.message for e in errors)
+        )
     output = json.dumps(interchange, indent=2) + "\n"
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

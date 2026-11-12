@@ -7,8 +7,6 @@
 //! metadata. ACL evaluation follows the NFSv4-inspired allow/deny model and supports Unix
 //! and Active Directory style principals without making either identity source mandatory.
 
-// Filesystem namespace overlay, ACL evaluation, decentralized index, and bottom-up reconstruction.
-//! Filesystem namespace overlay and NFSv4-style ACL model.
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -20,7 +18,7 @@ use std::{
 use tokio::sync::RwLock;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
-/// Supported FsObjectType states or operations.
+/// Object kind used by directory entries and namespace operations.
 pub enum FsObjectType {
     #[default]
     File,
@@ -36,7 +34,6 @@ pub struct Ace {
     pub flags: BTreeSet<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-/// Kagi state or configuration used by the ObjectAcl path.
 pub struct ObjectAcl {
     pub owner: String,
     pub group: String,
@@ -44,7 +41,6 @@ pub struct ObjectAcl {
     pub entries: Vec<Ace>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ChildRef path.
 pub struct ChildRef {
     pub name: String,
     pub object_id: String,
@@ -52,7 +48,6 @@ pub struct ChildRef {
     pub object_type: FsObjectType,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the FsMetadata path.
 pub struct FsMetadata {
     /// Security classification preserved with immutable versions; only an admin may change it.
     #[serde(default)]
@@ -74,7 +69,7 @@ pub struct FsMetadata {
     pub acl: ObjectAcl,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the IndexEntry path.
+/// An entry in the derived namespace index. Object manifests carry the directory metadata.
 pub struct IndexEntry {
     pub path: String,
     pub key: String,
@@ -157,7 +152,7 @@ impl FsIndex {
         self.inner.read().await.clone()
     }
 }
-/// Implements the now ms step and keeps its validation and state transitions visible at the call site.
+
 pub fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

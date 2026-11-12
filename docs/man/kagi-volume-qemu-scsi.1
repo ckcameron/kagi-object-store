@@ -1,11 +1,28 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-VOLUME-QEMU-SCSI 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-VOLUME-QEMU-SCSI 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-volume-qemu-scsi \- generate QEMU arguments for virtio-SCSI or virtual SAS presentation
+kagi-volume-qemu-scsi \- print QEMU arguments for a Kagi-backed SCSI disk
 .SH SYNOPSIS
-.B kagi-volume-qemu-scsi
-virtio-scsi|sas HOST PORT [ARGS]
+.B scripts/kagi-volume-qemu-scsi
+.BR virtio-scsi | sas
+.I HOST PORT
+.RI [ DEVICE-ID ]
 .SH DESCRIPTION
-Builds a QEMU device/backend command line that uses Kagi block storage while presenting the guest with a paravirtualized SCSI disk or an emulated SAS/SCSI controller.
+Prints shell-escaped QEMU arguments for an NBD backend and a guest SCSI disk.
+Use
+.B virtio-scsi
+for the paravirtualized PCI controller or
+.B sas
+for the emulated
+.B mptsas1068
+controller.
+The disk ID defaults to
+.BR keyspace0 .
+.PP
+Start the Kagi NBD frontend before starting QEMU.
+Review the generated identifiers before combining the arguments with existing
+devices.
 .SH SEE ALSO
-kagi-volume-nbd(1), kagi-volume-libvirt-scsi(1), qemu-system-x86_64(1)
+.BR kagi-volume-nbd (1),
+.BR kagi-volume-libvirt-scsi (1),
+.BR qemu-system-x86_64 (1)

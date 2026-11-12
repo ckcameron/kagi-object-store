@@ -11,7 +11,6 @@
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
 use kagi_object_store as _;
 
-// Full Kagi cluster daemon and administrative CLI for distributed storage nodes.
 #[path = "../block.rs"]
 mod block;
 #[path = "../cluster.rs"]
@@ -88,8 +87,9 @@ use serde::Serialize;
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
 use tokio::{net::TcpListener, sync::RwLock};
 use webui::{ConsoleRole, WebConsoleConfig};
+
+// CLI, node configuration, and security bootstrap
 #[derive(Parser)]
-// ---- CLI, node configuration, and security bootstrap -------------------------
 struct Cli {
     /// Node YAML configuration file.
     #[arg(short, long, default_value = "/etc/kagi/node.yaml")]
@@ -215,7 +215,7 @@ struct NodeConfig {
     listen: String,
     join_key_b64: String,
 }
-/// Implements the listen step and keeps its validation and state transitions visible at the call site.
+
 fn listen() -> String {
     "0.0.0.0:7400".into()
 }
@@ -232,15 +232,15 @@ struct MetadataConfig {
     #[serde(default = "raft_heartbeat")]
     heartbeat_ms: u64,
 }
-/// Implements the election min step and keeps its validation and state transitions visible at the call site.
+
 fn election_min() -> u64 {
     1500
 }
-/// Implements the election max step and keeps its validation and state transitions visible at the call site.
+
 fn election_max() -> u64 {
     3000
 }
-/// Implements the raft heartbeat step and keeps its validation and state transitions visible at the call site.
+
 fn raft_heartbeat() -> u64 {
     400
 }
@@ -290,19 +290,19 @@ impl Default for SnapshotConfig {
         }
     }
 }
-/// Implements the snap enabled step and keeps its validation and state transitions visible at the call site.
+
 fn snap_enabled() -> bool {
     true
 }
-/// Implements the snap interval step and keeps its validation and state transitions visible at the call site.
+
 fn snap_interval() -> u64 {
     30000
 }
-/// Implements the snap delta bytes step and keeps its validation and state transitions visible at the call site.
+
 fn snap_delta_bytes() -> u64 {
     10 * 1024 * 1024 * 1024
 }
-/// Implements the snap delta ratio step and keeps its validation and state transitions visible at the call site.
+
 fn snap_delta_ratio() -> f64 {
     0.50
 }
@@ -313,19 +313,19 @@ struct SnapshotCreateRequest {
     #[serde(default)]
     prefix: Option<String>,
 }
-/// Implements the gc enabled step and keeps its validation and state transitions visible at the call site.
+
 fn gc_enabled() -> bool {
     true
 }
-/// Implements the gc grace ms step and keeps its validation and state transitions visible at the call site.
+
 fn gc_grace_ms() -> u64 {
     86_400_000
 }
-/// Implements the gc interval ms step and keeps its validation and state transitions visible at the call site.
+
 fn gc_interval_ms() -> u64 {
     30_000
 }
-/// Implements the gc batch step and keeps its validation and state transitions visible at the call site.
+
 fn gc_batch() -> usize {
     32
 }
@@ -362,15 +362,15 @@ struct PostQuantumConfig {
     #[serde(default)]
     peer_public_keys: BTreeMap<String, PathBuf>,
 }
-/// Implements the pq required step and keeps its validation and state transitions visible at the call site.
+
 fn pq_required() -> bool {
     true
 }
-/// Implements the load step and keeps its validation and state transitions visible at the call site.
+
 fn load(p: &PathBuf) -> Result<NodeConfig> {
     Ok(serde_saphyr::from_str(&fs::read_to_string(p)?)?)
 }
-/// Implements the validate pq step and keeps its validation and state transitions visible at the call site.
+
 fn validate_pq(c: &NodeConfig) -> Result<()> {
     let q = c
         .post_quantum
@@ -391,7 +391,7 @@ fn validate_pq(c: &NodeConfig) -> Result<()> {
     }
     Ok(())
 }
-/// Implements the bootstrap pq step and keeps its validation and state transitions visible at the call site.
+
 async fn bootstrap_pq(c: &NodeConfig) -> Result<(LocalPqIdentity, RuntimeKeyring)> {
     let q = c.post_quantum.as_ref().context("post_quantum required")?;
     let id = pq::local_identity(
@@ -435,7 +435,7 @@ async fn bootstrap_pq(c: &NodeConfig) -> Result<(LocalPqIdentity, RuntimeKeyring
     }
     Ok((id, ring))
 }
-/// Implements the sync pq keyring step and keeps its validation and state transitions visible at the call site.
+
 async fn sync_pq_keyring(st: V6State) {
     let mut t = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
@@ -449,9 +449,8 @@ async fn sync_pq_keyring(st: V6State) {
         }
     }
 }
-/// Named type used to keep the SignedJson data flow readable.
+
 type SignedJson = (Vec<u8>, Vec<(&'static str, String)>);
-/// Implements the signed json step and keeps its validation and state transitions visible at the call site.
 fn signed_json<T: Serialize>(
     st: &ClusterState,
     method: &str,
@@ -463,7 +462,7 @@ fn signed_json<T: Serialize>(
     let h = pq::signed_headers(id, method, path, &body)?;
     Ok((body, h))
 }
-/// Implements the verify json step and keeps its validation and state transitions visible at the call site.
+
 async fn verify_json<T: Serialize>(
     st: &V6State,
     headers: &axum::http::HeaderMap,
@@ -475,7 +474,7 @@ async fn verify_json<T: Serialize>(
         .await
         .is_ok()
 }
-/// Implements the validate runtime topology step and keeps its validation and state transitions visible at the call site.
+
 fn validate_runtime_topology(c: &NodeConfig) -> Result<()> {
     if c.cluster.hosts.len() < 6 {
         anyhow::bail!(
@@ -516,7 +515,7 @@ fn validate_runtime_topology(c: &NodeConfig) -> Result<()> {
     }
     Ok(())
 }
-/// Implements the validate join key step and keeps its validation and state transitions visible at the call site.
+
 fn validate_join_key(c: &NodeConfig) -> Result<()> {
     use base64::Engine;
     let expected = c
@@ -535,7 +534,7 @@ fn validate_join_key(c: &NodeConfig) -> Result<()> {
     }
     Ok(())
 }
-/// Implements the request authorized step and keeps its validation and state transitions visible at the call site.
+
 fn request_authorized(c: &ClusterConfig, h: &axum::http::HeaderMap) -> bool {
     use base64::Engine;
     let (Some(want), Some(raw)) = (
@@ -550,7 +549,7 @@ fn request_authorized(c: &ClusterConfig, h: &axum::http::HeaderMap) -> bool {
         .map(|v| blake3::hash(&v).to_hex().to_string() == want)
         .unwrap_or(false)
 }
-/// Implements the http client step and keeps its validation and state transitions visible at the call site.
+
 fn http_client(c: &NodeConfig) -> Result<reqwest::Client> {
     tls::install_pq_provider()?;
     let mut headers = reqwest::header::HeaderMap::new();
@@ -579,7 +578,7 @@ fn http_client(c: &NodeConfig) -> Result<reqwest::Client> {
     }
     Ok(b.build()?)
 }
-/// Implements the state step and keeps its validation and state transitions visible at the call site.
+
 fn state(
     c: &NodeConfig,
     client: reqwest::Client,
@@ -622,15 +621,17 @@ fn state(
         quic,
     })
 }
-// ---- Legacy/public object handlers (superseded paths retained for compatibility) ----
+
+// Legacy/public object handlers (superseded paths retained for compatibility)
 async fn api_get(State(st): State<ClusterState>, Path(key): Path<String>) -> impl IntoResponse {
     match get_object(&st, &key).await {
         Ok(v) => (StatusCode::OK, v).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }
+
+// Unified cluster runtime state and linearizable commit helpers
 #[derive(Clone)]
-// ---- Unified cluster runtime state and linearizable commit helpers ------------
 struct V6State {
     security: security::Security,
     monitor: monitoring::Monitor,
@@ -647,7 +648,8 @@ struct V6State {
     web_console: WebConsoleConfig,
     telemetry: telemetry::TelemetryStore,
 }
-/// Implements the effective cluster config step and keeps its validation and state transitions visible at the call site.
+
+/// Overlay committed capacity additions on the node's bootstrap topology.
 async fn effective_cluster_config(st: &V6State) -> ClusterConfig {
     let mut c = (*st.data.cfg).clone();
     let ms = st.meta.store.state().await;
@@ -664,25 +666,27 @@ async fn effective_cluster_config(st: &V6State) -> ClusterConfig {
     }
     c
 }
-/// Implements the effective data step and keeps its validation and state transitions visible at the call site.
+
 async fn effective_data(st: &V6State) -> ClusterState {
     let mut d = st.data.clone();
     d.cfg = Arc::new(effective_cluster_config(st).await);
     d
 }
-/// Implements the committed step and keeps its validation and state transitions visible at the call site.
+
+/// Wait for the Raft proposal and its quorum barrier before acknowledging a mutation.
 async fn committed(st: &V6State, cmd: MetadataCommand) -> Result<u64> {
     let i = st.meta.propose(cmd).await?;
     st.meta.linearizable_barrier(i).await?;
     Ok(i)
 }
-#[derive(Debug, Clone, Serialize, Deserialize)] // ---- Filesystem namespace, ACL, and decentralized-index operations ------------
-/// Kagi state or configuration used by the MkdirRequest path.
+
+// Filesystem namespace, ACL, and decentralized-index operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MkdirRequest {
     #[serde(default)]
     acl: Option<ObjectAcl>,
 }
-/// Implements the default acl step and keeps its validation and state transitions visible at the call site.
+
 fn default_acl(headers: &axum::http::HeaderMap) -> ObjectAcl {
     use std::collections::BTreeSet;
     let owner = headers
@@ -764,7 +768,7 @@ fn default_acl(headers: &axum::http::HeaderMap) -> ObjectAcl {
         ],
     }
 }
-/// Implements the parent key for step and keeps its validation and state transitions visible at the call site.
+
 fn parent_key_for(key: &str) -> Option<String> {
     let k = key.trim_matches('/');
     k.rsplit_once('/')
@@ -772,7 +776,7 @@ fn parent_key_for(key: &str) -> Option<String> {
         .filter(|p| !p.is_empty())
         .or_else(|| if k.is_empty() { None } else { Some("/".into()) })
 }
-/// Implements the name for step and keeps its validation and state transitions visible at the call site.
+
 fn name_for(key: &str) -> String {
     let k = key.trim_matches('/');
     if k.is_empty() {
@@ -781,7 +785,8 @@ fn name_for(key: &str) -> String {
         k.rsplit('/').next().unwrap_or(k).to_string()
     }
 }
-/// Implements the prepare parent directory step and keeps its validation and state transitions visible at the call site.
+
+/// Stage a new parent manifest containing the child. The caller publishes both manifests.
 async fn prepare_parent_directory(
     st: &V6State,
     child: &ObjectManifest,
@@ -822,7 +827,9 @@ async fn prepare_parent_directory(
         .await?,
     ))
 }
-/// Implements the commit child parent step and keeps its validation and state transitions visible at the call site.
+
+/// Serialize sibling updates while staging and committing the child and parent together.
+/// The local search index follows the committed namespace transaction.
 async fn commit_child_parent(st: &V6State, child: ObjectManifest) -> Result<u64> {
     let _guard = st.namespace_lock.lock().await;
     let parent = prepare_parent_directory(st, &child).await?;
@@ -852,7 +859,7 @@ async fn commit_child_parent(st: &V6State, child: ObjectManifest) -> Result<u64>
 struct SetAclRequest {
     acl: ObjectAcl,
 }
-/// Implements the fs set acl step and keeps its validation and state transitions visible at the call site.
+
 async fn fs_set_acl(
     State(st): State<V6State>,
     Path(key): Path<String>,
@@ -908,7 +915,7 @@ async fn fs_set_acl(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the index manifest step and keeps its validation and state transitions visible at the call site.
+
 async fn index_manifest(st: &V6State, m: &ObjectManifest) {
     if let Some(fs) = &m.fs {
         let _ = st
@@ -927,7 +934,7 @@ async fn index_manifest(st: &V6State, m: &ObjectManifest) {
             .await;
     }
 }
-/// Implements the fs mkdir step and keeps its validation and state transitions visible at the call site.
+
 async fn fs_mkdir(
     State(st): State<V6State>,
     Path(key): Path<String>,
@@ -994,11 +1001,11 @@ async fn fs_mkdir(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the fs index get step and keeps its validation and state transitions visible at the call site.
+
 async fn fs_index_get(State(st): State<V6State>) -> impl IntoResponse {
     Json(st.fs_index.snapshot().await)
 }
-/// Implements the fs index merge step and keeps its validation and state transitions visible at the call site.
+
 async fn fs_index_merge(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -1019,7 +1026,7 @@ async fn fs_index_merge(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the fs reconstruct step and keeps its validation and state transitions visible at the call site.
+
 async fn fs_reconstruct(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
     let state = st.meta.store.state().await;
     let Some(leaf) = state.manifests.get(&key) else {
@@ -1030,7 +1037,7 @@ async fn fs_reconstruct(State(st): State<V6State>, Path(key): Path<String>) -> i
         Err(e) => (StatusCode::CONFLICT, e.to_string()).into_response(),
     }
 }
-/// Implements the gossip fs index step and keeps its validation and state transitions visible at the call site.
+
 async fn gossip_fs_index(st: V6State) {
     let mut t = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
@@ -1064,8 +1071,9 @@ async fn identity_resolve(Path(user): Path<String>) -> impl IntoResponse {
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)] // ---- Joint-consensus membership and post-quantum key administration ----------
-/// Kagi state or configuration used by the MembershipRequest path.
+
+// Joint-consensus membership and post-quantum key administration
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MembershipRequest {
     action: String,
     scope: String,
@@ -1073,7 +1081,7 @@ struct MembershipRequest {
     #[serde(default)]
     members: Vec<RaftPeer>,
 }
-/// Implements the membership change step and keeps its validation and state transitions visible at the call site.
+
 async fn membership_change(
     State(st): State<V6State>,
     Json(req): Json<MembershipRequest>,
@@ -1157,7 +1165,7 @@ async fn membership_change(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the for member add step and keeps its validation and state transitions visible at the call site.
+
 async fn for_member_add(st: &V6State, m: &mut Membership, member: Option<RaftPeer>) -> Result<()> {
     let p = member.context("member required")?;
     if p.endpoint.is_empty() {
@@ -1193,7 +1201,7 @@ struct RotatePqRequest {
     #[serde(default = "default_pq_grace")]
     grace_ms: u64,
 }
-/// Implements the default pq grace step and keeps its validation and state transitions visible at the call site.
+
 fn default_pq_grace() -> u64 {
     300_000
 }
@@ -1201,7 +1209,7 @@ fn default_pq_grace() -> u64 {
 struct RevokePqRequest {
     key_id: String,
 }
-/// Implements the pq rotate step and keeps its validation and state transitions visible at the call site.
+
 async fn pq_rotate(
     State(st): State<V6State>,
     Json(req): Json<RotatePqRequest>,
@@ -1248,7 +1256,7 @@ async fn pq_rotate(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the pq revoke step and keeps its validation and state transitions visible at the call site.
+
 async fn pq_revoke(
     State(st): State<V6State>,
     Json(req): Json<RevokePqRequest>,
@@ -1272,11 +1280,11 @@ async fn pq_revoke(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the pq keys get step and keeps its validation and state transitions visible at the call site.
+
 async fn pq_keys_get(State(st): State<V6State>) -> impl IntoResponse {
     Json(st.meta.store.state().await.pq_keys)
 }
-/// Implements the raft vote step and keeps its validation and state transitions visible at the call site.
+
 async fn raft_vote(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -1293,7 +1301,7 @@ async fn raft_vote(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the raft append step and keeps its validation and state transitions visible at the call site.
+
 async fn raft_append(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -1310,18 +1318,18 @@ async fn raft_append(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the raft status step and keeps its validation and state transitions visible at the call site.
+
 async fn raft_status(State(st): State<V6State>) -> impl IntoResponse {
     Json(st.meta.status().await)
 }
-/// Implements the meta get step and keeps its validation and state transitions visible at the call site.
+
 async fn meta_get(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
     match st.meta.store.get(&key).await {
         Some(m) => Json(m).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-/// Implements the v6 put step and keeps its validation and state transitions visible at the call site.
+
 async fn v6_put(
     State(st): State<V6State>,
     Path(key): Path<String>,
@@ -1428,7 +1436,7 @@ async fn v6_put(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the v6 get step and keeps its validation and state transitions visible at the call site.
+
 async fn v6_get(
     State(st): State<V6State>,
     Path(key): Path<String>,
@@ -1449,7 +1457,7 @@ async fn v6_get(
     st.data.manifests.write().await.insert(key.clone(), m);
     api_get(State(st.data), Path(key)).await.into_response()
 }
-/// Implements the v6 get version step and keeps its validation and state transitions visible at the call site.
+
 async fn v6_get_version(
     State(st): State<V6State>,
     Path((version, key)): Path<(u64, String)>,
@@ -1466,14 +1474,14 @@ async fn v6_get_version(
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-/// Implements the v6 versions step and keeps its validation and state transitions visible at the call site.
+
 async fn v6_versions(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
     if !st.meta.is_leader().await {
         return StatusCode::TEMPORARY_REDIRECT.into_response();
     }
     Json(st.meta.store.versions(&key).await).into_response()
 }
-/// Implements the v6 delete step and keeps its validation and state transitions visible at the call site.
+
 async fn v6_delete(
     State(st): State<V6State>,
     Path(key): Path<String>,
@@ -1508,7 +1516,7 @@ async fn v6_delete(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the v6 delete version step and keeps its validation and state transitions visible at the call site.
+
 async fn v6_delete_version(
     State(st): State<V6State>,
     Path((version, key)): Path<(u64, String)>,
@@ -1569,14 +1577,14 @@ async fn v6_delete_version(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume list step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_list(State(st): State<V6State>) -> impl IntoResponse {
     if !st.meta.is_leader().await {
         return StatusCode::TEMPORARY_REDIRECT.into_response();
     }
     Json(st.meta.store.state().await.volumes).into_response()
 }
-/// Implements the volume get step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_get(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
     if !st.meta.is_leader().await {
         return StatusCode::TEMPORARY_REDIRECT.into_response();
@@ -1637,7 +1645,7 @@ async fn volume_delete(State(st): State<V6State>, Path(id): Path<String>) -> imp
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume create step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_create(
     State(st): State<V6State>,
     Json(req): Json<VolumeCreate>,
@@ -1694,7 +1702,7 @@ async fn volume_create(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume read step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_read(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -1728,7 +1736,9 @@ async fn volume_read(
         Err(e) => (StatusCode::RANGE_NOT_SATISFIABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume write step and keeps its validation and state transitions visible at the call site.
+
+/// Hold the namespace lock from the volume lookup through the extent-map commit. A
+/// competing write would otherwise stage from the same generation.
 async fn volume_write(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -1785,7 +1795,7 @@ async fn volume_write(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume readonly step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_readonly(
     State(st): State<V6State>,
     Path(id): Path<String>,
@@ -1809,7 +1819,7 @@ async fn volume_readonly(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume resize step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_resize(
     State(st): State<V6State>,
     Path(id): Path<String>,
@@ -1845,7 +1855,7 @@ async fn volume_resize(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume unmap step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_unmap(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -1902,7 +1912,7 @@ async fn volume_unmap(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the volume pr in step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_pr_in(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
     if !st.meta.is_leader().await {
         return StatusCode::TEMPORARY_REDIRECT.into_response();
@@ -1917,7 +1927,7 @@ async fn volume_pr_in(State(st): State<V6State>, Path(id): Path<String>) -> impl
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-/// Implements the volume pr out step and keeps its validation and state transitions visible at the call site.
+
 async fn volume_pr_out(
     State(st): State<V6State>,
     Path(id): Path<String>,
@@ -2016,6 +2026,8 @@ async fn volume_pr_cdb(
 /// Bind a destructive GC fence to one recorded local replica and recheck retention
 /// against the currently applied metadata. A record ID alone is not authorization
 /// to delete an arbitrary path supplied by a worker.
+/// Use the locally applied fence to authorize deletion of this exact replica. Recheck
+/// retention and live references because they may still keep the immutable version reachable.
 fn gc_delete_authorized(
     ms: &raftmeta::MetadataState,
     req: &GcDeleteRequest,
@@ -2063,7 +2075,6 @@ fn gc_delete_authorized(
     })
 }
 
-/// Implements the gc delete in step and keeps its validation and state transitions visible at the call site.
 async fn gc_delete_in(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -2102,12 +2113,12 @@ async fn gc_delete_in(
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
-/// Implements the gc status step and keeps its validation and state transitions visible at the call site.
+
 async fn gc_status(State(st): State<V6State>) -> impl IntoResponse {
     let state = st.meta.store.state().await;
     Json(state.garbage).into_response()
 }
-/// Implements the delete gc replica step and keeps its validation and state transitions visible at the call site.
+
 async fn delete_gc_replica(
     st: &V6State,
     g: &GarbageRecord,
@@ -2187,7 +2198,7 @@ async fn delete_gc_replica(
         }
     }
 }
-/// Implements the run garbage collector step and keeps its validation and state transitions visible at the call site.
+
 async fn run_garbage_collector(st: V6State) {
     if !st.gc.enabled {
         return;
@@ -2291,7 +2302,7 @@ async fn run_garbage_collector(st: V6State) {
         }
     }
 }
-/// Implements the snapshot create step and keeps its validation and state transitions visible at the call site.
+
 async fn snapshot_create(
     State(st): State<V6State>,
     Json(req): Json<SnapshotCreateRequest>,
@@ -2347,18 +2358,18 @@ async fn snapshot_create(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the snapshot list step and keeps its validation and state transitions visible at the call site.
+
 async fn snapshot_list(State(st): State<V6State>) -> impl IntoResponse {
     Json(st.meta.store.state().await.snapshots).into_response()
 }
-/// Implements the snapshot get step and keeps its validation and state transitions visible at the call site.
+
 async fn snapshot_get(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
     match st.meta.store.state().await.snapshots.get(&id).cloned() {
         Some(x) => Json(x).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
-/// Implements the snapshot object get step and keeps its validation and state transitions visible at the call site.
+
 async fn snapshot_object_get(
     State(st): State<V6State>,
     Path((id, key)): Path<(String, String)>,
@@ -2381,7 +2392,7 @@ async fn snapshot_object_get(
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the materialize snapshot step and keeps its validation and state transitions visible at the call site.
+
 async fn materialize_snapshot(st: &V6State, id: &str) -> Result<()> {
     let snap = st
         .meta
@@ -2423,7 +2434,7 @@ async fn materialize_snapshot(st: &V6State, id: &str) -> Result<()> {
         .await?;
     Ok(())
 }
-/// Implements the snapshot archive step and keeps its validation and state transitions visible at the call site.
+
 async fn snapshot_archive(State(st): State<V6State>, Path(id): Path<String>) -> impl IntoResponse {
     let _foreground = st.maintenance.foreground();
     if !st.meta.is_leader().await {
@@ -2434,7 +2445,7 @@ async fn snapshot_archive(State(st): State<V6State>, Path(id): Path<String>) -> 
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the run snapshot controller step and keeps its validation and state transitions visible at the call site.
+
 async fn run_snapshot_controller(st: V6State) {
     if !st.snapshots.enabled {
         return;
@@ -2493,7 +2504,7 @@ async fn run_snapshot_controller(st: V6State) {
         }
     }
 }
-/// Implements the user repair step and keeps its validation and state transitions visible at the call site.
+
 async fn user_repair(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
     let _foreground = st.maintenance.foreground();
     if !st.meta.is_leader().await {
@@ -2526,7 +2537,7 @@ async fn user_repair(State(st): State<V6State>, Path(key): Path<String>) -> impl
         Err(e) => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response(),
     }
 }
-/// Implements the user scrub step and keeps its validation and state transitions visible at the call site.
+
 async fn user_scrub(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
     let _foreground = st.maintenance.foreground();
     match scrub_object(&st.data, &key).await {
@@ -2549,11 +2560,11 @@ async fn user_scrub(State(st): State<V6State>, Path(key): Path<String>) -> impl 
         Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     }
 }
-/// Implements the maintenance status step and keeps its validation and state transitions visible at the call site.
+
 async fn maintenance_status(State(st): State<V6State>) -> impl IntoResponse {
     Json(st.maintenance.status())
 }
-/// Implements the run background scrubber step and keeps its validation and state transitions visible at the call site.
+
 async fn run_background_scrubber(st: V6State) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(
         st.maintenance.scrub_interval_ms().max(1000),
@@ -2609,7 +2620,7 @@ async fn run_background_scrubber(st: V6State) {
 struct AddCapacityRequest {
     disk: PeerDisk,
 }
-/// Implements the capacity add step and keeps its validation and state transitions visible at the call site.
+
 async fn capacity_add(
     State(st): State<V6State>,
     Path(host): Path<String>,
@@ -2670,14 +2681,15 @@ async fn capacity_add(
         Err(e)=>(StatusCode::SERVICE_UNAVAILABLE,e.to_string()).into_response()
     }
 }
-/// Implements the capacity get step and keeps its validation and state transitions visible at the call site.
+
 async fn capacity_get(State(st): State<V6State>) -> impl IntoResponse {
     Json(serde_json::json!( {
         "placement_epoch":st.meta.store.state().await.placement_epoch,"capacity_additions":st.meta.store.state().await.capacity_additions
     }
     ))
 }
-// ---- Background durability, rebalance, snapshot, GC, and maintenance loops ----
+
+// Background durability, rebalance, snapshot, GC, and maintenance loops
 async fn run_rebalancer(st: V6State) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut completed_epoch = 0u64;
@@ -2740,7 +2752,7 @@ async fn run_rebalancer(st: V6State) {
         }
     }
 }
-/// Implements the run cluster controller step and keeps its validation and state transitions visible at the call site.
+
 async fn run_cluster_controller(st: V6State, cfg: NodeConfig) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(
         cfg.recovery.repair_interval_ms,
@@ -2805,7 +2817,7 @@ async fn run_cluster_controller(st: V6State, cfg: NodeConfig) {
         }
     }
 }
-/// Implements the heartbeat in step and keeps its validation and state transitions visible at the call site.
+
 async fn heartbeat_in(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -2820,7 +2832,7 @@ async fn heartbeat_in(
     st.health.apply_heartbeat(&hb, &st.recovery).await;
     StatusCode::NO_CONTENT
 }
-/// Implements the health clear step and keeps its validation and state transitions visible at the call site.
+
 async fn health_clear(
     State(st): State<V6State>,
     Path(resource): Path<String>,
@@ -2832,11 +2844,11 @@ async fn health_clear(
         StatusCode::NOT_FOUND
     }
 }
-/// Implements the health get step and keeps its validation and state transitions visible at the call site.
+
 async fn health_get(State(st): State<V6State>) -> impl IntoResponse {
     Json(st.health.snapshot().await)
 }
-/// Implements the send heartbeats step and keeps its validation and state transitions visible at the call site.
+
 async fn send_heartbeats(st: V6State, cfg: NodeConfig) {
     let period = std::time::Duration::from_millis(cfg.recovery.heartbeat_ms);
     let mut tick = tokio::time::interval(period);
@@ -2911,7 +2923,8 @@ async fn send_heartbeats(st: V6State, cfg: NodeConfig) {
         }
     }
 }
-// ---- Kagi web operations console -------------------------------------------
+
+// Kagi web operations console
 fn console_auth(
     st: &V6State,
     headers: &axum::http::HeaderMap,
@@ -2919,11 +2932,11 @@ fn console_auth(
 ) -> Option<webui::ConsoleIdentity> {
     webui::authenticate_basic(headers, &st.web_console.userdb, admin)
 }
-/// Implements the kagi root step and keeps its validation and state transitions visible at the call site.
+
 async fn kagi_root() -> Redirect {
     Redirect::temporary("/ui")
 }
-/// Implements the kagi ui step and keeps its validation and state transitions visible at the call site.
+
 async fn kagi_ui(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
     if !st.web_console.enabled {
         return StatusCode::NOT_FOUND.into_response();
@@ -2933,7 +2946,7 @@ async fn kagi_ui(State(st): State<V6State>, headers: axum::http::HeaderMap) -> R
     }
     Html(webui::INDEX_HTML).into_response()
 }
-/// Implements the host site rack step and keeps its validation and state transitions visible at the call site.
+
 fn host_site_rack(st: &V6State) -> (Option<String>, Option<String>) {
     st.data
         .cfg
@@ -2943,7 +2956,7 @@ fn host_site_rack(st: &V6State) -> (Option<String>, Option<String>) {
         .map(|h| (h.site.clone(), h.rack.clone()))
         .unwrap_or_default()
 }
-/// Implements the local console summary step and keeps its validation and state transitions visible at the call site.
+
 async fn local_console_summary(st: &V6State) -> serde_json::Value {
     let ms = st.meta.store.state().await;
     let raft = st.meta.status().await;
@@ -2993,7 +3006,7 @@ async fn local_console_summary(st: &V6State) -> serde_json::Value {
     }
     )
 }
-/// Implements the internal ui node step and keeps its validation and state transitions visible at the call site.
+
 async fn internal_ui_node(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
     let path = "/internal/v1/ui/node";
     if pq::verify_request(&headers, "GET", path, &[], &st.data.pq_keys)
@@ -3005,7 +3018,7 @@ async fn internal_ui_node(State(st): State<V6State>, headers: axum::http::Header
     }
     Json(local_console_summary(&st).await).into_response()
 }
-/// Implements the cluster console summaries step and keeps its validation and state transitions visible at the call site.
+
 async fn cluster_console_summaries(st: &V6State) -> Vec<serde_json::Value> {
     let mut out = vec![local_console_summary(st).await];
     let Some(id) = st.data.pq_identity.as_ref() else {
@@ -3033,7 +3046,7 @@ async fn cluster_console_summaries(st: &V6State) -> Vec<serde_json::Value> {
     }
     out
 }
-/// Implements the ui summary step and keeps its validation and state transitions visible at the call site.
+
 async fn ui_summary(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
     if console_auth(&st, &headers, false).is_none() {
         return webui::unauthorized();
@@ -3227,7 +3240,7 @@ struct PrefixQuery {
     #[serde(default)]
     prefix: String,
 }
-/// Implements the ui objects step and keeps its validation and state transitions visible at the call site.
+
 async fn ui_objects(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -3266,7 +3279,7 @@ async fn ui_objects(
     rows.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     Json(rows).into_response()
 }
-/// Implements the ui object step and keeps its validation and state transitions visible at the call site.
+
 async fn ui_object(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -3341,11 +3354,11 @@ struct LogQuery {
     #[serde(default = "log_local")]
     scope: String,
 }
-/// Implements the log local step and keeps its validation and state transitions visible at the call site.
+
 fn log_local() -> String {
     "local".into()
 }
-/// Implements the internal ui logs step and keeps its validation and state transitions visible at the call site.
+
 async fn internal_ui_logs(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
     let path = "/internal/v1/ui/logs";
     if pq::verify_request(&headers, "GET", path, &[], &st.data.pq_keys)
@@ -3360,7 +3373,7 @@ async fn internal_ui_logs(State(st): State<V6State>, headers: axum::http::Header
     }
     )).into_response()
 }
-/// Implements the ui logs step and keeps its validation and state transitions visible at the call site.
+
 async fn ui_logs(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,
@@ -3411,14 +3424,14 @@ async fn ui_logs(
     ))
     .into_response()
 }
-/// Implements the ui buckets step and keeps its validation and state transitions visible at the call site.
+
 async fn ui_buckets(State(st): State<V6State>, headers: axum::http::HeaderMap) -> Response {
     if console_auth(&st, &headers, false).is_none() {
         return webui::unauthorized();
     }
     Json(st.meta.store.state().await.buckets).into_response()
 }
-/// Implements the ui bucket put step and keeps its validation and state transitions visible at the call site.
+
 async fn ui_bucket_put(
     State(st): State<V6State>,
     headers: axum::http::HeaderMap,

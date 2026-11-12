@@ -10,9 +10,9 @@ The codebase is divided into a simulation/planning plane and a runtime plane. `k
 
 ## SysML v2 architecture model
 
-SysML is the system-model exchange layer for architecture decisions; it complements rather than replaces executable configuration, topology simulation, or runtime tests. The model should remain source-controlled and traceable to the Rust implementation.
+The source-controlled SysML model records architecture decisions and traces requirements to the Rust implementation and its tests. Executable configuration and topology simulation remain part of the planner workflow.
 
-The initial modelling scope is:
+The model covers the following areas.
 - **Requirements and verification:** stable requirement identifiers mapped to implementation modules, tests, acceptance criteria, and evidence.
 - **Logical architecture:** components, ports, interfaces, flows, and trust boundaries for storage, Raft metadata, namespace, block volumes, security, and maintenance.
 - **Deployment architecture:** site/rack/host/disk hierarchy, network domains, fault containment, and deployment constraints.
@@ -20,12 +20,6 @@ The initial modelling scope is:
 - **Verification cases:** expected properties, tool versions, model revisions, test links, and evidence status.
 
 ### Toolchain and exchange boundary
-
-Use OMG SysML v2 textual models and standard machine-readable API representations where the selected tool supports them. Keep model validation behind a documented toolchain adapter so Kagi does not depend on one vendor's UI or proprietary project format. The adapter should emit a versioned, schema-validated interchange document for constraints that `kagi-config` can consume; it must reject unknown schema versions and preserve source model identifiers.
-
-The repository now includes a sample SysML v2 model, a pinned syntax checker, schema-validated interchange, a planner adapter, regression tests, and CI validation. These checks establish syntax and integration behavior, not full OMG semantic conformance or proof of durability. Rendered diagrams alone are not validation evidence.
-
-## SysML v2 model bundle
 
 The source-controlled model and requirement traceability map live under `models/sysml/`. The versioned JSON exchange contract is `schemas/sysml-planner-interchange.schema.json`. CI syntax-checks the model with the pinned `sysml2` CLI and validates the emitted interchange against JSON Schema. `scripts/apply-sysml-constraints.py` applies the model's host/disk minimums and protection family to an existing planner YAML before `kagi-config` runs. It preserves topology and seed geometry while enabling the existing geometry optimizer. Monte Carlo loss probability, placement feasibility, and final geometry remain the planner's responsibility; this integration does not claim full OMG semantic conformance or infer durability from the architecture model.
 
@@ -45,7 +39,12 @@ A disk's placement weight is `capacity_bytes × weight`. The optimizer searches 
 
 ## Data protection
 
-The simulation supports replication, Reed-Solomon, LRC, MSR, and CLAY policy modeling. The runtime data plane implements Reed-Solomon, canonical product-matrix MSR (`d=2k-2`), and CLAY. CLAY is the runtime EC default; LRC remains planner-only. A shared GF(2^8) matrix engine has CPU and optional CUDA execution paths. Failure tolerance is checked across configured disk, host, rack, site, and network domains.
+The planner evaluates replication, Reed-Solomon, LRC, MSR, and CLAY. The runtime
+supports replication and four erasure codecs: Reed-Solomon, product-matrix MSR
+(`d = 2k - 2`), CLAY, and [LRC v1](LRC.md). CLAY is the default for new EC
+objects. LRC v1 accepts a narrower geometry than the planner. The shared GF(2^8)
+matrix engine uses CPU execution and can dispatch to [optional accelerators](ACCELERATION.md).
+The planner checks failure tolerance across disk, host, rack, site, and network domains.
 
 ## Metadata consistency
 
@@ -65,7 +64,7 @@ Maintenance is intentionally subordinate to foreground and system-necessary work
 
 ## Security
 
-Internal requests use ML-DSA-87 request authentication with signed method/path/body hashes, persistent session epochs and sequence windows, per-peer nonce replay caches, and Raft-managed signing-key rotation/revocation. Transport uses the configured rustls provider and mTLS/hybrid-PQ capabilities. Symmetric at-rest metadata protection uses 256-bit keys.
+Internal requests use ML-DSA-87 request authentication with signed method/path/body hashes, persistent session epochs and sequence windows, per-peer nonce replay caches, and Raft-managed signing-key rotation/revocation. The native HTTPS listener uses rustls with AWS-LC and prefers hybrid X25519/ML-KEM key exchange. It presents a server certificate. Peers authenticate at the application layer with signed request envelopes and the cluster admission key. Symmetric at-rest metadata protection uses 256-bit keys.
 
 ## Monte Carlo protection geometry
 
@@ -73,7 +72,6 @@ The planner treats protection geometry and placement salt as coupled variables. 
 
 The minimum supported simulated/runtime topology is six servers with six disks per server. This gives the placement layer enough independent host/disk domains to request two-loss host and disk tolerance while retaining readable fragments.
 
-
-## exact-repair data path
+## Exact-repair data path
 
 For a single unavailable CLAY/MSR chunk, recovery avoids whole-object reconstruction. CLAY helpers perform positioned reads of only required subchunks. Product-matrix MSR helpers compute a beta=1 GF projection locally. The replacement node applies the codec recovery transform (CUDA when selected) and verifies the immutable chunk checksum. Multiple unavailable chunks fall back to ordinary MDS decode. Healthy encoded chunks are copied directly during rebalance rather than decoded and re-encoded.

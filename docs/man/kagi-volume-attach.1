@@ -1,11 +1,29 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-VOLUME-ATTACH 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-VOLUME-ATTACH 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-volume-attach \- attach a Kagi block volume to a Linux host
+kagi-volume-attach \- connect a Kagi NBD export to a Linux block device
 .SH SYNOPSIS
-.B kagi-volume-attach
-[ARGS]
+.B scripts/kagi-volume-attach
+.I HOST[:PORT] /dev/nbdN
+.RI [ BLOCK-SIZE ]
 .SH DESCRIPTION
-Helper for connecting a Kagi NBD-backed volume to a local block device for host or hypervisor use. Consult the script `--help`/source for environment-specific arguments.
+Connects a running Kagi NBD frontend to the selected Linux NBD device using
+.BR nbd-client .
+The default port is 10809 and the default client block size is 4096 bytes.
+The helper requests the compatibility export name
+.BR keyspace .
+.PP
+The helper attempts to load the
+.B nbd
+kernel module.
+Run it with permission to configure the chosen device, and use an unused
+NBD device.
+Before disconnecting, stop I/O and unmount any filesystem on the device.
+.SH EXAMPLE
+.nf
+sudo scripts/kagi-volume-attach 127.0.0.1:10809 /dev/nbd0
+.fi
 .SH SEE ALSO
-kagi-volume-nbd(1), kagi-volume-qemu-scsi(1)
+.BR kagi-volume-nbd (1),
+.BR kagi-volume-iscsi-export (1),
+.BR nbd-client (8)

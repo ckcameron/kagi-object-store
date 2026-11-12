@@ -3,7 +3,8 @@
 # Explicit process scheduling
 
 `kagi-run` launches any command, including `kagi-config`, with an explicitly
-selected Linux scheduler. Normal scheduling is the default. Arguments following
+selected Linux scheduler. Normal scheduling is the default and uses priority 0.
+Arguments following
 `--` are passed directly to the executable, without shell interpretation.
 
 ```sh
@@ -30,4 +31,5 @@ privileges or modify system policy.
 Round-robin time-slices among equal-priority real-time threads. FIFO requires
 threads to block, yield, or be preempted by higher-priority work. Both can delay
 normal-priority work on their selected CPUs. Use normal scheduling for bulk
-simulation unless measurements justify real-time scheduling.
+simulation unless measurements justify real-time scheduling. See the
+[`kagi-run` manual](man/kagi-run.1) for the command reference.

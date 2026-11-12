@@ -6,9 +6,9 @@
 //! into Kagi volume API operations. It carries a stable initiator identifier on every request
 //! so persistent-reservation enforcement remains effective when the volume is attached to a
 //! hypervisor or guest.
+//!
+//! QEMU/KVM can attach to the listener directly.
 
-// NBD frontend exposing Kagi object-backed sparse volumes as block devices.
-//! NBD frontend for a Kagi virtual volume. QEMU/KVM can attach this directly.
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use serde::Deserialize;
@@ -42,7 +42,7 @@ struct Volume {
     #[serde(default)]
     read_only: bool,
 }
-/// Implements the volume step and keeps its validation and state transitions visible at the call site.
+
 async fn volume(c: &reqwest::Client, o: &Opt) -> Result<Volume> {
     Ok(c.get(format!(
         "{}/v1/volumes/{}",
@@ -56,15 +56,16 @@ async fn volume(c: &reqwest::Client, o: &Opt) -> Result<Volume> {
     .json()
     .await?)
 }
-/// Implements the read be u32 step and keeps its validation and state transitions visible at the call site.
+
 async fn read_be_u32(s: &mut TcpStream) -> Result<u32> {
     Ok(s.read_u32().await?)
 }
-/// Implements the read be u64 step and keeps its validation and state transitions visible at the call site.
+
 async fn read_be_u64(s: &mut TcpStream) -> Result<u64> {
     Ok(s.read_u64().await?)
 }
-/// Implements the handshake step and keeps its validation and state transitions visible at the call site.
+
+/// Negotiate the export and advertise its size and read-only bit.
 async fn handshake(s: &mut TcpStream, size: u64, read_only: bool) -> Result<()> {
     s.write_u64(NBD_MAGIC).await?;
     s.write_u64(IHAVEOPT).await?;
@@ -101,7 +102,7 @@ async fn handshake(s: &mut TcpStream, size: u64, read_only: bool) -> Result<()> 
         }
     }
 }
-/// Implements the reply step and keeps its validation and state transitions visible at the call site.
+
 async fn reply(s: &mut TcpStream, errno: u32, handle: u64, data: Option<&[u8]>) -> Result<()> {
     s.write_u32(REP_MAGIC).await?;
     s.write_u32(errno).await?;
@@ -112,7 +113,9 @@ async fn reply(s: &mut TcpStream, errno: u32, handle: u64, data: Option<&[u8]>) 
     s.flush().await?;
     Ok(())
 }
-/// Implements the serve step and keeps its validation and state transitions visible at the call site.
+
+/// Process requests in connection order and forward the same initiator on each volume
+/// API call. The volume service applies persistent reservations to that identity.
 async fn serve(mut s: TcpStream, o: Opt) -> Result<()> {
     let c = reqwest::Client::new();
     let v = volume(&c, &o).await?;

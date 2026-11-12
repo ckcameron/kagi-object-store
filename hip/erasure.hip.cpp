@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: CC-BY-NC-SA-4.0
-// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0. HIP GF(2^8) matrix engine shared by RS, product-matrix MSR,
-// and CLAY.
+// Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
+// HIP GF(2^8) matrix engine shared by RS, LRC, product-matrix MSR, and CLAY.
 #include <hip/hip_runtime.h>
 #include <stddef.h>
 #include <stdint.h>

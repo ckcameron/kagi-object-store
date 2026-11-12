@@ -2,15 +2,11 @@
 // Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi erasure-coding and exact-repair backends.
 //!
-//! The runtime exposes Reed-Solomon, product-matrix MSR, and CLAY through one validated
-//! layout abstraction. CPU implementations are always available; CUDA can accelerate bulk
-//! matrix work when the crate is built with the `cuda` feature. Backend selection remains
-//! explicit so a GPU failure can fall back without changing the object format on disk.
+//! Reed-Solomon, LRC, product-matrix MSR, and CLAY use the same validated layout.
+//! The CPU supports each codec, with `clay-codes` providing the CLAY reference
+//! implementation. Accelerators change where matrix operations run, so fallback
+//! leaves the encoded format and repair geometry intact.
 
-// CPU/CUDA erasure-coding backends and adaptive dispatch.
-//! Runtime erasure coding for Reed-Solomon, product-matrix MSR, and CLAY.
-//! CLAY's CPU reference implementation is provided by the Apache-2.0 `clay-codes`
-//! dependency; CUDA acceleration in this file is Kagi-specific.
 #[path = "cpu_isa.rs"]
 mod cpu_isa;
 #[cfg(all(unix, any(feature = "isa-l", feature = "ipp", feature = "aocl")))]
@@ -31,7 +27,6 @@ use std::{
 };
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
-/// Supported BackendKind states or operations.
 /// Requested execution backend for erasure operations.
 pub enum BackendKind {
     /// Select the best initialized accelerator and fall back to CPU.
@@ -91,27 +86,27 @@ pub struct ErasureConfig {
     #[serde(default = "default_matrix_cache_bytes")]
     pub max_matrix_cache_bytes: usize,
 }
-/// Implements the default runtime scheme step and keeps its validation and state transitions visible at the call site.
+
 fn default_runtime_scheme() -> ErasureScheme {
     ErasureScheme::Clay
 }
-/// Implements the default k step and keeps its validation and state transitions visible at the call site.
+
 fn default_k() -> usize {
     6
 }
-/// Implements the default m step and keeps its validation and state transitions visible at the call site.
+
 fn default_m() -> usize {
     3
 }
-/// Implements the default gpu threshold step and keeps its validation and state transitions visible at the call site.
+
 fn default_gpu_threshold() -> usize {
     1 << 20
 }
-/// Implements the default gpu queue step and keeps its validation and state transitions visible at the call site.
+
 fn default_gpu_queue() -> u64 {
     32
 }
-/// Implements the default matrix cache bytes step and keeps its validation and state transitions visible at the call site.
+
 fn default_matrix_cache_bytes() -> usize {
     256 << 20
 }
@@ -130,7 +125,8 @@ impl Default for ErasureConfig {
     }
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-/// Kagi state or configuration used by the ErasureLayout path.
+/// Codec geometry used when reading or repairing one version, independent of the
+/// backend selected to perform the work.
 pub struct ErasureLayout {
     pub scheme: ErasureScheme,
     pub data_shards: usize,
@@ -183,7 +179,7 @@ impl ErasureLayout {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the EncodedShards path.
+/// Encoded shards plus the layout and unpadded byte count needed for reconstruction.
 pub struct EncodedShards {
     pub original_len: u64,
     pub data_shards: u16,
@@ -362,14 +358,14 @@ pub trait ErasureBackend: Send + Sync {
         self.encode_layout(data, &layout).await
     }
 }
-/// Implements the validate common step and keeps its validation and state transitions visible at the call site.
+
 fn validate_common(k: usize, m: usize) -> Result<()> {
     if k == 0 || m == 0 || k + m > 255 {
         bail!("invalid GF(2^8) layout k={k} m={m}; require 1 <= k,m and n <= 255")
     }
     Ok(())
 }
-/// Implements the clay d step and keeps its validation and state transitions visible at the call site.
+
 fn clay_d(k: usize, m: usize, d: Option<usize>) -> Result<usize> {
     if m < 2 {
         bail!("CLAY requires at least two parity nodes so d can be >= k+1")
@@ -395,7 +391,7 @@ fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     }
     r
 }
-/// Implements the gf pow step and keeps its validation and state transitions visible at the call site.
+
 fn gf_pow(mut a: u8, mut e: usize) -> u8 {
     let mut r = 1u8;
     while e > 0 {
@@ -409,7 +405,7 @@ fn gf_pow(mut a: u8, mut e: usize) -> u8 {
     }
     r
 }
-/// Implements the gf inv step and keeps its validation and state transitions visible at the call site.
+
 fn gf_inv(a: u8) -> Result<u8> {
     if a == 0 {
         bail!("GF inverse of zero")
@@ -675,6 +671,8 @@ fn lrc_basis(layout: &ErasureLayout, available: &[usize]) -> Result<Vec<usize>> 
     bail!("insufficient independent LRC shards")
 }
 
+/// Use a local group if all its helpers are available. Otherwise use an independent
+/// basis of surviving rows to reconstruct the missing shard.
 fn lrc_plan(
     layout: &ErasureLayout,
     available: &[usize],
@@ -799,7 +797,6 @@ fn lrc_reconstruct(
     lrc_reconstruct_with(shards, original_len, layout, &gf_matrix_apply_cpu)
 }
 
-/// Implements the pack source rows step and keeps its validation and state transitions visible at the call site.
 fn pack_source_rows(data: &[u8], rows: usize, row_len: usize) -> Vec<u8> {
     let mut packed = vec![0u8; rows * row_len];
     let copy_len = data.len().min(packed.len());
@@ -810,7 +807,7 @@ fn pack_source_rows(data: &[u8], rows: usize, row_len: usize) -> Vec<u8> {
     packed[..copy_len].copy_from_slice(&data[..copy_len]);
     packed
 }
-/// Implements the rows to node chunks step and keeps its validation and state transitions visible at the call site.
+
 fn rows_to_node_chunks(rows: &[u8], n: usize, alpha: usize, row_len: usize) -> Vec<Vec<u8>> {
     (0..n)
         .map(|node| {
@@ -819,7 +816,7 @@ fn rows_to_node_chunks(rows: &[u8], n: usize, alpha: usize, row_len: usize) -> V
         })
         .collect()
 }
-/// Implements the node chunks to rows step and keeps its validation and state transitions visible at the call site.
+
 fn node_chunks_to_rows(chunks: &[(usize, &[u8])], alpha: usize, row_len: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(chunks.len() * alpha * row_len);
     for (_, chunk) in chunks {
@@ -929,10 +926,9 @@ struct PmLayout {
     psi: Vec<u8>,
     generator: Vec<u8>,
 }
-/// Named type used to keep the PmCache data flow readable.
+
 type PmCache = Mutex<HashMap<(usize, usize), Arc<PmLayout>>>;
 static PM_CACHE: OnceLock<PmCache> = OnceLock::new();
-/// Implements the pm layout step and keeps its validation and state transitions visible at the call site.
 fn pm_layout(k: usize, m: usize) -> Result<Arc<PmLayout>> {
     let cache = PM_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(v) = cache.lock().unwrap().get(&(k, m)).cloned() {
@@ -1022,7 +1018,7 @@ fn pm_layout(k: usize, m: usize) -> Result<Arc<PmLayout>> {
     cache.lock().unwrap().insert((k, m), out.clone());
     Ok(out)
 }
-/// Implements the pm encode with step and keeps its validation and state transitions visible at the call site.
+
 fn pm_encode_with<F>(data: &[u8], p: &PmLayout, apply: F) -> Result<EncodedShards>
 where
     F: Fn(&[u8], usize, &[u8], usize, usize) -> Result<Vec<u8>>,
@@ -1040,7 +1036,7 @@ where
         shards: rows_to_node_chunks(&rows, p.n, p.alpha, row_len),
     })
 }
-/// Implements the pm reconstruct with step and keeps its validation and state transitions visible at the call site.
+
 fn pm_reconstruct_with<F>(
     shards: &[Option<Vec<u8>>],
     original_len: u64,
@@ -1085,7 +1081,6 @@ where
     Ok(out)
 }
 #[cfg(test)]
-/// Implements the pm repair matrix step and keeps its validation and state transitions visible at the call site.
 fn pm_repair_matrix(p: &PmLayout, lost: usize, helpers: &[usize]) -> Result<Vec<u8>> {
     if lost >= p.n || helpers.len() != p.d || helpers.contains(&lost) {
         bail!("invalid PM-MSR repair helper set")
@@ -1111,7 +1106,6 @@ fn pm_repair_matrix(p: &PmLayout, lost: usize, helpers: &[usize]) -> Result<Vec<
     Ok(r)
 }
 #[cfg(test)]
-/// Implements the pm repair with step and keeps its validation and state transitions visible at the call site.
 fn pm_repair_with<F>(
     shards: &[Option<Vec<u8>>],
     lost: usize,
@@ -1214,18 +1208,15 @@ struct ClayGenerator {
     alpha: usize,
     matrix: Arc<Vec<u8>>,
 }
-/// Named type used to keep the ClayGeneratorCache data flow readable.
+
 type ClayGeneratorCache = Mutex<HashMap<(usize, usize, usize), ClayGenerator>>;
 static CLAY_GEN_CACHE: OnceLock<ClayGeneratorCache> = OnceLock::new();
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl", test))]
-/// Named type used to keep the ClayDecodeCache data flow readable.
 type ClayDecodeCache = Mutex<HashMap<(usize, usize, usize, Vec<usize>), Arc<Vec<u8>>>>;
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl", test))]
 static CLAY_DECODE_CACHE: OnceLock<ClayDecodeCache> = OnceLock::new();
-/// Named type used to keep the ClayRepairCache data flow readable.
 type ClayRepairCache = Mutex<HashMap<(usize, usize, usize, usize, Vec<usize>), Arc<Vec<u8>>>>;
 static CLAY_REPAIR_CACHE: OnceLock<ClayRepairCache> = OnceLock::new();
-/// Implements the clay code step and keeps its validation and state transitions visible at the call site.
 fn clay_code(layout: &ErasureLayout) -> Result<ClayCode> {
     let d = clay_d(
         layout.data_shards,
@@ -1235,7 +1226,7 @@ fn clay_code(layout: &ErasureLayout) -> Result<ClayCode> {
     ClayCode::new(layout.data_shards, layout.parity_shards, d)
         .map_err(|e| anyhow!("CLAY init failed: {e:?}"))
 }
-/// Implements the clay generator step and keeps its validation and state transitions visible at the call site.
+
 fn clay_generator(layout: &ErasureLayout, max_bytes: usize) -> Result<ClayGenerator> {
     let d = clay_d(
         layout.data_shards,
@@ -1299,7 +1290,6 @@ fn clay_generator(layout: &ErasureLayout, max_bytes: usize) -> Result<ClayGenera
     Ok(out)
 }
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl", test))]
-/// Implements the clay encode linearized with step and keeps its validation and state transitions visible at the call site.
 fn clay_encode_linearized_with<F>(
     data: &[u8],
     layout: &ErasureLayout,
@@ -1334,7 +1324,7 @@ where
         shards: rows_to_node_chunks(&rows, n, alpha, row_len),
     })
 }
-/// Implements the clay reconstruct cpu step and keeps its validation and state transitions visible at the call site.
+
 fn clay_reconstruct_cpu(
     shards: &[Option<Vec<u8>>],
     original_len: u64,
@@ -1408,7 +1398,6 @@ fn clay_decode_matrix(
     Ok((alpha, inv))
 }
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl", test))]
-/// Implements the clay reconstruct linearized with step and keeps its validation and state transitions visible at the call site.
 fn clay_reconstruct_linearized_with<F>(
     shards: &[Option<Vec<u8>>],
     original_len: u64,
@@ -1452,9 +1441,8 @@ where
     out.truncate(original_len as usize);
     Ok(out)
 }
-/// Named type used to keep the ClayRepairMatrix data flow readable.
+
 type ClayRepairMatrix = (usize, Vec<(usize, Vec<usize>)>, Arc<Vec<u8>>);
-/// Implements the clay repair matrix step and keeps its validation and state transitions visible at the call site.
 fn clay_repair_matrix(
     layout: &ErasureLayout,
     lost: usize,
@@ -1518,7 +1506,6 @@ fn clay_repair_matrix(
     Ok((alpha, repair_map, arc))
 }
 #[cfg(test)]
-/// Implements the clay repair with step and keeps its validation and state transitions visible at the call site.
 fn clay_repair_with<F>(
     shards: &[Option<Vec<u8>>],
     lost: usize,
@@ -1562,7 +1549,7 @@ where
     let in_rows: usize = repair_map.iter().map(|(_, s)| s.len()).sum();
     apply(&input, in_rows, coeff.as_slice(), alpha, row_len)
 }
-/// Implements the clay exact repair plan step and keeps its validation and state transitions visible at the call site.
+
 fn clay_exact_repair_plan(
     layout: &ErasureLayout,
     lost: usize,
@@ -1823,7 +1810,6 @@ fn cpu_library_status() -> (bool, u64, bool, u64, bool, u64) {
 }
 
 #[derive(Default)]
-/// Kagi state or configuration used by the ErasureMetrics path.
 pub struct ErasureMetrics {
     pub cpu_bytes: AtomicU64,
     #[cfg_attr(
@@ -1845,7 +1831,9 @@ pub struct ErasureMetrics {
     #[allow(dead_code)]
     pub gpu_repairs: AtomicU64,
 }
-/// Kagi state or configuration used by the AdaptiveBackend path.
+
+/// Shares the CPU fallback and dispatch counters across callers. GPU admission is
+/// bounded by payload size, provider availability, and the number of in-flight operations.
 pub struct AdaptiveBackend {
     cfg: ErasureConfig,
     cpu_rs: Arc<CpuBackend>,

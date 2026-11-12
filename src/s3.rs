@@ -310,6 +310,9 @@ impl Adapter {
             .await
             .map_err(unavailable)
     }
+
+    /// Translate the authenticated access key into a Kagi ACL identity after checking its
+    /// bucket and write scope.
     async fn identity<T>(
         &self,
         req: &S3Request<T>,
@@ -448,6 +451,9 @@ impl Adapter {
             });
         Ok((m, attrs))
     }
+
+    /// Enforce the object-size bound while reading the stream, including requests without
+    /// a declared content length.
     async fn collect(&self, body: Option<StreamingBlob>, length: Option<i64>) -> S3Result<Vec<u8>> {
         if length.is_some_and(|n| n < 0 || n as u64 > self.config.max_object_bytes as u64) {
             return Err(s3_error!(EntityTooLarge));

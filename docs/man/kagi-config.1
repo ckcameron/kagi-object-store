@@ -1,91 +1,167 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-CONFIG 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-CONFIG 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-config \- model Kagi failure domains, optimize EC chunk geometry, and emit a 64-bit slot plan
+kagi-config \- model Kagi failure domains and generate a placement plan
 .SH SYNOPSIS
 .B kagi-config
-[\fB--config\fR FILE | \fB--wizard\fR] [OPTIONS]
+.RB { \-c " " \fIFILE\fR " | " \-\-wizard " | " \-\-resume " " \fIDIR\fR }
+.RI [ options ]
 .SH DESCRIPTION
-Runs Monte Carlo and deterministic failure-domain analysis over site/rack/host/network/disk topology. It selects a placement salt, compares Reed-Solomon, LRC, MSR and CLAY chunk geometries, and emits explicit global and per-disk slot/key ranges.
+Runs Monte Carlo and deterministic failure-domain analysis for a proposed
+Kagi topology.
+The planner searches placement salts, compares Reed-Solomon, LRC,
+product-matrix MSR, and CLAY geometries, and emits a 64-bit keyspace plan.
+The minimum topology is six hosts with six disks per host.
 .PP
-The minimum supported topology is six servers with at least six disks per server. Each failure category is configured to tolerate two simultaneous losses where at least three independent domains exist, one loss where exactly two domains exist, and zero where only one domain exists.
-.SH WIZARD
-.B --wizard
-starts by asking whether to use quick defaults.
+The plan contains the topology, optimizer estimates, protection policies,
+placement salt, and global and per-disk slot assignments.
+Review the selected geometry and deterministic validation results before
+provisioning.
+The simulation estimates durability under the supplied model and workload.
+Zero observed losses leave the estimate unresolved.
 .PP
-Quick mode asks only for number of sites, racks per site, hosts per rack, and NVMe disks per host. It uses 8 TB NVMe disks, weight 1.0, default failure/repair rates, slot_bits 16, automatic EC geometry selection, and sequential /24 networks from 10.0.0.0/8. Host addresses are assigned .1 through .254 in each generated subnet.
-.PP
-Answer no to receive the full questionnaire for disk classes, AFRs, capacities, site/rack CIDRs, multi-homing, host names, device identities, failure rates, repair behavior, and policy constraints.
-.SH OPTIONS
+The plan records tested geometries for each erasure family.
+With
+.B optimize.auto_geometry
+enabled, the planner selects a feasible geometry by simulated loss and
+the configured objective.
+.B optimize.max_total_fragments
+sets the search ceiling, which defaults to 32.
+.SH INPUT AND OUTPUT
 .TP
-.BR -c ", " --config " FILE"
-Read YAML topology/model configuration.
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Read topology and policy inputs from YAML.
 .TP
-.B --wizard
-Run the interactive quick/full topology wizard.
+.B \-\-wizard
+Build the input interactively.
+Quick mode asks for counts of sites, racks per site, hosts per rack, and NVMe
+disks per host.
+It uses 8 TB NVMe disks, weight 1.0, default failure and repair rates, 16 slot
+bits, automatic erasure geometry, and sequential /24 networks from 10.0.0.0/8.
+The full wizard asks for disk classes, capacities, failure assumptions,
+multi-homing, and policy constraints.
 .TP
-.B --wizard-config-output FILE
-Save wizard input as reusable YAML. Default: kagi.wizard.yaml.
+.BI \-\-wizard-config-output " FILE"
+Save the wizard's reusable input.
+The default is
+.IR kagi.wizard.yaml .
 .TP
-.B --mount-root DIR
-Override the generated disk mount root.
+.BI \-\-mount-root " DIR"
+Override the root for generated disk mount paths.
 .TP
-.BR -o ", " --output " FILE"
-Write generated plan YAML.
+.BR \-o ", " \-\-output " " \fIFILE\fR
+Write the generated plan as YAML.
+The default is
+.IR kagi.generated.yaml .
+The same plan is printed to standard output.
 .TP
-.B --trials N
+.BI \-\-join-key-output " FILE"
+Write the base64 cluster admission key.
+The default is
+.IR kagi.join.key .
+Restrict access to this file and to any checkpoint containing the key.
+.SH SIMULATION OPTIONS
+The defaults below apply to a full run.
+.TP
+.BI \-\-trials " N"
 Ordinary Monte Carlo trials per placement candidate.
+The default is 100000.
 .TP
-.B --candidates N
-Placement salts evaluated.
+.BI \-\-candidates " N"
+Placement salts to evaluate.
+The default is 256.
 .TP
-.B --seed N
-Deterministic simulation seed.
+.BI \-\-seed " N"
+Seed for the simulation.
+The default is 12648430.
 .TP
-.B --rare-trials N
+.BI \-\-rare-trials " N"
 Importance-sampling trials per finalist.
+The default is 100000.
 .TP
-.B --finalists N
-Ordinary-MC finalists evaluated with rare-event simulation.
+.BI \-\-finalists " N"
+Number of ordinary Monte Carlo finalists to reevaluate.
+The default is 8.
 .TP
-.B --validation-keys N
-Key samples used for deterministic failure-tolerance validation.
+.BI \-\-validation-keys " N"
+Number of deterministic key samples for tolerance validation.
+The default is 128.
 .TP
-.B --time-trials N
+.BI \-\-time-trials " N"
 Continuous-time trajectories.
+The default is 20000.
 .TP
-.B --horizon-years YEARS
+.BI \-\-horizon-years " YEARS"
 Years per continuous-time trajectory.
-.SH EC GEOMETRY OPTIMIZATION
-For every policy, the output reports the lowest-loss feasible tested geometry for Reed-Solomon, LRC, MSR, and CLAY. If optimize.auto_geometry is true, the policy's selected protection is changed to the feasible family/geometry with the lowest simulated unreadable probability, with the configured objective used as the secondary criterion.
-.PP
-Automatic search is bounded by topology placement limits and defaults to no more than 32 total chunks. Set optimize.max_total_fragments to change this ceiling.
-.SH OUTPUT
-The YAML output contains infrastructure, optimizer results, selected policy protection, per-schema geometry reports, placement salt, global slot assignments, and keyspace.disks[].slot_ranges. Disk mount names are generated as host-diskclass-ordinal under the configured mount root.
-.SH FILES
-.I kagi.join.key
-contains a newly generated cluster admission secret unless overridden.
-.SH SEE ALSO
-kagi-cluster-host(1), kagi-host(1), kagi-install(1)
-.SH LIVE PROGRESS
-When standard error is an interactive terminal, the optimizer displays a continuously refreshed status panel. The panel shows overall phase progress, current-operation progress, cumulative simulation count and rate, elapsed time, the lowest-failure placement/keyspace candidate observed so far, and the lowest-failure erasure-code geometry observed so far.
-.PP
-Progress output is written to standard error. Generated YAML remains on standard output and in the file selected by
-.BR --output .
+The default is 10.
 .TP
-.B --no-progress
-Disable the interactive progress display.
+.BI \-\-ais-rounds " N"
+Adaptive importance-sampling rounds.
+The default is 4.
 .TP
-.B --progress-interval-ms N
-Set the progress refresh interval in milliseconds. Default: 150. Values are internally clamped to 50 through 2000 milliseconds.
-.PP
-Progress is automatically disabled when standard error is not a terminal.
-
-.SH CUDA AND RUNTIME MODES
-Build with the cuda, hip, or opencl feature and use --mc-backend auto, cpu, cuda, hip, or opencl. GPU execution accelerates batched EC readability scoring while topology/failure generation and deterministic validation remain CPU-side.
-.PP
---run-mode quick30 and quick60 select reduced-confidence simulation workloads intended to complete substantially sooner than full mode. The names are approximate runtime classes, not completion-time guarantees.
+.BI \-\-elite-fraction " FRACTION"
+Near-miss fraction used to adapt rare-event sampling.
+The default is 0.10.
+.TP
+.BI \-\-run-mode " full|quick30|quick60"
+Select the simulation workload.
+Quick modes replace the corresponding full-run sampling and trajectory
+settings with smaller presets.
+They trade statistical confidence for shorter runs.
+The numbers in their names indicate approximate runtime classes.
+.TP
+.BI \-\-mc-backend " auto|cpu|cuda|hip|opencl"
+Select the backend for batched erasure-code readability scoring.
+The default is
+.BR auto .
+GPU choices require the corresponding build feature and runtime.
+Topology and failure generation and deterministic validation run on the CPU.
 .SH CHECKPOINTS
-Use --checkpoint DIR to save normalized inputs, run settings, admission key and completed trial batches. --checkpoint-seconds defaults to 60 and --checkpoint-batch-trials defaults to 1024. Saves occur at completed batch boundaries and phase boundaries. Use --resume DIR to reuse saved settings and committed batches; conflicting simulation options and incompatible versions are rejected.
-.SH SCHEDULING
-Use kagi-run to select scheduling policy and CPU affinity before the planner starts its workers.
+.TP
+.BI \-\-checkpoint " DIR"
+Save normalized inputs, run options, the admission key, and completed
+simulation batches.
+.TP
+.BI \-\-checkpoint-seconds " N"
+Checkpoint interval checked at batch boundaries.
+The default is 60 seconds.
+.TP
+.BI \-\-checkpoint-batch-trials " N"
+Trials per saved batch.
+The default is 1024.
+Batch size controls the reduction order and the granularity of unsaved work.
+.TP
+.BI \-\-resume " DIR"
+Resume using the saved inputs and options.
+The checkpoint records the Kagi version and absolute output paths.
+Use the same Kagi version when resuming.
+The resume form rejects conflicting simulation, input, and output options.
+.SH PROGRESS
+The progress panel reports phase progress, simulations completed, simulation
+rate, and the lowest-loss placement and geometries evaluated so far.
+It appears only on an interactive standard error stream.
+.TP
+.B \-\-no-progress
+Disable the progress panel.
+.TP
+.BI \-\-progress-interval-ms " N"
+Set the panel refresh interval.
+The default is 150 milliseconds.
+The display clamps this interval to 50 through 2000 milliseconds.
+.SH COMMAND INFORMATION
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.TP
+.BR \-V ", " \-\-version
+Show the Kagi version.
+.SH EXAMPLES
+.nf
+kagi-config \-\-config examples/example.yaml \-\-run-mode quick30
+kagi-config \-\-wizard \-\-checkpoint planner-run
+kagi-config \-\-resume planner-run \-\-no-progress
+.fi
+.SH SEE ALSO
+.BR kagi-cluster-host (1),
+.BR kagi-host (1),
+.BR kagi-run (1)

@@ -9,33 +9,70 @@
 #include <vector>
 
 static const char *source = R"CLC(
+// Use the same GF(2^8) polynomial as the CPU, CUDA, and HIP backends.
 uchar gf(uchar a, uchar b) {
-    uchar r=0;
-    for(int bit=0;bit<8;++bit){if(b&1)r^=a; uchar hi=a&128;a<<=1;if(hi)a^=0x1d;b>>=1;}
+    uchar r = 0;
+    for (int bit = 0; bit < 8; ++bit) {
+        if (b & 1)
+            r ^= a;
+        uchar hi = a & 128;
+        a <<= 1;
+        if (hi)
+            a ^= 0x1d;
+        b >>= 1;
+    }
     return r;
 }
-__kernel void matrix(__global const uchar *input,__global const uchar *coeff,
-                     __global uchar *output,ulong inputs,ulong outputs,ulong width) {
-    ulong x=get_global_id(0); if(x>=outputs*width)return;
-    ulong row=x/width,column=x%width; uchar result=0;
-    for(ulong i=0;i<inputs;++i)result^=gf(coeff[row*inputs+i],input[i*width+column]);
-    output[x]=result;
+
+// Each work item computes one byte in the row-major output matrix.
+__kernel void matrix(__global const uchar *input, __global const uchar *coeff,
+                     __global uchar *output, ulong inputs, ulong outputs, ulong width) {
+    ulong x = get_global_id(0);
+    if (x >= outputs * width)
+        return;
+
+    ulong row = x / width, column = x % width;
+    uchar result = 0;
+    for (ulong i = 0; i < inputs; ++i)
+        result ^= gf(coeff[row * inputs + i], input[i * width + column]);
+    output[x] = result;
 }
-__kernel void readable(__global const uchar *alive,__global uchar *lost,
-                       ulong trials,uint fragments,uint mode,uint k,uint groups,uint local_parity,uint global_parity) {
-    ulong t=get_global_id(0);if(t>=trials)return;
-    __global const uchar *a=alive+t*fragments;uint count=0;
-    for(uint i=0;i<fragments;++i)count+=a[i]!=0;
-    if(mode==0){lost[t]=count==0;return;}
-    if(mode==1){lost[t]=count<k;return;}
-    uint missing=0,remaining=0,group_size=k/groups,index=0;
-    for(uint g=0;g<groups;++g){uint survivors=0;
-        for(uint j=0;j<group_size+local_parity;++j)survivors+=a[index+j]!=0;
-        if(survivors<group_size)missing+=group_size-survivors;
-        index+=group_size+local_parity;
+
+// Trials are independent. Each reads its own surviving-fragment mask.
+__kernel void readable(__global const uchar *alive, __global uchar *lost,
+                       ulong trials, uint fragments, uint mode, uint k, uint groups,
+                       uint local_parity, uint global_parity) {
+    ulong t = get_global_id(0);
+    if (t >= trials)
+        return;
+
+    __global const uchar *a = alive + t * fragments;
+    uint count = 0;
+    for (uint i = 0; i < fragments; ++i)
+        count += a[i] != 0;
+    if (mode == 0) {
+        lost[t] = count == 0;
+        return;
     }
-    for(uint j=0;j<global_parity;++j)remaining+=a[index+j]!=0;
-    lost[t]=missing>remaining;
+    if (mode == 1) {
+        lost[t] = count < k;
+        return;
+    }
+
+    // Local groups cover their own losses first. The surviving global parity
+    // must cover the sum of the remaining deficits.
+    uint missing = 0, remaining = 0, group_size = k / groups, index = 0;
+    for (uint g = 0; g < groups; ++g) {
+        uint survivors = 0;
+        for (uint j = 0; j < group_size + local_parity; ++j)
+            survivors += a[index + j] != 0;
+        if (survivors < group_size)
+            missing += group_size - survivors;
+        index += group_size + local_parity;
+    }
+    for (uint j = 0; j < global_parity; ++j)
+        remaining += a[index + j] != 0;
+    lost[t] = missing > remaining;
 }
 )CLC";
 struct Runtime {
