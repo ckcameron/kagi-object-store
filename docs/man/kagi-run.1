@@ -1,13 +1,57 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-RUN 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-RUN 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-run \- launch a command with explicit Linux scheduling and CPU affinity
+kagi-run \- launch a command with Linux scheduling and CPU affinity
 .SH SYNOPSIS
 .B kagi-run
-[--policy normal|round-robin|fifo] [--priority N] [--cpus 2,3] -- COMMAND [ARGUMENTS]
+.RB [ \-\-policy " " \fIPOLICY\fR ]
+.RB [ \-\-priority " " \fIN\fR ]
+.RB [ \-\-cpus " " \fILIST\fR ]
+.B \-\-
+.I command
+.RI [ arguments ]
 .SH DESCRIPTION
-Applies and verifies scheduling before replacing itself with COMMAND. Normal is the default and requires priority zero. Round-robin and FIFO require priority 1 through 99 and appropriate operating-system permission. Failure prevents COMMAND from starting.
+Applies and verifies scheduling and CPU affinity before replacing itself
+with the requested command.
+Worker threads and child processes inherit these settings unless they
+change them.
+The launcher passes arguments directly to the executable.
 .PP
-Real-time policies must exclude at least one allowed logical CPU from their affinity. Without --cpus, the first allowed logical CPU is excluded automatically. This is not a hard real-time guarantee. Worker threads and child processes inherit scheduling unless they change it.
+Scheduling or affinity errors prevent the command from starting.
+Real-time policies require appropriate operating-system permission, such
+as a sufficient
+.B RLIMIT_RTPRIO
+or
+.BR CAP_SYS_NICE .
+.SH OPTIONS
+.TP
+.BI \-\-policy " normal|round-robin|fifo"
+Choose normal, round-robin, or FIFO scheduling.
+The default is
+.BR normal .
+.TP
+.BI \-\-priority " N"
+Use zero for normal scheduling or 1 through 99 for a real-time policy.
+The default is zero.
+.TP
+.BI \-\-cpus " LIST"
+Use the given comma-separated logical CPU numbers from the process's
+allowed CPU set.
+A real-time policy must leave at least one allowed CPU outside the selected
+set.
+If omitted, the launcher uses all allowed CPUs for normal scheduling and
+excludes the first allowed CPU for a real-time policy.
+.TP
+.BR \-h ", " \-\-help
+Show usage.
+.TP
+.BR \-V ", " \-\-version
+Show the Kagi version.
+.SH EXAMPLE
+.nf
+kagi-run \-\-policy normal \-\-cpus 2,3 \-\- kagi-config \-\-wizard
+.fi
 .SH SEE ALSO
-sched(7), kagi-config(1)
+.BR kagi-config (1),
+.BR sched (7),
+.BR capabilities (7)

@@ -6,8 +6,6 @@
 //! so background work can be rate-limited and kept behind foreground I/O. The configuration
 //! here defines the resource budgets and maintenance windows consumed by the node daemon.
 
-// Background-maintenance scheduler, time windows, quotas, and foreground/system priority arbitration.
-//! Background maintenance scheduling, quotas and foreground preemption.
 use anyhow::{bail, Result};
 use chrono::{Datelike, Timelike, Utc};
 use chrono_tz::Tz;
@@ -23,7 +21,6 @@ use std::{
 use tokio::sync::{Mutex, Notify, Semaphore};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-/// Kagi state or configuration used by the MaintenanceWindow path.
 pub struct MaintenanceWindow {
     /// Lowercase weekday names. Empty means every day.
     #[serde(default)]
@@ -35,7 +32,6 @@ pub struct MaintenanceWindow {
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-/// Kagi state or configuration used by the OperationPolicy path.
 pub struct OperationPolicy {
     /// Enable this maintenance operation. Default: true.
     #[serde(default = "yes")]
@@ -52,13 +48,12 @@ impl Default for OperationPolicy {
         }
     }
 }
-/// Implements the yes step and keeps its validation and state transitions visible at the call site.
+
 fn yes() -> bool {
     true
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-/// Kagi state or configuration used by the ResourceQuotas path.
 pub struct ResourceQuotas {
     /// Maintenance network budget in megabits/second. Default: 100.
     #[serde(default = "net_default")]
@@ -73,19 +68,19 @@ pub struct ResourceQuotas {
     #[serde(default = "conc_default")]
     pub max_concurrency: usize,
 }
-/// Implements the net default step and keeps its validation and state transitions visible at the call site.
+
 fn net_default() -> f64 {
     100.0
 }
-/// Implements the cpu default step and keeps its validation and state transitions visible at the call site.
+
 fn cpu_default() -> f64 {
     20.0
 }
-/// Implements the mem default step and keeps its validation and state transitions visible at the call site.
+
 fn mem_default() -> u64 {
     512
 }
-/// Implements the conc default step and keeps its validation and state transitions visible at the call site.
+
 fn conc_default() -> usize {
     2
 }
@@ -99,10 +94,10 @@ impl Default for ResourceQuotas {
         }
     }
 }
+
+/// Background maintenance schedules and resource ceilings.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-// ---- User-configurable schedules and resource ceilings -------------------------
-/// Background maintenance schedules and resource ceilings.
 pub struct MaintenanceConfig {
     /// Master maintenance switch. Default: true.
     #[serde(default = "yes")]
@@ -127,11 +122,11 @@ pub struct MaintenanceConfig {
     #[serde(default = "scrub_interval")]
     pub scrub_interval_ms: u64,
 }
-/// Implements the tz default step and keeps its validation and state transitions visible at the call site.
+
 fn tz_default() -> String {
     "UTC".into()
 }
-/// Implements the scrub interval step and keeps its validation and state transitions visible at the call site.
+
 fn scrub_interval() -> u64 {
     300_000
 }
@@ -158,9 +153,10 @@ pub struct MaintenanceStatus {
     pub quotas: ResourceQuotas,
     pub operations: BTreeMap<String, bool>,
 }
-#[derive(Clone)] // ---- Priority-aware admission and cooperative throttling -----------------------
-                 // Foreground/system work is never made to wait for a new maintenance unit;
-                 // background work yields between bounded units and obeys CPU/network/memory caps.
+
+/// Background workers yield between bounded units and share concurrency, memory,
+/// and network limits. Foreground requests enter without taking a maintenance permit.
+#[derive(Clone)]
 pub struct MaintenanceManager {
     cfg: Arc<MaintenanceConfig>,
     foreground: Arc<AtomicUsize>,
@@ -170,16 +166,17 @@ pub struct MaintenanceManager {
     memory: Arc<Semaphore>,
     network: Arc<Mutex<TokenBucket>>,
 }
-/// Kagi state or configuration used by the TokenBucket path.
+
 struct TokenBucket {
     tokens: f64,
     last: Instant,
 }
-/// Kagi state or configuration used by the ForegroundGuard path.
+
 pub struct ForegroundGuard {
     mgr: MaintenanceManager,
 }
-/// Kagi state or configuration used by the MaintenancePermit path.
+
+/// Owns the concurrency and memory permits for one unit of maintenance work.
 pub struct MaintenancePermit {
     mgr: MaintenanceManager,
     _conc: tokio::sync::OwnedSemaphorePermit,
@@ -214,6 +211,9 @@ impl MaintenanceManager {
             })),
         }
     }
+
+    /// Keep the guard alive for the foreground request. Dropping it wakes waiting
+    /// maintenance workers.
     pub fn foreground(&self) -> ForegroundGuard {
         self.foreground.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -234,6 +234,9 @@ impl MaintenanceManager {
             && self.policy(name).enabled
             && window_open(&self.cfg.timezone, &self.policy(name).windows)
     }
+
+    /// Admit one unit under the operation's schedule and resource budgets. Recheck
+    /// foreground work after waiting for the concurrency permit.
     pub async fn acquire(
         &self,
         name: &str,
@@ -264,6 +267,9 @@ impl MaintenanceManager {
             });
         }
     }
+
+    /// Throttle background traffic with the shared token bucket. A single charge
+    /// can fit even when it exceeds a second of the configured rate.
     pub async fn charge_network(&self, bytes: u64) {
         let rate = self.cfg.quotas.network_mbps * 1_000_000.0 / 8.0;
         if rate <= 0.0 {
@@ -325,14 +331,14 @@ impl MaintenanceManager {
         self.cfg.scrub_interval_ms
     }
 }
-/// Implements the hm step and keeps its validation and state transitions visible at the call site.
+
 fn hm(s: &str) -> Option<u32> {
     let (mut i, mut it) = (0u32, s.split(':'));
     i += it.next()?.parse::<u32>().ok()? * 60;
     i += it.next()?.parse::<u32>().ok()?;
     Some(i)
 }
-/// Implements the window open step and keeps its validation and state transitions visible at the call site.
+
 fn window_open(tz: &str, ws: &[MaintenanceWindow]) -> bool {
     if ws.is_empty() {
         return true;

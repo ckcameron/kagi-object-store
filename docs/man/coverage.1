@@ -1,8 +1,30 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH COVERAGE 1 "September 2026" "Kagi 0.38.0" "Developer Commands"
+.TH COVERAGE 1 "November 2026" "Kagi 0.39.0" "Developer Commands"
 .SH NAME
 coverage \- generate Kagi LLVM source coverage reports
 .SH SYNOPSIS
 .B scripts/coverage
 .SH DESCRIPTION
-Runs cargo-llvm-cov across workspace targets and writes LCOV and HTML reports under coverage/. Optional CUDA coverage can be enabled with KAGI_COVERAGE_ALL_FEATURES=1.
+Runs
+.B cargo llvm-cov
+against all workspace targets.
+It clears previous coverage data first.
+The reports are written to
+.I coverage/lcov.info
+and
+.IR coverage/html/index.html .
+Install
+.B cargo-llvm-cov
+and the toolchain's LLVM coverage components before running the script.
+.SH ENVIRONMENT
+.TP
+.B KAGI_COVERAGE_ALL_FEATURES
+Set to 1 to pass
+.B \-\-all-features
+to Cargo.
+The toolchains for the selected features must be available.
+.TP
+.B KAGI_COVERAGE_MIN_LINES
+Fail if the line coverage percentage is below this value.
+.SH SEE ALSO
+.BR test-all (1)

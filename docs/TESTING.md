@@ -18,7 +18,12 @@ cargo check --all-targets --features cuda
 cargo test --all-targets --features cuda
 ```
 
-## Coverage on CachyOS
+## CI and coverage
+
+The portable GitHub Actions matrix covers the default build, ISA-L/IPP/AOCL,
+QUIC, the userspace eBPF loader, a combined feature build, and OpenCL. See
+[hardware execution](HARDWARE-VALIDATION.md) for positive device or kernel tests
+and [security validation](SECURITY-VALIDATION.md) for the supply-chain checks.
 
 Install LLVM coverage support once:
 
@@ -33,7 +38,7 @@ Then run:
 scripts/coverage
 ```
 
-Reports are written under `coverage/` as HTML and LCOV. Set `KAGI_COVERAGE_MIN_LINES` to a numeric percentage to make coverage generation fail below a required line-coverage threshold. Set `KAGI_COVERAGE_ALL_FEATURES=1` only on a machine that has the CUDA toolchain needed by this project.
+Reports are written under `coverage/` as HTML and LCOV. Set `KAGI_COVERAGE_MIN_LINES` to a numeric percentage to make coverage generation fail below a required line-coverage threshold. Set `KAGI_COVERAGE_ALL_FEATURES=1` only on a machine with the development toolchains for the enabled GPU features.
 
 ## Test philosophy
 
@@ -41,24 +46,25 @@ Unit tests cover deterministic placement helpers, key-range boundaries, network 
 
 ## Monte Carlo tests
 
-The test set covers for the six-host/six-disk minimums, minimum failure-tolerance derivation, sequential quick-mode CIDR allocation, MDS-style two-loss readability, topology-bounded geometry generation, and deterministic two-host-loss validation for a 4+2 Reed-Solomon layout.
+The test set covers the six-host/six-disk minimums, minimum failure-tolerance derivation, sequential quick-mode CIDR allocation, MDS-style two-loss readability, topology-bounded geometry generation, and deterministic two-host-loss validation for a 4+2 Reed-Solomon layout.
 
 
-## codec tests
+## Codec tests
 
 The suite includes CPU reference tests for product-matrix MSR encode/reconstruct/exact repair, CLAY encode/decode/exact repair, linearized CLAY encode/decode equivalence, and distributed exact-repair plans. CUDA builds should additionally run `cargo test --all-targets --features cuda` on a host with nvcc and a compatible NVIDIA runtime. The CUDA path deliberately falls back to the CPU reference implementation on GPU errors rather than accepting unverified output.
 
-## warning and progress validation
+## Warning and progress validation
 
-The current release is intended to keep the default `cargo check` free of the dead-code/unused-field warnings reported against v32. Do not replace this with crate-wide `allow(dead_code)` attributes; an unused production path should be removed, activated, or isolated behind the feature/test configuration that owns it.
+Keep the default build warning-clean. Feature-specific production paths and
+test helpers should use the configuration that owns them.
 
 Recommended validation:
 
 ```bash
-cargo check 2>&1 | tee cargo-check-v38.txt
-cargo test 2>&1 | tee cargo-test-v38.txt
-cargo clippy --all-targets 2>&1 | tee cargo-clippy-v38.txt
-cargo build --release 2>&1 | tee cargo-release-v38.txt
+cargo check 2>&1 | tee cargo-check.txt
+cargo test 2>&1 | tee cargo-test.txt
+cargo clippy --all-targets 2>&1 | tee cargo-clippy.txt
+cargo build --release 2>&1 | tee cargo-release.txt
 ```
 
 Interactive progress should also be exercised on a real TTY:
@@ -84,7 +90,7 @@ The web console has a unit test covering Argon2id user creation and HTTP Basic v
 
 The CUDA Monte Carlo path should be compared against CPU mode with the same seed/topology. Because the GPU path accelerates readability evaluation after CPU topology/failure generation, loss counts for a fixed candidate should agree exactly for the same generated survival vectors.
 
-## 0.38.0 checkpoints, acceleration and scheduling
+## Checkpoints, acceleration, and scheduling
 
 Run `scripts/test-checkpoint-resume target/debug/kagi-config` after building the
 planner. It kills a running simulation, resumes it, compares it with a cold run

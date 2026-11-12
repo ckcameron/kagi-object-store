@@ -1,27 +1,108 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-CLUSTER-HOST 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-CLUSTER-HOST 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-cluster-host \- distributed Kagi cluster daemon and administrative CLI
+kagi-cluster-host \- run or administer a distributed Kagi node
 .SH SYNOPSIS
 .B kagi-cluster-host
---config FILE COMMAND [ARGS]
+.RB [ \-c " " \fIFILE\fR ]
+.I command
+.RI [ arguments ]
 .SH DESCRIPTION
-Runs the cluster object/metadata service or issues administrative operations. The daemon integrates Raft metadata, joint-consensus membership, PQ-authenticated peer traffic, health/recovery, CLAY/MSR/Reed-Solomon erasure coding, snapshots, maintenance scheduling, capacity expansion, filesystem namespace operations, and object-backed block volumes.
+Runs a Kagi node or performs an administrative operation using its node YAML.
+The node owns its local data directories and participates in Raft for
+authoritative metadata.
+The normal runtime requires at least six configured hosts with at least six
+disks per host.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Read node configuration from
+.IR FILE .
+The default is
+.IR /etc/kagi/node.yaml .
+.TP
+.BR \-h ", " \-\-help
+Show the command list, or use
+.I command
+.B \-\-help
+for command-specific arguments.
 .SH COMMANDS
-Serve, status, object put/get, repair/scrub, health clearance, PQ identity/key operations, membership operations, snapshot operations, capacity changes, and block-volume operations are exposed through this CLI and its REST service. Use `--help` for the exact build-specific command list.
-.SH CONSISTENCY
-Externally visible object mutations return success only after the configured Raft commit/apply barrier. Followers do not serve stale linearizable object reads as authoritative results.
-.SH SECURITY
-Internal requests require configured ML-DSA identity/authentication and cluster admission credentials. Protect node private keys and persistent session/replay state.
-.SH SEE ALSO
-kagi-config(1), kagi-install(1), kagi-volume-nbd(1)
-
-.SH ERASURE CODING
-The runtime supports Reed-Solomon, canonical product-matrix MSR with d=2k-2, and CLAY. CLAY is the default configured EC family. With the cuda feature, data-heavy GF(256) transforms use the CUDA matrix engine when above gpu_threshold_bytes. Single-chunk CLAY/MSR recovery uses bandwidth-optimal helper requests rather than downloading complete helper chunks.
-.SH TOPOLOGY MINIMUM
-The daemon requires at least six configured hosts and at least six disks on every host.
-
-.SH KAGI WEB CONSOLE
-Each serving node exposes the Kagi operations console at /ui when web_console.enabled is true. The local user database stores Argon2id password hashes and viewer/admin roles. Use the web-user-add subcommand with --password-file to bootstrap users. The browser authentication exchange must be protected by TLS or a trusted TLS reverse proxy.
+.TP
+.B serve
+Run the node API, metadata service, configured listeners, and background
+controllers for health, repair, maintenance, and snapshots.
+.TP
+.B status
+Print the local node and cluster summary as JSON.
+.TP
+.B audit
+Validate the configured security policy and print its effective configuration
+as JSON without starting the daemon.
+.TP
+.BI "put " "KEY FILE"
+Store the bytes in
+.I FILE
+as a new version of
+.IR KEY .
+.TP
+.BI "get " "KEY OUTPUT"
+Retrieve the current object and write its bytes to
+.IR OUTPUT .
+.TP
+.BI "locate " KEY
+Print the current fragment placement for an object.
+.TP
+.BI "repair " KEY
+Repair missing or damaged fragments using the object's protection policy.
+.TP
+.BI "scrub " KEY
+Verify fragment checksums and readability.
+.TP
+.BI "clear-health " RESOURCE
+Clear the resource's flap and quarantine state after confirming that it is
+safe to return to service.
+.TP
+.BI "generate-pq-identity \-\-public " PUBLIC " \-\-secret " SECRET
+Write an ML-DSA-87 identity pair.
+This command can run before node YAML exists.
+Keep the private key restricted to the node operator and service.
+.TP
+.BI "web-user-add " USER " \-\-password-file " FILE
+Create or update a local console account.
+Use
+.BI \-\-role " viewer"
+(the default) or
+.BR "\-\-role admin" .
+The password is read from a file to keep it out of command arguments.
+.TP
+.BI "membership add node " ID " \-\-endpoint " URL
+Add a voting node on the current Raft leader.
+Optional flags are
+.BI \-\-site " SITE" ,
+.BI \-\-rack " RACK" ,
+and
+.BR "\-\-pq-public-key FILE" .
+.TP
+.BI "membership remove " "node|rack|site ID"
+Remove the named voter or all voters with the named rack or site label.
+Run this on the current Raft leader.
+Batched rack and site additions use the membership REST endpoint.
+.SH OPERATIONS
+Kagi records authoritative metadata changes through Raft.
+The runtime supports replication and Reed-Solomon, LRC, product-matrix MSR,
+and CLAY erasure coding.
+CLAY is the default erasure family.
+Supported builds can use optional accelerators for the data transforms.
 .PP
-The console provides cluster monitoring, object/chunk locality inspection, known pending object operations, local/cluster logs, and Raft-backed bucket/WORM lifecycle administration.
+The REST service handles operations beyond the local CLI, including volume
+management, snapshot operations, and capacity changes.
+When
+.B web_console.enabled
+is set, the operations console is available under
+.BR /ui .
+Protect the browser login and session traffic with TLS.
+.SH SEE ALSO
+.BR kagi-config (1),
+.BR kagi-host (1),
+.BR kagi-install (1),
+.BR kagi-volume-nbd (1)

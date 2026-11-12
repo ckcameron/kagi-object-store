@@ -38,41 +38,59 @@ type driver struct {
 	csi.UnimplementedControllerServer
 	csi.UnimplementedNodeServer
 	mode, endpoint, nodeID, stateDir string
-	http *http.Client
-	locks sync.Map
+	http                             *http.Client
+	locks                            sync.Map
 }
 
 func (d *driver) api(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	return d.apiAt(ctx, d.endpoint, method, path, body)
 }
+
 func (d *driver) apiAt(ctx context.Context, endpoint, method, path string, body any) (*http.Response, error) {
-	if endpoint == "" { return nil, fmt.Errorf("Kagi API endpoint is empty") }
+	if endpoint == "" {
+		return nil, fmt.Errorf("Kagi API endpoint is empty")
+	}
 	var reader *strings.Reader
 	if body != nil {
-		b, err := json.Marshal(body); if err != nil { return nil, err }
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
 		reader = strings.NewReader(string(b))
 	}
 	var req *http.Request
 	var err error
-	if reader == nil { req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(endpoint, "/")+path, nil) } else {
+	if reader == nil {
+		req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(endpoint, "/")+path, nil)
+	} else {
 		req, err = http.NewRequestWithContext(ctx, method, strings.TrimRight(endpoint, "/")+path, reader)
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return d.http.Do(req)
 }
+
 func readJSON(resp *http.Response, out any) error {
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return fmt.Errorf("Kagi API returned %s", resp.Status) }
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Kagi API returned %s", resp.Status)
+	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
+
 func (d *driver) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
 	return &csi.GetPluginInfoResponse{Name: driverName, VendorVersion: "0.1.0"}, nil
 }
+
 func (d *driver) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
-	if d.mode != "controller" { return &csi.GetPluginCapabilitiesResponse{}, nil }
+	if d.mode != "controller" {
+		return &csi.GetPluginCapabilitiesResponse{}, nil
+	}
 	return &csi.GetPluginCapabilitiesResponse{Capabilities: []*csi.PluginCapability{{Type: &csi.PluginCapability_Service_{Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE}}}}}, nil
 }
+
 func (d *driver) Probe(ctx context.Context, _ *csi.ProbeRequest) (*csi.ProbeResponse, error) {
 	if d.endpoint == "" {
 		return &csi.ProbeResponse{Ready: wrapperspb.Bool(false)}, nil
@@ -87,12 +105,14 @@ func (d *driver) Probe(ctx context.Context, _ *csi.ProbeRequest) (*csi.ProbeResp
 	}
 	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
 }
+
 func (d *driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
 	return &csi.ControllerGetCapabilitiesResponse{Capabilities: []*csi.ControllerServiceCapability{
 		{Type: &csi.ControllerServiceCapability_Rpc{Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME}}},
 		{Type: &csi.ControllerServiceCapability_Rpc{Rpc: &csi.ControllerServiceCapability_RPC{Type: csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME}}},
 	}}, nil
 }
+
 func supportedAccessMode(mode csi.VolumeCapability_AccessMode_Mode) bool {
 	switch mode {
 	case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
@@ -104,16 +124,21 @@ func supportedAccessMode(mode csi.VolumeCapability_AccessMode_Mode) bool {
 		return false
 	}
 }
+
+// CreateVolume serializes same-name requests. A retry returns the existing
+// volume when its provisioned capacity satisfies the rounded request.
 func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	if req.GetName() == "" || len(req.GetVolumeCapabilities()) == 0 { return nil, status.Error(codes.InvalidArgument, "name and at least one volume capability are required") }
+	if req.GetName() == "" || len(req.GetVolumeCapabilities()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "name and at least one volume capability are required")
+	}
 	unlock := d.lock("create:" + req.GetName())
 	defer unlock()
-	for _,capability:=range req.GetVolumeCapabilities() {
-		if capability.GetAccessMode()==nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
-			return nil,status.Error(codes.InvalidArgument,"Kagi CSI supports single-node access modes only")
+	for _, capability := range req.GetVolumeCapabilities() {
+		if capability.GetAccessMode() == nil || !supportedAccessMode(capability.GetAccessMode().GetMode()) {
+			return nil, status.Error(codes.InvalidArgument, "Kagi CSI supports single-node access modes only")
 		}
-		if capability.GetBlock()==nil && capability.GetMount()==nil {
-			return nil,status.Error(codes.InvalidArgument,"volume capability must request block or mount access")
+		if capability.GetBlock() == nil && capability.GetMount() == nil {
+			return nil, status.Error(codes.InvalidArgument, "volume capability must request block or mount access")
 		}
 		if capability.GetMount() != nil {
 			fsType := strings.ToLower(capability.GetMount().GetFsType())
@@ -126,68 +151,109 @@ func (d *driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, status.Error(codes.InvalidArgument, "capacity range values cannot be negative")
 	}
 	size := req.GetCapacityRange().GetRequiredBytes()
-	if size <= 0 { size = 10 * 1024 * 1024 * 1024 }
+	if size <= 0 {
+		size = 10 * 1024 * 1024 * 1024
+	}
 	const extent = 4 * 1024 * 1024
-	if size > int64(^uint64(0)>>1)-(extent-1) { return nil, status.Error(codes.InvalidArgument, "requested capacity is too large") }
+	if size > int64(^uint64(0)>>1)-(extent-1) {
+		return nil, status.Error(codes.InvalidArgument, "requested capacity is too large")
+	}
 	size = ((size + extent - 1) / extent) * extent
-	if limit:=req.GetCapacityRange().GetLimitBytes();limit>0&&size>limit {
-		return nil,status.Error(codes.InvalidArgument,"rounded capacity exceeds capacity_range.limit_bytes")
+	if limit := req.GetCapacityRange().GetLimitBytes(); limit > 0 && size > limit {
+		return nil, status.Error(codes.InvalidArgument, "rounded capacity exceeds capacity_range.limit_bytes")
 	}
 	listResp, err := d.api(ctx, http.MethodGet, "/v1/volumes", nil)
-	if err != nil { return nil, status.Errorf(codes.Unavailable, "list existing volumes: %v", err) }
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "list existing volumes: %v", err)
+	}
 	var existing map[string]struct {
-			ID string `json:"id"`
-			Name string `json:"name"`
-			Size int64 `json:"size_bytes"`
-		}
+		ID   string `json:"id"`
+		Name string `json:"name"`
+		Size int64  `json:"size_bytes"`
+	}
 	if err = readJSON(listResp, &existing); err == nil {
 		for _, v := range existing {
 			if v.Name == req.GetName() {
-				if v.ID == "" { continue }
-				if v.Size < size { return nil, status.Error(codes.AlreadyExists, "volume name exists with smaller capacity") }
-				return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId:v.ID, CapacityBytes:v.Size, VolumeContext:map[string]string{"apiEndpoint":d.endpoint}}}, nil
+				if v.ID == "" {
+					continue
+				}
+				if v.Size < size {
+					return nil, status.Error(codes.AlreadyExists, "volume name exists with smaller capacity")
+				}
+				return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: v.ID, CapacityBytes: v.Size, VolumeContext: map[string]string{"apiEndpoint": d.endpoint}}}, nil
 			}
 		}
-	} else { return nil, status.Errorf(codes.Unavailable, "decode volume list: %v", err) }
+	} else {
+		return nil, status.Errorf(codes.Unavailable, "decode volume list: %v", err)
+	}
 	presentations := []string{"kubernetes", "nbd"}
-	body := map[string]any{"name":req.GetName(),"size_bytes":size,"logical_block_bytes":4096,"extent_bytes":extent,"thin_provisioned":true,"presentations":presentations}
+	body := map[string]any{"name": req.GetName(), "size_bytes": size, "logical_block_bytes": 4096, "extent_bytes": extent, "thin_provisioned": true, "presentations": presentations}
 	resp, err := d.api(ctx, http.MethodPost, "/v1/volumes", body)
-	if err != nil { return nil, status.Errorf(codes.Unavailable, "create Kagi volume: %v", err) }
-	var result struct { Volume struct { ID string `json:"id"`; Size int64 `json:"size_bytes"` } `json:"volume"` }
-	if err := readJSON(resp, &result); err != nil { return nil, status.Errorf(codes.Internal, "decode Kagi create response: %v", err) }
-	if result.Volume.ID == "" { return nil, status.Error(codes.Internal, "Kagi API returned no volume ID") }
-	return &csi.CreateVolumeResponse{Volume:&csi.Volume{VolumeId:result.Volume.ID,CapacityBytes:result.Volume.Size,VolumeContext:map[string]string{"apiEndpoint":d.endpoint}}},nil
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "create Kagi volume: %v", err)
+	}
+	var result struct {
+		Volume struct {
+			ID   string `json:"id"`
+			Size int64  `json:"size_bytes"`
+		} `json:"volume"`
+	}
+	if err := readJSON(resp, &result); err != nil {
+		return nil, status.Errorf(codes.Internal, "decode Kagi create response: %v", err)
+	}
+	if result.Volume.ID == "" {
+		return nil, status.Error(codes.Internal, "Kagi API returned no volume ID")
+	}
+	return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: result.Volume.ID, CapacityBytes: result.Volume.Size, VolumeContext: map[string]string{"apiEndpoint": d.endpoint}}}, nil
 }
+
 func (d *driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	if req.GetVolumeId() == "" { return nil, status.Error(codes.InvalidArgument, "volume_id is required") }
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id is required")
+	}
 	resp, err := d.api(ctx, http.MethodDelete, "/v1/volumes/"+req.GetVolumeId(), nil)
-	if err != nil { return nil, status.Errorf(codes.Unavailable, "delete Kagi volume: %v", err) }
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "delete Kagi volume: %v", err)
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK { return &csi.DeleteVolumeResponse{}, nil }
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		return &csi.DeleteVolumeResponse{}, nil
+	}
 	if resp.StatusCode == http.StatusConflict {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, status.Errorf(codes.FailedPrecondition, "Kagi refused volume deletion: %s", strings.TrimSpace(string(body)))
 	}
 	return nil, status.Errorf(codes.Internal, "Kagi API returned %s deleting volume", resp.Status)
 }
+
 type prState struct {
-	Registrations map[string]struct { Key uint64 `json:"key"` } `json:"registrations"`
+	Registrations map[string]struct {
+		Key uint64 `json:"key"`
+	} `json:"registrations"`
 	Reservation *struct {
 		Holder string `json:"holder"`
-		Key uint64 `json:"key"`
-		Type string `json:"reservation_type"`
+		Key    uint64 `json:"key"`
+		Type   string `json:"reservation_type"`
 	} `json:"reservation"`
 }
+
 func (d *driver) getPR(ctx context.Context, endpoint, id string) (prState, error) {
 	resp, err := d.apiAt(ctx, endpoint, http.MethodGet, "/v1/volumes/"+id+"/pr", nil)
-	if err != nil { return prState{}, err }
+	if err != nil {
+		return prState{}, err
+	}
 	var state prState
-	if err = readJSON(resp, &state); err != nil { return state, err }
+	if err = readJSON(resp, &state); err != nil {
+		return state, err
+	}
 	return state, nil
 }
+
 func (d *driver) putPR(ctx context.Context, endpoint, id string, op map[string]any) error {
 	resp, err := d.apiAt(ctx, endpoint, http.MethodPut, "/v1/volumes/"+id+"/pr", op)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -195,10 +261,17 @@ func (d *driver) putPR(ctx context.Context, endpoint, id string, op map[string]a
 	}
 	return nil
 }
-func prKey(volumeID,nodeID string) uint64 {
-	sum:=sha256.Sum256([]byte(volumeID+"\x00"+nodeID))
-	key:=binary.BigEndian.Uint64(sum[:8]);if key==0{return 1};return key
+
+// Derive the same nonzero reservation key for a volume and node on every retry.
+func prKey(volumeID, nodeID string) uint64 {
+	sum := sha256.Sum256([]byte(volumeID + "\x00" + nodeID))
+	key := binary.BigEndian.Uint64(sum[:8])
+	if key == 0 {
+		return 1
+	}
+	return key
 }
+
 func endpointFromContext(volumeContext map[string]string, fallback string) string {
 	// A PV's volumeAttributes are user-controlled in many clusters. Prefer the
 	// administrator-configured endpoint to prevent a PV from redirecting the
@@ -208,6 +281,9 @@ func endpointFromContext(volumeContext map[string]string, fallback string) strin
 	}
 	return strings.TrimRight(strings.TrimSpace(volumeContext["apiEndpoint"]), "/")
 }
+
+// ControllerPublishVolume registers the node initiator and acquires the
+// reservation before Kubernetes can attach the volume to that node.
 func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
 	id, node := req.GetVolumeId(), req.GetNodeId()
 	if id == "" || node == "" {
@@ -261,6 +337,7 @@ func (d *driver) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 		PublishContext: map[string]string{"apiEndpoint": endpoint, "initiator": initiator},
 	}, nil
 }
+
 func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
 	id, node := req.GetVolumeId(), req.GetNodeId()
 	if id == "" || node == "" {
@@ -298,6 +375,7 @@ func (d *driver) ControllerUnpublishVolume(ctx context.Context, req *csi.Control
 	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
+
 func (d *driver) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest) (*csi.ValidateVolumeCapabilitiesResponse, error) {
 	if req.GetVolumeId() == "" || len(req.GetVolumeCapabilities()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume_id and capabilities required")
@@ -331,10 +409,11 @@ func (d *driver) ValidateVolumeCapabilities(ctx context.Context, req *csi.Valida
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
 			VolumeCapabilities: req.GetVolumeCapabilities(),
-			VolumeContext: req.GetVolumeContext(),
+			VolumeContext:      req.GetVolumeContext(),
 		},
 	}, nil
 }
+
 func (d *driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
 	// NodeGetVolumeStats is intentionally not advertised: raw-block usage accounting
 	// is not yet implemented against the Kagi allocated-extent map.
@@ -342,91 +421,176 @@ func (d *driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRe
 		{Type: &csi.NodeServiceCapability_Rpc{Rpc: &csi.NodeServiceCapability_RPC{Type: csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME}}},
 	}}, nil
 }
-func (d *driver) NodeGetInfo(context.Context,*csi.NodeGetInfoRequest)(*csi.NodeGetInfoResponse,error) {
-	if d.nodeID=="" { return nil,status.Error(codes.FailedPrecondition,"KAGI_NODE_ID is required") }
-	return &csi.NodeGetInfoResponse{NodeId:d.nodeID,MaxVolumesPerNode:128},nil
+
+func (d *driver) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
+	if d.nodeID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "KAGI_NODE_ID is required")
+	}
+	return &csi.NodeGetInfoResponse{NodeId: d.nodeID, MaxVolumesPerNode: 128}, nil
 }
-type stageState struct { VolumeID, Device, Port, ServerPID string; Filesystem bool; ReadOnly bool; StagePath string }
+
+// stageState records the resources required to detach an existing NBD session
+// after the node plugin restarts.
+type stageState struct {
+	VolumeID, Device, Port, ServerPID string
+	Filesystem                        bool
+	ReadOnly                          bool
+	StagePath                         string
+}
+
 func safeID(id string) string {
-	base:=strings.Map(func(r rune) rune { if r>='a'&&r<='z'||r>='A'&&r<='Z'||r>='0'&&r<='9'||r=='-'||r=='_' {return r}; return '_' },id)
-	if len(base)>64 { base=base[:64] }
-	sum:=sha256.Sum256([]byte(id))
-	return base+"-"+hex.EncodeToString(sum[:6])
+	base := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, id)
+	if len(base) > 64 {
+		base = base[:64]
+	}
+	sum := sha256.Sum256([]byte(id))
+	return base + "-" + hex.EncodeToString(sum[:6])
 }
+
 func contains(items []string, wanted string) bool {
 	for _, item := range items {
-		if item == wanted { return true }
+		if item == wanted {
+			return true
+		}
 	}
 	return false
 }
+
+// Serialize controller and node operations using their respective name or volume ID.
 func (d *driver) lock(key string) func() {
 	value, _ := d.locks.LoadOrStore(key, &sync.Mutex{})
 	mu := value.(*sync.Mutex)
 	mu.Lock()
 	return mu.Unlock
 }
-func (d *driver) statePath(id string) string { return filepath.Join(d.stateDir,safeID(id)+".json") }
-func (d *driver) loadState(id string)(stageState,error) {
-	var s stageState; b,e:=os.ReadFile(d.statePath(id)); if e!=nil{return s,e}; e=json.Unmarshal(b,&s); return s,e
+
+func (d *driver) statePath(id string) string { return filepath.Join(d.stateDir, safeID(id)+".json") }
+func (d *driver) loadState(id string) (stageState, error) {
+	var s stageState
+	b, e := os.ReadFile(d.statePath(id))
+	if e != nil {
+		return s, e
+	}
+	e = json.Unmarshal(b, &s)
+	return s, e
 }
+
+// Rename the fully written staging record into place so readers see complete JSON.
 func (d *driver) saveState(s stageState) error {
-	if err:=os.MkdirAll(d.stateDir,0700);err!=nil{return err}
-	b,err:=json.MarshalIndent(s,"","  ");if err!=nil{return err}
-	tmp:=d.statePath(s.VolumeID)+".tmp";if err=os.WriteFile(tmp,b,0600);err!=nil{return err};return os.Rename(tmp,d.statePath(s.VolumeID))
+	if err := os.MkdirAll(d.stateDir, 0700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := d.statePath(s.VolumeID) + ".tmp"
+	if err = os.WriteFile(tmp, b, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, d.statePath(s.VolumeID))
 }
+
+// Require both a matching frontend process and a device with a kernel-side attachment.
 func serverAlive(s stageState) bool {
-	pid,err:=strconv.Atoi(s.ServerPID);if err!=nil||pid<=1{return false}
-	cmdline,err:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
-	if err!=nil||!strings.Contains(string(cmdline),"kagi-volume-nbd")||!strings.Contains(string(cmdline),s.VolumeID){return false}
-	base:=filepath.Base(s.Device)
-	if !strings.HasPrefix(base,"nbd"){return false}
-	devicePID,err:=os.ReadFile(filepath.Join("/sys/block",base,"pid"))
-	return err==nil&&strings.TrimSpace(string(devicePID))!="0"
+	pid, err := strconv.Atoi(s.ServerPID)
+	if err != nil || pid <= 1 {
+		return false
+	}
+	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil || !strings.Contains(string(cmdline), "kagi-volume-nbd") || !strings.Contains(string(cmdline), s.VolumeID) {
+		return false
+	}
+	base := filepath.Base(s.Device)
+	if !strings.HasPrefix(base, "nbd") {
+		return false
+	}
+	devicePID, err := os.ReadFile(filepath.Join("/sys/block", base, "pid"))
+	return err == nil && strings.TrimSpace(string(devicePID)) != "0"
 }
-func cleanupStaleState(ctx context.Context,d *driver,s stageState) {
-	if s.Filesystem { _ = run(ctx,"umount",s.StagePath) }
-	if s.Device!="" { _ = run(ctx,"nbd-client","-d",s.Device) }
-	if pid,err:=strconv.Atoi(s.ServerPID);err==nil&&pid>1 {
-		cmdline,readErr:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
-		if readErr==nil&&strings.Contains(string(cmdline),"kagi-volume-nbd")&&strings.Contains(string(cmdline),s.VolumeID) {
-			if p,e:=os.FindProcess(pid);e==nil{_ = p.Kill()}
+
+func cleanupStaleState(ctx context.Context, d *driver, s stageState) {
+	if s.Filesystem {
+		_ = run(ctx, "umount", s.StagePath)
+	}
+	if s.Device != "" {
+		_ = run(ctx, "nbd-client", "-d", s.Device)
+	}
+	if pid, err := strconv.Atoi(s.ServerPID); err == nil && pid > 1 {
+		cmdline, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if readErr == nil && strings.Contains(string(cmdline), "kagi-volume-nbd") && strings.Contains(string(cmdline), s.VolumeID) {
+			if p, e := os.FindProcess(pid); e == nil {
+				_ = p.Kill()
+			}
 		}
 	}
 	_ = os.Remove(d.statePath(s.VolumeID))
 }
+
 func run(ctx context.Context, name string, args ...string) error {
-	cmd:=exec.CommandContext(ctx,name,args...); out,err:=cmd.CombinedOutput()
-	if err!=nil{return fmt.Errorf("%s %v: %w: %s",name,args,err,strings.TrimSpace(string(out)))}
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %v: %w: %s", name, args, err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
+
 func freeNBD() string {
-	for i:=0;i<128;i++ { p:=fmt.Sprintf("/dev/nbd%d",i); if _,err:=os.Stat(p);err==nil {
-		pid,err:=os.ReadFile(fmt.Sprintf("/sys/block/nbd%d/pid",i))
-		if err==nil && strings.TrimSpace(string(pid))=="0" { return p }
-	} }
+	for i := 0; i < 128; i++ {
+		p := fmt.Sprintf("/dev/nbd%d", i)
+		if _, err := os.Stat(p); err == nil {
+			pid, err := os.ReadFile(fmt.Sprintf("/sys/block/nbd%d/pid", i))
+			if err == nil && strings.TrimSpace(string(pid)) == "0" {
+				return p
+			}
+		}
+	}
 	return ""
 }
-func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest)(*csi.NodeStageVolumeResponse,error) {
-	id,stage:=req.GetVolumeId(),req.GetStagingTargetPath()
-	if id==""||stage=="" { return nil,status.Error(codes.InvalidArgument,"volume_id and staging_target_path required") }
+
+// NodeStageVolume attaches one NBD device per volume, optionally mounts ext4,
+// and persists enough state for retries and teardown.
+func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
+	id, stage := req.GetVolumeId(), req.GetStagingTargetPath()
+	if id == "" || stage == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and staging_target_path required")
+	}
 	unlock := d.lock("volume:" + id)
 	defer unlock()
-	if old,err:=d.loadState(id);err==nil {
+	if old, err := d.loadState(id); err == nil {
 		if serverAlive(old) {
-			if old.StagePath==stage { return &csi.NodeStageVolumeResponse{},nil }
-			return nil,status.Error(codes.AlreadyExists,"volume already staged at a different path")
+			if old.StagePath == stage {
+				return &csi.NodeStageVolumeResponse{}, nil
+			}
+			return nil, status.Error(codes.AlreadyExists, "volume already staged at a different path")
 		}
-		cleanupStaleState(ctx,d,old)
-	} else if !errors.Is(err,os.ErrNotExist) {
-		return nil,status.Errorf(codes.Internal,"read existing stage state: %v",err)
+		cleanupStaleState(ctx, d, old)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, status.Errorf(codes.Internal, "read existing stage state: %v", err)
 	}
 	api := endpointFromContext(req.GetVolumeContext(), d.endpoint)
 	if api == "" {
 		return nil, status.Error(codes.FailedPrecondition, "KAGI_API_ENDPOINT is unset and volume context lacks apiEndpoint")
 	}
-	vresp,err:=d.apiAt(ctx,api,http.MethodGet,"/v1/volumes/"+id+"/info",nil);if err!=nil{return nil,status.Errorf(codes.Unavailable,"get volume: %v",err)}
-	var vol struct { Size uint64 `json:"size_bytes"`; Block uint32 `json:"logical_block_bytes"`; ReadOnly bool `json:"read_only"`; AllocatedExtents uint64 `json:"allocated_extents"` }
-	if err=readJSON(vresp,&vol);err!=nil{return nil,status.Errorf(codes.Internal,"decode volume: %v",err)}
+	vresp, err := d.apiAt(ctx, api, http.MethodGet, "/v1/volumes/"+id+"/info", nil)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "get volume: %v", err)
+	}
+	var vol struct {
+		Size             uint64 `json:"size_bytes"`
+		Block            uint32 `json:"logical_block_bytes"`
+		ReadOnly         bool   `json:"read_only"`
+		AllocatedExtents uint64 `json:"allocated_extents"`
+	}
+	if err = readJSON(vresp, &vol); err != nil {
+		return nil, status.Errorf(codes.Internal, "decode volume: %v", err)
+	}
 	if req.GetVolumeCapability() == nil {
 		return nil, status.Error(codes.InvalidArgument, "volume_capability is required")
 	}
@@ -436,109 +600,193 @@ func (d *driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if req.GetVolumeCapability().GetMount() == nil && req.GetVolumeCapability().GetBlock() == nil {
 		return nil, status.Error(codes.InvalidArgument, "volume capability must request mount or block access")
 	}
-	if vol.Size==0 || vol.Block<512 || vol.Block>65536 || (vol.Block&(vol.Block-1))!=0 {
-		return nil,status.Error(codes.FailedPrecondition,"Kagi volume has invalid size or logical block geometry")
+	if vol.Size == 0 || vol.Block < 512 || vol.Block > 65536 || (vol.Block&(vol.Block-1)) != 0 {
+		return nil, status.Error(codes.FailedPrecondition, "Kagi volume has invalid size or logical block geometry")
 	}
-	fs:=req.GetVolumeCapability().GetMount()!=nil
-	readOnly:=vol.ReadOnly || req.GetVolumeCapability().GetAccessMode().GetMode()==csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
-	mountOptions:=[]string{"defaults"}
+	fs := req.GetVolumeCapability().GetMount() != nil
+	readOnly := vol.ReadOnly || req.GetVolumeCapability().GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
+	mountOptions := []string{"defaults"}
 	if fs {
-		fsType:=strings.ToLower(req.GetVolumeCapability().GetMount().GetFsType())
-		if fsType!="" && fsType!="ext4" { return nil,status.Errorf(codes.InvalidArgument,"filesystem type %q is unsupported; only ext4 is supported",fsType) }
-		for _,flag:=range req.GetVolumeCapability().GetMount().GetMountFlags() {
-			switch flag { case "noatime","nodiratime","nodev","nosuid","noexec","sync","dirsync","ro": mountOptions=append(mountOptions,flag); default: return nil,status.Errorf(codes.InvalidArgument,"unsupported mount flag %q",flag) }
+		fsType := strings.ToLower(req.GetVolumeCapability().GetMount().GetFsType())
+		if fsType != "" && fsType != "ext4" {
+			return nil, status.Errorf(codes.InvalidArgument, "filesystem type %q is unsupported; only ext4 is supported", fsType)
 		}
-		if readOnly && !contains(mountOptions,"ro") { mountOptions=append(mountOptions,"ro") }
+		for _, flag := range req.GetVolumeCapability().GetMount().GetMountFlags() {
+			switch flag {
+			case "noatime", "nodiratime", "nodev", "nosuid", "noexec", "sync", "dirsync", "ro":
+				mountOptions = append(mountOptions, flag)
+			default:
+				return nil, status.Errorf(codes.InvalidArgument, "unsupported mount flag %q", flag)
+			}
+		}
+		if readOnly && !contains(mountOptions, "ro") {
+			mountOptions = append(mountOptions, "ro")
+		}
 	}
-	if err=os.MkdirAll(stage,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create staging directory: %v",err)}
-	if err=os.MkdirAll(d.stateDir,0700);err!=nil{return nil,status.Errorf(codes.Internal,"create CSI state directory: %v",err)}
-	_ = run(ctx,"modprobe","nbd","nbds_max=128") // The module may already be loaded; device availability is checked below.
-	portListener,err:=net.Listen("tcp","127.0.0.1:0");if err!=nil{return nil,status.Errorf(codes.Internal,"reserve NBD port: %v",err)}
-	port:=portListener.Addr().(*net.TCPAddr).Port;_ = portListener.Close()
-	serverArgs:=[]string{"--listen",fmt.Sprintf("127.0.0.1:%d",port),"--api",api,"--volume",id,"--initiator","k8s:"+d.nodeID}
-	if readOnly { serverArgs=append(serverArgs,"--read-only") }
-	server:=exec.Command("/usr/local/bin/kagi-volume-nbd",serverArgs...)
-	logFile,logErr:=os.OpenFile(filepath.Join(d.stateDir,safeID(id)+".log"),os.O_CREATE|os.O_APPEND|os.O_WRONLY,0600)
-	if logErr==nil {server.Stdout=logFile;server.Stderr=logFile}
-	if err=server.Start();err!=nil{if logFile!=nil{_ = logFile.Close()};return nil,status.Errorf(codes.Unavailable,"start NBD frontend: %v",err)}
-	go func(){ _ = server.Wait(); if logFile!=nil { _ = logFile.Close() } }()
-	ready:=false
-	for i:=0;i<50;i++ { c,e:=net.DialTimeout("tcp",fmt.Sprintf("127.0.0.1:%d",port),100*time.Millisecond);if e==nil{c.Close();ready=true;break};time.Sleep(100*time.Millisecond) }
-	if !ready { _=server.Process.Kill(); return nil,status.Error(codes.Unavailable,"NBD frontend did not become ready") }
-	device:=""
-	for i:=0;i<128;i++ {
-		candidate:=fmt.Sprintf("/dev/nbd%d",i)
-		if _,e:=os.Stat(candidate);e!=nil{continue}
-		pid,e:=os.ReadFile(fmt.Sprintf("/sys/block/nbd%d/pid",i));if e!=nil||strings.TrimSpace(string(pid))!="0"{continue}
-		if e=run(ctx,"nbd-client","-N","keyspace","127.0.0.1",strconv.Itoa(port),candidate,"-b",strconv.Itoa(int(vol.Block)));e==nil{device=candidate;break}
+	if err = os.MkdirAll(stage, 0750); err != nil {
+		return nil, status.Errorf(codes.Internal, "create staging directory: %v", err)
 	}
-	if device=="" { _=server.Process.Kill();return nil,status.Error(codes.ResourceExhausted,"no free NBD device; load the nbd kernel module and expose /dev/nbd* to the node plugin") }
-	s:=stageState{VolumeID:id,Device:device,Port:strconv.Itoa(port),ServerPID:strconv.Itoa(server.Process.Pid),Filesystem:fs,ReadOnly:readOnly,StagePath:stage}
+	if err = os.MkdirAll(d.stateDir, 0700); err != nil {
+		return nil, status.Errorf(codes.Internal, "create CSI state directory: %v", err)
+	}
+	_ = run(ctx, "modprobe", "nbd", "nbds_max=128") // The module may already be loaded; device availability is checked below.
+	portListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "reserve NBD port: %v", err)
+	}
+	port := portListener.Addr().(*net.TCPAddr).Port
+	_ = portListener.Close()
+	serverArgs := []string{"--listen", fmt.Sprintf("127.0.0.1:%d", port), "--api", api, "--volume", id, "--initiator", "k8s:" + d.nodeID}
+	if readOnly {
+		serverArgs = append(serverArgs, "--read-only")
+	}
+	server := exec.Command("/usr/local/bin/kagi-volume-nbd", serverArgs...)
+	logFile, logErr := os.OpenFile(filepath.Join(d.stateDir, safeID(id)+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if logErr == nil {
+		server.Stdout = logFile
+		server.Stderr = logFile
+	}
+	if err = server.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		return nil, status.Errorf(codes.Unavailable, "start NBD frontend: %v", err)
+	}
+	go func() {
+		_ = server.Wait()
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+	}()
+	ready := false
+	for i := 0; i < 50; i++ {
+		c, e := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if e == nil {
+			c.Close()
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		_ = server.Process.Kill()
+		return nil, status.Error(codes.Unavailable, "NBD frontend did not become ready")
+	}
+	device := ""
+	for i := 0; i < 128; i++ {
+		candidate := fmt.Sprintf("/dev/nbd%d", i)
+		if _, e := os.Stat(candidate); e != nil {
+			continue
+		}
+		pid, e := os.ReadFile(fmt.Sprintf("/sys/block/nbd%d/pid", i))
+		if e != nil || strings.TrimSpace(string(pid)) != "0" {
+			continue
+		}
+		if e = run(ctx, "nbd-client", "-N", "keyspace", "127.0.0.1", strconv.Itoa(port), candidate, "-b", strconv.Itoa(int(vol.Block))); e == nil {
+			device = candidate
+			break
+		}
+	}
+	if device == "" {
+		_ = server.Process.Kill()
+		return nil, status.Error(codes.ResourceExhausted, "no free NBD device; load the nbd kernel module and expose /dev/nbd* to the node plugin")
+	}
+	s := stageState{VolumeID: id, Device: device, Port: strconv.Itoa(port), ServerPID: strconv.Itoa(server.Process.Pid), Filesystem: fs, ReadOnly: readOnly, StagePath: stage}
 	if readOnly && !fs {
-		if err=run(ctx,"blockdev","--setro",device);err!=nil {
-			_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
-			return nil,status.Errorf(codes.Internal,"set read-only block device: %v",err)
+		if err = run(ctx, "blockdev", "--setro", device); err != nil {
+			_ = run(ctx, "nbd-client", "-d", device)
+			_ = server.Process.Kill()
+			return nil, status.Errorf(codes.Internal, "set read-only block device: %v", err)
 		}
 	}
 	if fs {
-		blkid:=exec.CommandContext(ctx,"blkid","-p","-s","TYPE","-o","value",device)
-		fsOutput,fsErr:=blkid.CombinedOutput()
-		if fsErr!=nil {
+		blkid := exec.CommandContext(ctx, "blkid", "-p", "-s", "TYPE", "-o", "value", device)
+		fsOutput, fsErr := blkid.CombinedOutput()
+		if fsErr != nil {
 			var exitErr *exec.ExitError
-			if errors.As(fsErr,&exitErr) && exitErr.ExitCode()==2 {
+			if errors.As(fsErr, &exitErr) && exitErr.ExitCode() == 2 {
 				if readOnly {
-					_ = run(ctx,"nbd-client","-d",device); _ = server.Process.Kill()
-					return nil,status.Error(codes.FailedPrecondition,"cannot initialize a read-only volume with no filesystem")
+					_ = run(ctx, "nbd-client", "-d", device)
+					_ = server.Process.Kill()
+					return nil, status.Error(codes.FailedPrecondition, "cannot initialize a read-only volume with no filesystem")
 				}
 				if vol.AllocatedExtents != 0 {
-					_ = run(ctx,"nbd-client","-d",device); _ = server.Process.Kill()
-					return nil,status.Error(codes.FailedPrecondition,"volume has allocated data but no recognized filesystem; refusing to format")
+					_ = run(ctx, "nbd-client", "-d", device)
+					_ = server.Process.Kill()
+					return nil, status.Error(codes.FailedPrecondition, "volume has allocated data but no recognized filesystem; refusing to format")
 				}
-				if err=run(ctx,"mkfs.ext4","-F",device);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"format new volume as ext4: %v",err)}
+				if err = run(ctx, "mkfs.ext4", "-F", device); err != nil {
+					_ = run(ctx, "nbd-client", "-d", device)
+					_ = server.Process.Kill()
+					return nil, status.Errorf(codes.Internal, "format new volume as ext4: %v", err)
+				}
 			} else {
-				_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
-				return nil,status.Errorf(codes.Internal,"could not safely inspect existing filesystem; refusing to format volume: %v: %s",fsErr,strings.TrimSpace(string(fsOutput)))
+				_ = run(ctx, "nbd-client", "-d", device)
+				_ = server.Process.Kill()
+				return nil, status.Errorf(codes.Internal, "could not safely inspect existing filesystem; refusing to format volume: %v: %s", fsErr, strings.TrimSpace(string(fsOutput)))
 			}
-		} else if found:=strings.TrimSpace(string(fsOutput));found!="" && found!="ext4" {
-			_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill()
-			return nil,status.Errorf(codes.FailedPrecondition,"volume already contains %q filesystem; only ext4 is supported",found)
+		} else if found := strings.TrimSpace(string(fsOutput)); found != "" && found != "ext4" {
+			_ = run(ctx, "nbd-client", "-d", device)
+			_ = server.Process.Kill()
+			return nil, status.Errorf(codes.FailedPrecondition, "volume already contains %q filesystem; only ext4 is supported", found)
 		}
-		if err=run(ctx,"mount","-o",strings.Join(mountOptions,","),device,stage);err!=nil{_ = run(ctx,"nbd-client","-d",device);_ = server.Process.Kill();return nil,status.Errorf(codes.Internal,"mount staged filesystem: %v",err)}
+		if err = run(ctx, "mount", "-o", strings.Join(mountOptions, ","), device, stage); err != nil {
+			_ = run(ctx, "nbd-client", "-d", device)
+			_ = server.Process.Kill()
+			return nil, status.Errorf(codes.Internal, "mount staged filesystem: %v", err)
+		}
 	}
-	if err=d.saveState(s);err!=nil{
-		if fs { _ = run(ctx,"umount",stage) }
-		_ = run(ctx,"nbd-client","-d",device)
+	if err = d.saveState(s); err != nil {
+		if fs {
+			_ = run(ctx, "umount", stage)
+		}
+		_ = run(ctx, "nbd-client", "-d", device)
 		_ = server.Process.Kill()
-		return nil,status.Errorf(codes.Internal,"save staging state: %v",err)
+		return nil, status.Errorf(codes.Internal, "save staging state: %v", err)
 	}
-	return &csi.NodeStageVolumeResponse{},nil
+	return &csi.NodeStageVolumeResponse{}, nil
 }
-func (d *driver) NodeUnstageVolume(ctx context.Context,req *csi.NodeUnstageVolumeRequest)(*csi.NodeUnstageVolumeResponse,error) {
+
+func (d *driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
 	unlock := d.lock("volume:" + req.GetVolumeId())
 	defer unlock()
-	s,err:=d.loadState(req.GetVolumeId());if errors.Is(err,os.ErrNotExist){return &csi.NodeUnstageVolumeResponse{},nil};if err!=nil{return nil,status.Errorf(codes.Internal,"read stage state: %v",err)}
-	if s.Filesystem {if err=run(ctx,"umount",s.StagePath);err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"unmount staged filesystem: %v",err)}}
-	if err=run(ctx,"nbd-client","-d",s.Device);err!=nil {
+	s, err := d.loadState(req.GetVolumeId())
+	if errors.Is(err, os.ErrNotExist) {
+		return &csi.NodeUnstageVolumeResponse{}, nil
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read stage state: %v", err)
+	}
+	if s.Filesystem {
+		if err = run(ctx, "umount", s.StagePath); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "unmount staged filesystem: %v", err)
+		}
+	}
+	if err = run(ctx, "nbd-client", "-d", s.Device); err != nil {
 		base := filepath.Base(s.Device)
 		devicePID, readErr := os.ReadFile(filepath.Join("/sys/block", base, "pid"))
 		if readErr != nil || strings.TrimSpace(string(devicePID)) != "0" {
-			return nil,status.Errorf(codes.Internal,"disconnect NBD device: %v",err)
+			return nil, status.Errorf(codes.Internal, "disconnect NBD device: %v", err)
 		}
 	}
-	if pid,e:=strconv.Atoi(s.ServerPID);e==nil {
-		cmdline,readErr:=os.ReadFile(fmt.Sprintf("/proc/%d/cmdline",pid))
+	if pid, e := strconv.Atoi(s.ServerPID); e == nil {
+		cmdline, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 		// Protect against killing a reused PID after a driver/container restart.
-		if readErr==nil && strings.Contains(string(cmdline),"kagi-volume-nbd") && strings.Contains(string(cmdline),s.VolumeID) {
-			if p,e:=os.FindProcess(pid);e==nil{_ = p.Kill()}
+		if readErr == nil && strings.Contains(string(cmdline), "kagi-volume-nbd") && strings.Contains(string(cmdline), s.VolumeID) {
+			if p, e := os.FindProcess(pid); e == nil {
+				_ = p.Kill()
+			}
 		}
 	}
 	_ = os.Remove(d.statePath(s.VolumeID))
 	_ = os.Remove(s.StagePath)
-	return &csi.NodeUnstageVolumeResponse{},nil
+	return &csi.NodeUnstageVolumeResponse{}, nil
 }
-func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolumeRequest)(*csi.NodePublishVolumeResponse,error) {
-	if req.GetVolumeId()==""||req.GetTargetPath()==""||req.GetVolumeCapability()==nil {
-		return nil,status.Error(codes.InvalidArgument,"volume_id, target_path, and volume_capability are required")
+
+// NodePublishVolume bind-mounts the staging directory or block device at the pod target.
+func (d *driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+	if req.GetVolumeId() == "" || req.GetTargetPath() == "" || req.GetVolumeCapability() == nil {
+		return nil, status.Error(codes.InvalidArgument, "volume_id, target_path, and volume_capability are required")
 	}
 	if req.GetVolumeCapability().GetAccessMode() == nil || !supportedAccessMode(req.GetVolumeCapability().GetAccessMode().GetMode()) {
 		return nil, status.Error(codes.InvalidArgument, "Kagi CSI supports single-node access modes only")
@@ -554,58 +802,129 @@ func (d *driver) NodePublishVolume(ctx context.Context,req *csi.NodePublishVolum
 	}
 	unlock := d.lock("volume:" + req.GetVolumeId())
 	defer unlock()
-	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Errorf(codes.FailedPrecondition,"volume is not staged: %v",err)}
-	target:=req.GetTargetPath();if target==""{return nil,status.Error(codes.InvalidArgument,"target_path required")}
-	if err=os.MkdirAll(filepath.Dir(target),0750);err!=nil{return nil,status.Errorf(codes.Internal,"create target parent: %v",err)}
-	fs:=req.GetVolumeCapability().GetMount()!=nil
-	if fs {
-		if err=os.MkdirAll(target,0750);err!=nil{return nil,status.Errorf(codes.Internal,"create mount target: %v",err)}
-		flags:=uintptr(syscall.MS_BIND)
-		if req.GetReadonly(){flags|=syscall.MS_RDONLY}
-		if err=syscall.Mount(s.StagePath,target,"",flags,"");err!=nil{return nil,status.Errorf(codes.Internal,"bind mount staged filesystem: %v",err)}
-		if req.GetReadonly() { if err=syscall.Mount("",target,"",syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY,"");err!=nil{_ = syscall.Unmount(target,0);return nil,status.Errorf(codes.Internal,"remount filesystem read-only: %v",err)} }
-	} else {
-		f,openErr:=os.OpenFile(target,os.O_CREATE,0600);if openErr!=nil{return nil,status.Errorf(codes.Internal,"create block target: %v",openErr)};_ = f.Close()
-		flags:=uintptr(syscall.MS_BIND)
-		if req.GetReadonly(){flags|=syscall.MS_RDONLY}
-		if err=syscall.Mount(s.Device,target,"",flags,"");err!=nil{return nil,status.Errorf(codes.Internal,"bind mount block device: %v",err)}
-		if req.GetReadonly() { if err=syscall.Mount("",target,"",syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY,"");err!=nil{_ = syscall.Unmount(target,0);return nil,status.Errorf(codes.Internal,"remount block device read-only: %v",err)} }
+	s, err := d.loadState(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume is not staged: %v", err)
 	}
-	return &csi.NodePublishVolumeResponse{},nil
+	target := req.GetTargetPath()
+	if target == "" {
+		return nil, status.Error(codes.InvalidArgument, "target_path required")
+	}
+	if err = os.MkdirAll(filepath.Dir(target), 0750); err != nil {
+		return nil, status.Errorf(codes.Internal, "create target parent: %v", err)
+	}
+	fs := req.GetVolumeCapability().GetMount() != nil
+	if fs {
+		if err = os.MkdirAll(target, 0750); err != nil {
+			return nil, status.Errorf(codes.Internal, "create mount target: %v", err)
+		}
+		flags := uintptr(syscall.MS_BIND)
+		if req.GetReadonly() {
+			flags |= syscall.MS_RDONLY
+		}
+		if err = syscall.Mount(s.StagePath, target, "", flags, ""); err != nil {
+			return nil, status.Errorf(codes.Internal, "bind mount staged filesystem: %v", err)
+		}
+		if req.GetReadonly() {
+			if err = syscall.Mount("", target, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
+				_ = syscall.Unmount(target, 0)
+				return nil, status.Errorf(codes.Internal, "remount filesystem read-only: %v", err)
+			}
+		}
+	} else {
+		f, openErr := os.OpenFile(target, os.O_CREATE, 0600)
+		if openErr != nil {
+			return nil, status.Errorf(codes.Internal, "create block target: %v", openErr)
+		}
+		_ = f.Close()
+		flags := uintptr(syscall.MS_BIND)
+		if req.GetReadonly() {
+			flags |= syscall.MS_RDONLY
+		}
+		if err = syscall.Mount(s.Device, target, "", flags, ""); err != nil {
+			return nil, status.Errorf(codes.Internal, "bind mount block device: %v", err)
+		}
+		if req.GetReadonly() {
+			if err = syscall.Mount("", target, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
+				_ = syscall.Unmount(target, 0)
+				return nil, status.Errorf(codes.Internal, "remount block device read-only: %v", err)
+			}
+		}
+	}
+	return &csi.NodePublishVolumeResponse{}, nil
 }
-func (d *driver) NodeUnpublishVolume(ctx context.Context,req *csi.NodeUnpublishVolumeRequest)(*csi.NodeUnpublishVolumeResponse,error) {
-	if req.GetVolumeId()=="" || req.GetTargetPath()==""{return nil,status.Error(codes.InvalidArgument,"volume_id and target_path required")}
+
+func (d *driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+	if req.GetVolumeId() == "" || req.GetTargetPath() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume_id and target_path required")
+	}
 	unlock := d.lock("volume:" + req.GetVolumeId())
 	defer unlock()
-	if err:=run(ctx,"umount",req.GetTargetPath());err!=nil&&!strings.Contains(err.Error(),"not mounted"){return nil,status.Errorf(codes.Internal,"unmount target: %v",err)}
-	_ = os.Remove(req.GetTargetPath());return &csi.NodeUnpublishVolumeResponse{},nil
+	if err := run(ctx, "umount", req.GetTargetPath()); err != nil && !strings.Contains(err.Error(), "not mounted") {
+		return nil, status.Errorf(codes.Internal, "unmount target: %v", err)
+	}
+	_ = os.Remove(req.GetTargetPath())
+	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
-func (d *driver) NodeGetVolumeStats(ctx context.Context,req *csi.NodeGetVolumeStatsRequest)(*csi.NodeGetVolumeStatsResponse,error) {
-	s,err:=d.loadState(req.GetVolumeId());if err!=nil{return nil,status.Error(codes.NotFound,"volume is not staged")}
-	if !s.Filesystem { return nil,status.Error(codes.Unimplemented,"volume statistics are available only for filesystem-mode volumes") }
+
+func (d *driver) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
+	s, err := d.loadState(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "volume is not staged")
+	}
+	if !s.Filesystem {
+		return nil, status.Error(codes.Unimplemented, "volume statistics are available only for filesystem-mode volumes")
+	}
 	var st syscall.Statfs_t
-	path:=s.StagePath
-	if err=syscall.Statfs(path,&st);err!=nil{return nil,status.Errorf(codes.Internal,"stat volume: %v",err)}
-	return &csi.NodeGetVolumeStatsResponse{Usage:[]*csi.VolumeUsage{{Unit:csi.VolumeUsage_BYTES,Total:int64(st.Blocks)*int64(st.Bsize),Used:int64(st.Blocks-st.Bfree)*int64(st.Bsize)},{Unit:csi.VolumeUsage_INODES,Total:int64(st.Files),Used:int64(st.Files-st.Ffree)}}},nil
+	path := s.StagePath
+	if err = syscall.Statfs(path, &st); err != nil {
+		return nil, status.Errorf(codes.Internal, "stat volume: %v", err)
+	}
+	return &csi.NodeGetVolumeStatsResponse{Usage: []*csi.VolumeUsage{{Unit: csi.VolumeUsage_BYTES, Total: int64(st.Blocks) * int64(st.Bsize), Used: int64(st.Blocks-st.Bfree) * int64(st.Bsize)}, {Unit: csi.VolumeUsage_INODES, Total: int64(st.Files), Used: int64(st.Files - st.Ffree)}}}, nil
 }
+
 func (d *driver) serve() error {
-	if d.mode!="controller"&&d.mode!="node"{return fmt.Errorf("mode must be controller or node")}
-	if d.mode=="node"&&d.nodeID==""{return fmt.Errorf("KAGI_NODE_ID required for node mode")}
-	socket:=os.Getenv("CSI_ENDPOINT");if socket==""{socket="unix:///csi/csi.sock"}
-	socket=strings.TrimPrefix(socket,"unix://")
-	if err:=os.MkdirAll(filepath.Dir(socket),0750);err!=nil{return err}
+	if d.mode != "controller" && d.mode != "node" {
+		return fmt.Errorf("mode must be controller or node")
+	}
+	if d.mode == "node" && d.nodeID == "" {
+		return fmt.Errorf("KAGI_NODE_ID required for node mode")
+	}
+	socket := os.Getenv("CSI_ENDPOINT")
+	if socket == "" {
+		socket = "unix:///csi/csi.sock"
+	}
+	socket = strings.TrimPrefix(socket, "unix://")
+	if err := os.MkdirAll(filepath.Dir(socket), 0750); err != nil {
+		return err
+	}
 	_ = os.Remove(socket)
-	l,err:=net.Listen("unix",socket);if err!=nil{return err}
-	if err=os.Chmod(socket,0660);err!=nil{return err}
-	s:=grpc.NewServer()
-	csi.RegisterIdentityServer(s,d)
-	if d.mode=="controller"{csi.RegisterControllerServer(s,d)}else{csi.RegisterNodeServer(s,d)}
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		return err
+	}
+	if err = os.Chmod(socket, 0660); err != nil {
+		return err
+	}
+	s := grpc.NewServer()
+	csi.RegisterIdentityServer(s, d)
+	if d.mode == "controller" {
+		csi.RegisterControllerServer(s, d)
+	} else {
+		csi.RegisterNodeServer(s, d)
+	}
 	return s.Serve(l)
 }
+
 func main() {
-	mode:=os.Getenv("KAGI_CSI_MODE")
-	endpoint:=os.Getenv("KAGI_API_ENDPOINT")
-	d:=&driver{mode:mode,endpoint:endpoint,nodeID:os.Getenv("KAGI_NODE_ID"),stateDir:os.Getenv("KAGI_CSI_STATE_DIR"),http:&http.Client{Timeout:30*time.Second}}
-	if d.stateDir==""{d.stateDir="/var/lib/kagi-csi"}
-	if err:=d.serve();err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+	mode := os.Getenv("KAGI_CSI_MODE")
+	endpoint := os.Getenv("KAGI_API_ENDPOINT")
+	d := &driver{mode: mode, endpoint: endpoint, nodeID: os.Getenv("KAGI_NODE_ID"), stateDir: os.Getenv("KAGI_CSI_STATE_DIR"), http: &http.Client{Timeout: 30 * time.Second}}
+	if d.stateDir == "" {
+		d.stateDir = "/var/lib/kagi-csi"
+	}
+	if err := d.serve(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }

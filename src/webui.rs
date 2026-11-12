@@ -21,7 +21,6 @@ use std::{
 };
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-/// Kagi state or configuration used by the WebConsoleConfig path.
 /// Browser operations-console configuration.
 pub struct WebConsoleConfig {
     /// Enable console routes. Default: true.
@@ -37,19 +36,19 @@ pub struct WebConsoleConfig {
     #[serde(default = "default_log_lines")]
     pub max_log_lines: usize,
 }
-/// Implements the default enabled step and keeps its validation and state transitions visible at the call site.
+
 fn default_enabled() -> bool {
     true
 }
-/// Implements the default userdb step and keeps its validation and state transitions visible at the call site.
+
 fn default_userdb() -> PathBuf {
     PathBuf::from("/etc/kagi/users.yaml")
 }
-/// Implements the default log path step and keeps its validation and state transitions visible at the call site.
+
 fn default_log_path() -> PathBuf {
     PathBuf::from("/var/log/kagi/kagi.log")
 }
-/// Implements the default log lines step and keeps its validation and state transitions visible at the call site.
+
 fn default_log_lines() -> usize {
     500
 }
@@ -65,7 +64,7 @@ impl Default for WebConsoleConfig {
 }
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-/// Supported ConsoleRole states or operations.
+/// Local operations-console authorization level.
 pub enum ConsoleRole {
     Viewer,
     Admin,
@@ -76,24 +75,21 @@ impl ConsoleRole {
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the ConsoleUser path.
 pub struct ConsoleUser {
     pub username: String,
     pub password_hash: String,
     pub role: ConsoleRole,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-/// Kagi state or configuration used by the ConsoleUserDb path.
 pub struct ConsoleUserDb {
     #[serde(default)]
     pub users: Vec<ConsoleUser>,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the ConsoleIdentity path.
 pub struct ConsoleIdentity {
     pub username: String,
 }
-/// Implements the load userdb step and keeps its validation and state transitions visible at the call site.
+
 pub fn load_userdb(path: &Path) -> Result<ConsoleUserDb> {
     match fs::read_to_string(path) {
         Ok(s) => Ok(serde_saphyr::from_str(&s).context("parse Kagi console userdb")?),
@@ -101,7 +97,9 @@ pub fn load_userdb(path: &Path) -> Result<ConsoleUserDb> {
         Err(e) => Err(e.into()),
     }
 }
-/// Implements the upsert user step and keeps its validation and state transitions visible at the call site.
+
+/// Hash the password with a fresh salt and replace the user database by renaming a
+/// temporary file.
 pub fn upsert_user(path: &Path, username: &str, password: &str, role: ConsoleRole) -> Result<()> {
     if username.trim().is_empty() {
         bail!("username must not be empty")
@@ -132,7 +130,9 @@ pub fn upsert_user(path: &Path, username: &str, password: &str, role: ConsoleRol
     fs::rename(tmp, path)?;
     Ok(())
 }
-/// Implements the authenticate basic step and keeps its validation and state transitions visible at the call site.
+
+/// Return the configured identity only after password verification and any required
+/// administrator check.
 pub fn authenticate_basic(
     headers: &axum::http::HeaderMap,
     userdb: &Path,
@@ -162,7 +162,7 @@ pub fn authenticate_basic(
         username: user.username,
     })
 }
-/// Implements the unauthorized step and keeps its validation and state transitions visible at the call site.
+
 pub fn unauthorized() -> axum::response::Response {
     use axum::response::IntoResponse;
     let mut r = (
@@ -176,7 +176,7 @@ pub fn unauthorized() -> axum::response::Response {
     );
     r
 }
-/// Implements the append log step and keeps its validation and state transitions visible at the call site.
+
 pub fn append_log(path: &Path, node: &str, message: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -189,7 +189,7 @@ pub fn append_log(path: &Path, node: &str, message: &str) {
         let _ = writeln!(f, "{ts} [{node}] {message}");
     }
 }
-/// Implements the tail log step and keeps its validation and state transitions visible at the call site.
+
 pub fn tail_log(path: &Path, max_lines: usize) -> Vec<String> {
     let Ok(mut f) = fs::File::open(path) else {
         return vec![];
@@ -208,7 +208,6 @@ pub fn tail_log(path: &Path, max_lines: usize) -> Vec<String> {
     lines
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the SystemStats path.
 pub struct SystemStats {
     pub load1: f64,
     pub load5: f64,
@@ -217,7 +216,7 @@ pub struct SystemStats {
     pub mem_available_bytes: u64,
     pub uptime_seconds: f64,
 }
-/// Implements the system stats step and keeps its validation and state transitions visible at the call site.
+
 pub fn system_stats() -> SystemStats {
     let loads = fs::read_to_string("/proc/loadavg")
         .unwrap_or_default()

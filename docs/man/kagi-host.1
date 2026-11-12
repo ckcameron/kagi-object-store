@@ -1,13 +1,65 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-HOST 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-HOST 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-host \- local Kagi object host and disk-placement service
+kagi-host \- run a host-local object service and inspect disk placement
 .SH SYNOPSIS
 .B kagi-host
---config FILE
+.RB [ \-c " " \fIFILE\fR ]
+.I command
+.RI [ arguments ]
 .SH DESCRIPTION
-Runs the host-local object service used by earlier/simple deployments. It validates disk identity, maps keys deterministically to local storage, and reports disk capacity/health. For full distributed metadata, recovery, snapshots, and block volumes use kagi-cluster-host.
-.SH STORAGE
-Disk configuration should use generated mount paths and stable device identity where possible. Supported backend classes include NVMe, SATA HDD, SAS HDD, Fibre Channel HDD/LUN, and directory-backed development storage.
+Maps keys to the disks configured for one host and stores objects locally.
+Use
+.BR kagi-cluster-host (1)
+for distributed metadata, recovery, snapshots, or block volumes.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-config " " \fIFILE\fR
+Read host YAML from
+.IR FILE .
+The default is
+.IR /etc/kagi/host.yaml .
+.TP
+.BR \-h ", " \-\-help
+Show the command list, or use
+.I command
+.B \-\-help
+for command-specific arguments.
+.TP
+.BR \-V ", " \-\-version
+Show the Kagi version.
+.SH COMMANDS
+.TP
+.B serve
+Run the host-local HTTP service.
+.TP
+.B validate
+Validate the disk paths and identity markers.
+Create missing markers and local storage directories.
+.TP
+.B status
+Print the host and cluster identity, keyspace settings, and disk status as JSON.
+.TP
+.B disks
+Print the configured disks and available disk information.
+.TP
+.BI "locate " KEY
+Print the 64-bit position, slot, and selected disk for
+.IR KEY .
+.TP
+.BI "put " "KEY FILE"
+Write the contents of
+.I FILE
+to the local object identified by
+.IR KEY .
+.TP
+.BI "get " "KEY OUTPUT"
+Read a local object and write it to
+.IR OUTPUT .
+.TP
+.BI "delete " KEY
+Delete the local object identified by
+.IR KEY .
 .SH SEE ALSO
-kagi-cluster-host(1), kagi-config(1)
+.BR kagi-cluster-host (1),
+.BR kagi-config (1)

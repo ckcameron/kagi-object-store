@@ -13,8 +13,8 @@ Run:
 bash scripts/kagi-security-check quick
 ```
 
-This checks formatting, default tests, strict Clippy, and the QUIC/eBPF feature builds. It is
-intended to run before every push.
+This checks formatting for the main and fuzz workspaces, then runs checks,
+tests, and strict Clippy for the default build, QUIC, and the userspace eBPF loader.
 
 ## Deep robustness gate
 
@@ -26,8 +26,9 @@ KAGI_INSTALL_TOOLS=1 bash scripts/kagi-security-check deep
 
 The deep gate adds:
 
-- **RustSec / dependency policy** — `cargo audit` and `cargo deny` check known vulnerable,
-  yanked, or unexpected dependency sources.
+- **RustSec / dependency policy** — `cargo audit` checks the resolved lockfile for advisories.
+  `cargo deny check advisories sources` applies the repository's advisory and source policy.
+  Both run against the checked-in `Cargo.lock`.
 - **Unsafe-code inventory** — `cargo geiger` records where unsafe Rust and FFI enter the
   dependency graph. A nonzero count is not automatically a defect; it tells reviewers where
   UB-capable code exists.

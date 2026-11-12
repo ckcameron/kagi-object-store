@@ -18,9 +18,10 @@ sizes and recreates missing rows. LRC is not MDS: do not assume every set of `k`
 survivors suffices. Writes require acknowledgement for every encoded LRC shard so
 a successful initial write cannot silently leave an undecodable subset.
 
-This reference CPU codec supports local helper reads through the existing exact
-repair plan interface. Selecting a GPU does not count CPU LRC work as GPU
-execution. Other existing accelerator paths retain their dispatch behavior.
+The codec uses the exact-repair plan interface to read local helpers. The
+shared GF(256) transform can run on the CPU or a supported GPU. Check the
+[acceleration counters](ACCELERATION.md#verification) to confirm which provider
+executed the work.
 Upgrade all readers before writing LRC objects. Changing the configured scheme
 only affects new objects; reads use persisted layout metadata.
 

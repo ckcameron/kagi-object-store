@@ -1,0 +1,40 @@
+.\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
+.TH KAGI-BUILD 1 "November 2026" "Kagi 0.39.0" "Developer Commands"
+.SH NAME
+kagi-build \- build Kagi in release mode for a selected x86-64 CPU target
+.SH SYNOPSIS
+.B scripts/kagi-build
+.RI [ cargo-build-arguments ]
+.SH DESCRIPTION
+Appends CPU targeting flags to
+.B RUSTFLAGS
+and invokes
+.B cargo build \-\-release
+from the repository root.
+Additional arguments are passed to Cargo.
+.SH ENVIRONMENT
+.TP
+.B KAGI_CPU_TARGET
+Choose
+.B portable
+(the default),
+.BR native ,
+.BR avx2 ,
+.BR avx512 ,
+.BR avx10.1 ,
+or
+.BR avx10.2 .
+Deploy a nonportable build only on CPUs supporting its selected features.
+The helper checks that the Rust toolchain recognizes AVX10 before using
+an AVX10 target.
+.TP
+.B RUSTFLAGS
+Existing Rust compiler flags.
+The selected CPU flags are appended to this value.
+.SH EXAMPLE
+.nf
+KAGI_CPU_TARGET=portable scripts/kagi-build \-\-locked \-\-bin kagi-config
+.fi
+.SH SEE ALSO
+.BR kagi-bench (1),
+.BR test-all (1)

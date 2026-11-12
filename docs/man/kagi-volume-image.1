@@ -1,11 +1,26 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-VOLUME-IMAGE 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-VOLUME-IMAGE 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-volume-image \- materialize a Kagi volume into a hypervisor image format
+kagi-volume-image \- copy a Kagi volume into a hypervisor image
 .SH SYNOPSIS
-.B kagi-volume-image
-SOURCE OUTPUT FORMAT
+.B scripts/kagi-volume-image
+.I SOURCE OUTPUT
+.BR qcow2 | vmdk | vhdx
 .SH DESCRIPTION
-Uses qemu-img-compatible conversion to create an independent qcow2, vmdk, vhdx, or other supported image from a Kagi block endpoint. The image is an export/copy; Kagi's native representation remains sparse object extents.
+Uses
+.B qemu-img convert
+to copy the raw contents of an NBD source into a new image file.
+The accepted output formats are
+.BR qcow2 ,
+.BR vmdk ,
+and
+.BR vhdx .
+Use a quiesced source if the export needs a consistent point-in-time view.
+The exported image is an independent copy of the sparse Kagi volume.
+.SH EXAMPLE
+.nf
+scripts/kagi-volume-image nbd://127.0.0.1:10809 vm.vhdx vhdx
+.fi
 .SH SEE ALSO
-kagi-volume-nbd(1), qemu-img(1)
+.BR kagi-volume-nbd (1),
+.BR qemu-img (1)

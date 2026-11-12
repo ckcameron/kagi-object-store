@@ -1,8 +1,26 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-VOLUME-HYPERVISOR-NOTES 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-VOLUME-HYPERVISOR-NOTES 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-volume-hypervisor-notes \- display Kagi hypervisor integration notes
+kagi-volume-hypervisor-notes \- show guest storage attachment options
 .SH SYNOPSIS
-.B kagi-volume-hypervisor-notes
+.B scripts/kagi-volume-hypervisor-notes
 .SH DESCRIPTION
-Prints operational notes for mapping Kagi volumes into KVM/QEMU, VMware, and Hyper-V environments, including the boundary between Kagi block transport and guest-visible paravirtualized SCSI controllers.
+Prints integration notes without creating a device or changing a VM.
+Use the notes to choose the guest's virtual SCSI controller and Kagi's
+backing transport independently.
+.TP
+.B KVM and QEMU
+Use a live NBD backend with virtio-SCSI or an emulated LSI SAS controller.
+.TP
+.B VMware
+Present an iSCSI LUN as appropriate for the VM or datastore.
+Select the VMware Paravirtual SCSI (PVSCSI) controller in ESXi.
+.TP
+.B Hyper-V
+Use an iSCSI LUN for SAN attachment or export a separate VHDX image.
+Select the synthetic SCSI controller in Hyper-V.
+.SH SEE ALSO
+.BR kagi-volume-qemu-scsi (1),
+.BR kagi-volume-libvirt-scsi (1),
+.BR kagi-volume-iscsi-export (1),
+.BR kagi-volume-image (1)

@@ -1,0 +1,31 @@
+.\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
+.TH KAGI-SECURITY-CHECK 1 "November 2026" "Kagi 0.39.0" "Developer Commands"
+.SH NAME
+kagi-security-check \- run Kagi's local security and robustness checks
+.SH SYNOPSIS
+.B bash scripts/kagi-security-check
+.RB [ quick | deep ]
+.SH DESCRIPTION
+The default
+.B quick
+mode checks formatting for the Rust and fuzz workspaces and compiles, tests,
+and runs Clippy with warnings denied for the default, QUIC, and userspace
+eBPF builds.
+.TP
+.B deep
+Run the quick checks, then scan Rust dependencies, record unsafe-code
+inventory, run Miri and the address and thread sanitizers, and run the
+repository's fuzz smoke tests.
+The deep checks need a compatible nightly Rust toolchain and the tools
+listed in the repository's security validation guide.
+The unsafe-code inventory is written to
+.IR target/kagi-security/geiger.txt .
+.SH ENVIRONMENT
+.TP
+.B KAGI_INSTALL_TOOLS
+Set to 1 to let deep mode install missing Cargo subcommands and the nightly
+toolchain.
+Deep mode also ensures that nightly has the Miri and rust-src components.
+.SH SEE ALSO
+.BR coverage (1),
+.BR test-all (1)

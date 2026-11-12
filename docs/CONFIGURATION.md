@@ -7,8 +7,8 @@
 `examples/node-v6.example.yaml` is the canonical, self-documenting 0.39 runtime
 configuration. It intentionally includes every field currently deserialized by
 `kagi-cluster-host`, including optional fields, accepted values, units, bounds,
-security implications, and defaults. Copy it when creating a production node
-configuration; do not copy secrets from another node.
+security implications, and defaults. Use it as a starting point for a new node and fill in the planned topology and
+node-specific credentials.
 
 A field described as **required** has no deserialization default. A section described
 as optional may be omitted and its Rust `Default` implementation applies. The most
@@ -71,10 +71,15 @@ important defaults are:
 | `web_console.max_log_lines` | 500 | per-request log line ceiling |
 
 The `security` section defaults to no additional kernel or logical-object rules.
-When present, security configuration uses `deny_unknown_fields`: misspelled security
-keys fail configuration parsing rather than being silently ignored.
+The node and security configuration reject unknown fields at deserialization.
+Use the example for supported field names.
 
 ### Transport caveats
+
+Setting the node's `tls` section enables native HTTPS on `listen`. The listener
+presents the configured server certificate and does not require client
+certificates. Internal requests still require the admission key and signed
+ML-DSA envelopes. See [security notes](SECURITY.md).
 
 QUIC requires the `quic` Cargo feature, a peer `quic_endpoint`, and TLS material.
 QUIC is TLS 1.3-only and Kagi disables 0-RTT for mutation traffic. HTTPS remains the
@@ -197,7 +202,7 @@ policies:
       networks: 1
 ```
 
-## topology minimums
+## Topology minimums
 
 The planner requires at least six hosts and at least six disks on every host. Configuration-file inputs are checked with the same validator used for wizard output.
 
@@ -232,7 +237,9 @@ policies:
       # max_data_fragments may be supplied to narrow the search.
 ```
 
-Supported planner `protection.type` values are `replication`, `reed_solomon`, `lrc`, `msr`, and `clay`. Runtime codecs exist for Reed-Solomon, canonical product-matrix MSR, and CLAY; LRC remains planning-only.
+Supported planner `protection.type` values are `replication`, `reed_solomon`,
+`lrc`, `msr`, and `clay`. Runtime LRC uses the narrower [LRC v1 layout](LRC.md).
+Check the runtime geometry before carrying a planner recommendation into node YAML.
 
 The automatic search is bounded by both the configured search ceiling and the actual number of fragments that can be placed under `max_fragments_per_host` and `max_fragments_per_disk`.
 
@@ -274,7 +281,11 @@ cluster:
     max_matrix_cache_bytes: 268435456
 ```
 
-`scheme` may be `clay`, `msr`, or `reed_solomon`. CLAY requires `k+1 <= d <= k+m-1`; omitted `repair_helpers` selects `d=k+m-1`. The product-matrix MSR backend currently requires `d=2k-2` and therefore `n>=2k-1`. Old manifests without `erasure_scheme` deserialize as Reed-Solomon.
+`scheme` accepts `clay`, `msr`, `reed_solomon`, or `lrc`. CLAY requires
+`k + 1 <= d <= k + m - 1`. Omitting `repair_helpers` selects `d = k + m - 1`.
+Product-matrix MSR requires `d = 2k - 2` and therefore `n >= 2k - 1`.
+[LRC v1](LRC.md) derives local repair groups from `k` and `m` and rejects a
+`repair_helpers` override. Old manifests without `erasure_scheme` read as Reed-Solomon.
 
 ## Monte Carlo display options
 
@@ -302,18 +313,17 @@ The user database is local to each node by design; operators can provision the s
 Bucket records are replicated Raft metadata and contain `name`, `created_at_unix_ms`, `versioning`, `tags`, and `default_worm` (`mode`, `retain_until_unix_ms`, `legal_hold`).
 
 
-## security and monitoring
+## Security and monitoring
 
 See [security policy and monitoring](SECURITY-POLICY.md) for node YAML rules, the
 optional BPF build, privileged metadata, authenticated REST/SSE endpoints, the
 audit CLI and deployment boundaries.
 
-## New runtime boundaries
+## Runtime integration
 
-`scheme: lrc` uses the fixed [LRC v1 geometry](LRC.md), not arbitrary planner LRC
-parameters. Native directory lookup and S3 `directory_user` mapping are described
-in [DIRECTORY-IDENTITY.md](DIRECTORY-IDENTITY.md). At-rest keys are validated before
-serving; never activate a generation until every node has its keyring entry.
+See [directory identity resolution](DIRECTORY-IDENTITY.md) for native lookup
+and S3 `directory_user` mapping. Distribute a new [at-rest key generation](AT-REST-ROTATION.md)
+to every node before activating it. The daemon validates the keyring at startup.
 With `scsi-target`, administrator-authenticated `POST /v1/volumes/:id/pr/cdb`
 accepts `{cdb: [bytes], parameters: [bytes], initiator: string}` and dispatches PR
 IN/OUT through the existing replicated reservation state. This is a target bridge,

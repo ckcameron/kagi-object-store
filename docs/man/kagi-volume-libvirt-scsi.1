@@ -1,11 +1,33 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
-.TH KAGI-VOLUME-LIBVIRT-SCSI 1 "September 2026" "Kagi 0.38.0" "User Commands"
+.TH KAGI-VOLUME-LIBVIRT-SCSI 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-volume-libvirt-scsi \- generate libvirt SCSI attachment configuration for a Kagi volume
+kagi-volume-libvirt-scsi \- print libvirt XML for a Kagi-backed SCSI disk
 .SH SYNOPSIS
-.B kagi-volume-libvirt-scsi
-[ARGS]
+.B scripts/kagi-volume-libvirt-scsi
+.BR virtio-scsi | sas
+.I HOST PORT
+.RI [ TARGET ]
 .SH DESCRIPTION
-Produces libvirt/QEMU configuration that presents the backend as a SCSI disk, normally via virtio-scsi, with discard/unmap enabled so guest TRIM can reclaim sparse Kagi extents.
+Prints a SCSI controller and network disk fragment for a libvirt domain.
+Use
+.B virtio-scsi
+for a paravirtualized controller or
+.B sas
+for the
+.B lsisas1068
+controller model.
+The disk connects to the compatibility NBD export
+.B keyspace
+on the specified host and port.
+.PP
+The target device defaults to
+.BR sda .
+The disk sets
+.B discard=unmap
+so a supported guest's discard requests can reach Kagi's sparse volume.
+Review the controller index and disk target before adding the fragment to an
+existing domain.
 .SH SEE ALSO
-kagi-volume-qemu-scsi(1), virsh(1)
+.BR kagi-volume-nbd (1),
+.BR kagi-volume-qemu-scsi (1),
+.BR virsh (1)

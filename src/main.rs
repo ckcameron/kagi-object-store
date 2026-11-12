@@ -37,14 +37,14 @@ use std::{
     time::{Duration, Instant},
 };
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-/// Supported RunMode states or operations.
+/// Full search or a bounded quick simulation preset.
 enum RunMode {
     Full,
     Quick30,
     Quick60,
 }
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-/// Supported McBackend states or operations.
+/// Execution backend for evaluating sampled protection layouts.
 enum McBackend {
     Auto,
     Cpu,
@@ -52,7 +52,8 @@ enum McBackend {
     Hip,
     Opencl,
 }
-// ---- CLI and serializable simulation input ---------------------------------
+
+// CLI and serializable simulation input
 #[derive(Parser, Debug, Clone, Serialize, Deserialize)]
 #[command(name = "kagi-config", version)]
 struct Args {
@@ -126,7 +127,7 @@ struct Args {
     #[arg(long,value_enum,default_value_t=McBackend::Auto)]
     mc_backend: McBackend,
 }
-/// Implements the apply run mode step and keeps its validation and state transitions visible at the call site.
+
 fn apply_run_mode(args: &mut Args) {
     match args.run_mode {
         RunMode::Full => {}
@@ -152,7 +153,7 @@ fn apply_run_mode(args: &mut Args) {
         }
     }
 }
-/// Implements the run mode label step and keeps its validation and state transitions visible at the call site.
+
 fn run_mode_label(mode: RunMode) -> (&'static str, &'static str) {
     match mode {
         RunMode::Full => ("full", "full confidence target"),
@@ -166,7 +167,7 @@ fn run_mode_label(mode: RunMode) -> (&'static str, &'static str) {
         ),
     }
 }
-/// Implements the backend label step and keeps its validation and state transitions visible at the call site.
+
 fn backend_label(b: McBackend) -> &'static str {
     match resolved_backend(b) {
         McBackend::Cpu => "cpu-rayon",
@@ -176,7 +177,8 @@ fn backend_label(b: McBackend) -> &'static str {
         McBackend::Auto => "auto",
     }
 }
-// ---- Interactive optimizer progress ----------------------------------------
+
+// Interactive optimizer progress
 //
 // Worker threads only update atomics. A single renderer thread owns stderr,
 // which prevents Rayon workers from interleaving terminal output. Progress is
@@ -184,7 +186,6 @@ fn backend_label(b: McBackend) -> &'static str {
 // clean when the program is redirected or used from automation.
 const PROGRESS_LINES: usize = 6;
 static PROGRESS: OnceLock<Arc<ProgressState>> = OnceLock::new();
-/// Kagi state or configuration used by the ProgressState path.
 struct ProgressState {
     enabled: bool,
     started: Instant,
@@ -280,7 +281,7 @@ impl ProgressState {
         let _ = err.flush();
     }
 }
-/// Kagi state or configuration used by the ProgressGuard path.
+
 struct ProgressGuard {
     state: Arc<ProgressState>,
     renderer: Option<thread::JoinHandle<()>>,
@@ -316,14 +317,14 @@ impl Drop for ProgressGuard {
         }
     }
 }
-/// Implements the progress bar step and keeps its validation and state transitions visible at the call site.
+
 fn progress_bar(done: u64, total: u64, width: usize) -> String {
     if total == 0 {
         return format!("[{}]   --.-%", "-".repeat(width));
     }
     progress_bar_fraction(done.min(total) as f64 / total as f64, width)
 }
-/// Implements the progress bar fraction step and keeps its validation and state transitions visible at the call site.
+
 fn progress_bar_fraction(fraction: f64, width: usize) -> String {
     let f = fraction.clamp(0.0, 1.0);
     let filled = (f * width as f64).round() as usize;
@@ -334,7 +335,7 @@ fn progress_bar_fraction(fraction: f64, width: usize) -> String {
         f * 100.0
     )
 }
-/// Implements the format elapsed step and keeps its validation and state transitions visible at the call site.
+
 fn format_elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     format!(
@@ -344,7 +345,7 @@ fn format_elapsed(d: Duration) -> String {
         secs % 60
     )
 }
-/// Implements the progress phase step and keeps its validation and state transitions visible at the call site.
+
 fn progress_phase(index: u64, total: u64, phase: impl Into<String>) {
     checkpoint::flush().expect("checkpoint flush failed at phase boundary");
     if let Some(p) = PROGRESS.get() {
@@ -358,7 +359,7 @@ fn progress_phase(index: u64, total: u64, phase: impl Into<String>) {
         *p.phase.lock().unwrap() = phase.into();
     }
 }
-/// Implements the progress operation step and keeps its validation and state transitions visible at the call site.
+
 fn progress_operation(operation: impl Into<String>, total: u64) {
     if let Some(p) = PROGRESS.get() {
         if !p.enabled {
@@ -369,7 +370,7 @@ fn progress_operation(operation: impl Into<String>, total: u64) {
         *p.operation.lock().unwrap() = operation.into();
     }
 }
-/// Implements the progress operation label step and keeps its validation and state transitions visible at the call site.
+
 fn progress_operation_label(operation: impl Into<String>) {
     if let Some(p) = PROGRESS.get() {
         if !p.enabled {
@@ -378,7 +379,7 @@ fn progress_operation_label(operation: impl Into<String>) {
         *p.operation.lock().unwrap() = operation.into();
     }
 }
-/// Implements the progress tick step and keeps its validation and state transitions visible at the call site.
+
 fn progress_tick(n: u64) {
     if let Some(p) = PROGRESS.get() {
         if !p.enabled {
@@ -388,7 +389,7 @@ fn progress_tick(n: u64) {
         p.simulations.fetch_add(n, Ordering::Relaxed);
     }
 }
-/// Implements the progress step step and keeps its validation and state transitions visible at the call site.
+
 fn progress_step(n: u64) {
     if let Some(p) = PROGRESS.get() {
         if !p.enabled {
@@ -397,14 +398,14 @@ fn progress_step(n: u64) {
         p.current.fetch_add(n, Ordering::Relaxed);
     }
 }
-/// Kagi state or configuration used by the SimulationTick path.
+
 struct SimulationTick;
 impl Drop for SimulationTick {
     fn drop(&mut self) {
         progress_tick(1);
     }
 }
-/// Implements the progress best keyspace step and keeps its validation and state transitions visible at the call site.
+
 fn progress_best_keyspace(loss: f64, summary: impl Into<String>) {
     if let Some(p) = PROGRESS.get() {
         if !p.enabled {
@@ -416,7 +417,7 @@ fn progress_best_keyspace(loss: f64, summary: impl Into<String>) {
         }
     }
 }
-/// Implements the progress best schema step and keeps its validation and state transitions visible at the call site.
+
 fn progress_best_schema(loss: f64, summary: impl Into<String>) {
     if let Some(p) = PROGRESS.get() {
         if !p.enabled {
@@ -429,7 +430,6 @@ fn progress_best_schema(loss: f64, summary: impl Into<String>) {
     }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the Config path.
 struct Config {
     slot_bits: u8,
     topology: Topology,
@@ -441,7 +441,6 @@ struct Config {
     optimization: Optimization,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the Topology path.
 struct Topology {
     /// Root directory below which physical disks are mounted.
     #[serde(default = "default_mount_root")]
@@ -454,12 +453,11 @@ struct Topology {
     hosts: Vec<HostTopology>,
     disks: Vec<Disk>,
 }
-/// Implements the default mount root step and keeps its validation and state transitions visible at the call site.
+
 fn default_mount_root() -> String {
     "/var/lib/kagi/disks".into()
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the NetworkDomain path.
 struct NetworkDomain {
     id: String,
     cidr: String,
@@ -469,7 +467,6 @@ struct NetworkDomain {
     rack: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the DiskClass path.
 struct DiskClass {
     name: String,
     #[serde(default)]
@@ -482,7 +479,6 @@ struct DiskClass {
     default_weight: f64,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the HostTopology path.
 struct HostTopology {
     name: String,
     #[serde(default)]
@@ -495,7 +491,6 @@ struct HostTopology {
     addresses: Vec<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the Disk path.
 struct Disk {
     /// Stable logical disk identifier used by placement.
     id: String,
@@ -521,11 +516,12 @@ struct Disk {
     #[serde(default = "one")]
     weight: f64,
 }
-/// Implements the one step and keeps its validation and state transitions visible at the call site.
+
 fn one() -> f64 {
     1.0
 }
-// ---- Data-protection policy model ------------------------------------------
+
+// Data-protection policy model
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Policy {
     protection: Protection,
@@ -537,7 +533,7 @@ struct Policy {
 }
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-/// Supported Protection states or operations.
+/// Replication and erasure geometries evaluated by the planner.
 enum Protection {
     Replication {
         copies: usize,
@@ -645,7 +641,7 @@ impl Protection {
         }
     }
 }
-/// Implements the protection summary step and keeps its validation and state transitions visible at the call site.
+
 fn protection_summary(p: &Protection) -> String {
     match p {
         Protection::Replication { copies } => format!("replication x{copies}"),
@@ -660,7 +656,7 @@ fn protection_summary(p: &Protection) -> String {
         Protection::Clay { k, m, d } => format!("clay k={k} m={m} d={d}"),
     }
 }
-/// Implements the policy schema summary step and keeps its validation and state transitions visible at the call site.
+
 fn policy_schema_summary(cfg: &Config) -> String {
     cfg.policies
         .iter()
@@ -710,7 +706,6 @@ struct ProtectionSearch {
     clay_d: Vec<usize>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-/// Kagi state or configuration used by the Optimization path.
 struct Optimization {
     #[serde(default = "default_loss_weight")]
     loss_weight: f64,
@@ -719,20 +714,19 @@ struct Optimization {
     #[serde(default = "default_imbalance_weight")]
     imbalance_weight: f64,
 }
-/// Implements the default loss weight step and keeps its validation and state transitions visible at the call site.
+
 fn default_loss_weight() -> f64 {
     1e6
 }
-/// Implements the default overhead weight step and keeps its validation and state transitions visible at the call site.
+
 fn default_overhead_weight() -> f64 {
     1.0
 }
-/// Implements the default imbalance weight step and keeps its validation and state transitions visible at the call site.
+
 fn default_imbalance_weight() -> f64 {
     100.0
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-/// Kagi state or configuration used by the RepairModel path.
 struct RepairModel {
     #[serde(default)]
     disk_mttr_hours: f64,
@@ -748,7 +742,6 @@ struct RepairModel {
     repair_bandwidth_bytes_per_sec: f64,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-/// Kagi state or configuration used by the Locality path.
 struct Locality {
     #[serde(default)]
     site: Mode,
@@ -759,13 +752,13 @@ struct Locality {
     #[serde(default = "one_usize")]
     max_fragments_per_disk: usize,
 }
-/// Implements the one usize step and keeps its validation and state transitions visible at the call site.
+
 fn one_usize() -> usize {
     1
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
-/// Supported Mode states or operations.
+/// Policy for distributing fragments across a failure domain.
 enum Mode {
     Spread,
     Localize,
@@ -774,7 +767,6 @@ enum Mode {
     Ignore,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the Tolerance path.
 struct Tolerance {
     #[serde(default)]
     disks: usize,
@@ -788,7 +780,6 @@ struct Tolerance {
     networks: usize,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the FailureModel path.
 struct FailureModel {
     disk_annual_probability: f64,
     host_annual_probability: f64,
@@ -801,12 +792,11 @@ struct FailureModel {
     #[serde(default = "default_bias")]
     importance_bias: f64,
 }
-/// Implements the default bias step and keeps its validation and state transitions visible at the call site.
+
 fn default_bias() -> f64 {
     8.0
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-/// Kagi state or configuration used by the CorrelatedEvent path.
 struct CorrelatedEvent {
     probability: f64,
     domain: Domain,
@@ -815,7 +805,7 @@ struct CorrelatedEvent {
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-/// Supported Domain states or operations.
+/// Resource scopes that can fail together in one modeled event.
 enum Domain {
     Disk,
     Host,
@@ -823,7 +813,8 @@ enum Domain {
     Site,
     Network,
 }
-// ---- Generated deployment/simulation output --------------------------------
+
+// Generated deployment/simulation output
 #[derive(Debug, Serialize)]
 struct Output {
     format_version: u32,
@@ -834,7 +825,6 @@ struct Output {
     join_admission: JoinAdmission,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the InfrastructureOutput path.
 struct InfrastructureOutput {
     mount_root: String,
     network_domains: Vec<NetworkDomain>,
@@ -842,13 +832,11 @@ struct InfrastructureOutput {
     hosts: Vec<HostTopology>,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the JoinAdmission path.
 struct JoinAdmission {
     algorithm: String,
     key_hash_hex: String,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the AddressSpacePlan path.
 struct AddressSpacePlan {
     bits: u8,
     min: String,
@@ -861,7 +849,6 @@ struct AddressSpacePlan {
     disks: Vec<DiskShare>,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the SlotRange path.
 struct SlotRange {
     start_slot: u64,
     end_slot: u64,
@@ -870,7 +857,6 @@ struct SlotRange {
     disk: String,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the DiskShare path.
 struct DiskShare {
     id: String,
     host: String,
@@ -886,7 +872,6 @@ struct DiskShare {
     slot_ranges: Vec<DiskSlotRange>,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the DiskSlotRange path.
 struct DiskSlotRange {
     start_slot: u64,
     end_slot: u64,
@@ -894,7 +879,6 @@ struct DiskSlotRange {
     end_key: String,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the OptimizerResult path.
 struct OptimizerResult {
     run_mode: String,
     confidence: String,
@@ -910,7 +894,6 @@ struct OptimizerResult {
     rarest_observed_data_loss_scenario: Option<Scenario>,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the Estimate path.
 struct Estimate {
     durability: durability::Durability,
     estimated_unreadable_probability: f64,
@@ -921,7 +904,6 @@ struct Estimate {
     trials: u64,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the AdaptiveEstimate path.
 struct AdaptiveEstimate {
     durability: durability::Durability,
     estimated_unreadable_probability: f64,
@@ -933,7 +915,6 @@ struct AdaptiveEstimate {
     trials_per_round: u64,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the TimeDomainEstimate path.
 struct TimeDomainEstimate {
     durability_within_horizon: durability::Durability,
     simulated_trajectory_years: f64,
@@ -945,7 +926,6 @@ struct TimeDomainEstimate {
     ci95_high: f64,
 }
 #[derive(Default, Clone)]
-/// Kagi state or configuration used by the WeightedStats path.
 struct WeightedStats {
     n: u64,
     sum: f64,
@@ -983,14 +963,12 @@ impl WeightedStats {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the Scenario path.
 struct Scenario {
     policy: String,
     failed_disks: Vec<String>,
     estimated_probability: f64,
 }
 #[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the PolicyOutput path.
 struct PolicyOutput {
     selected_protection: Protection,
     fragments: usize,
@@ -1002,7 +980,6 @@ struct PolicyOutput {
     erasure_scheme_optimization: BTreeMap<String, SchemeOptimization>,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the SchemeOptimization path.
 struct SchemeOptimization {
     schema: String,
     feasible: bool,
@@ -1020,14 +997,12 @@ struct SchemeOptimization {
     estimated_repair_window_hours: f64,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the Counterexample path.
 struct Counterexample {
     key: String,
     domain: String,
     failed: Vec<String>,
 }
 #[derive(Debug, Clone)]
-/// Kagi state or configuration used by the SchemeCandidateMetrics path.
 struct SchemeCandidateMetrics {
     loss: f64,
     trials: u64,
@@ -1036,7 +1011,6 @@ struct SchemeCandidateMetrics {
     counterexample: Option<Counterexample>,
 }
 #[derive(Debug, Clone, Copy)]
-/// Kagi state or configuration used by the SchemeSearchRun path.
 struct SchemeSearchRun {
     salt: u64,
     seed: u64,
@@ -1044,7 +1018,8 @@ struct SchemeSearchRun {
     validation_keys: usize,
     backend: McBackend,
 }
-// ---- Wizard, topology normalization, and validation -------------------------
+
+// Wizard, topology normalization, and validation
 /// Normalize an arbitrary topology label into a safe, deterministic mount-name component.
 fn slug(s: &str) -> String {
     let mut out = String::new();
@@ -1078,6 +1053,7 @@ fn disk_networks(cfg: &Config, d: &Disk) -> Vec<String> {
         .unwrap_or_default()
 }
 /// A multi-homed disk/host is unreachable only when every configured network path is failed.
+/// A multi-homed disk loses connectivity only when every configured network is down.
 fn network_unreachable(cfg: &Config, d: &Disk, failed: &BTreeSet<String>) -> bool {
     let n = disk_networks(cfg, d);
     !n.is_empty() && n.iter().all(|x| failed.contains(x))
@@ -1092,6 +1068,8 @@ fn disk_failure_probability(cfg: &Config, d: &Disk) -> f64 {
         .unwrap_or(cfg.failure_model.disk_annual_probability)
 }
 /// Make old configuration files deployable by inferring host records, class ordinals and mount paths.
+/// Fill in derived hosts and mount locations before validation. Explicit device paths
+/// are preserved unless the caller supplies a mount-root override.
 fn normalize_topology(cfg: &mut Config, mount_override: Option<&Path>) {
     if let Some(root) = mount_override {
         cfg.topology.mount_root = root.to_string_lossy().into_owned();
@@ -1134,7 +1112,7 @@ fn normalize_topology(cfg: &mut Config, mount_override: Option<&Path>) {
         }
     }
 }
-/// Implements the prompt line step and keeps its validation and state transitions visible at the call site.
+
 fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
     match default {
         Some(d) => print!("{label} [{d}]: "),
@@ -1150,7 +1128,7 @@ fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
         s.to_string()
     })
 }
-/// Implements the prompt usize step and keeps its validation and state transitions visible at the call site.
+
 fn prompt_usize(label: &str, default: usize) -> Result<usize> {
     loop {
         let s = prompt_line(label, Some(&default.to_string()))?;
@@ -1160,7 +1138,7 @@ fn prompt_usize(label: &str, default: usize) -> Result<usize> {
         }
     }
 }
-/// Implements the prompt usize min step and keeps its validation and state transitions visible at the call site.
+
 fn prompt_usize_min(label: &str, default: usize, min: usize) -> Result<usize> {
     loop {
         let v = prompt_usize(label, default.max(min))?;
@@ -1170,7 +1148,7 @@ fn prompt_usize_min(label: &str, default: usize, min: usize) -> Result<usize> {
         eprintln!("Value must be at least {min}.")
     }
 }
-/// Implements the prompt f64 step and keeps its validation and state transitions visible at the call site.
+
 fn prompt_f64(label: &str, default: f64) -> Result<f64> {
     loop {
         let s = prompt_line(label, Some(&default.to_string()))?;
@@ -1180,7 +1158,7 @@ fn prompt_f64(label: &str, default: f64) -> Result<f64> {
         }
     }
 }
-/// Implements the prompt bool step and keeps its validation and state transitions visible at the call site.
+
 fn prompt_bool(label: &str, default: bool) -> Result<bool> {
     loop {
         let d = if default { "Y/n" } else { "y/N" };
@@ -1236,7 +1214,7 @@ fn minimum_tolerance_for_count(n: usize) -> usize {
         n.saturating_sub(1)
     }
 }
-/// Implements the topology minimum tolerance step and keeps its validation and state transitions visible at the call site.
+
 fn topology_minimum_tolerance(t: &Topology) -> Tolerance {
     let hosts = t.hosts.len();
     let racks = t
@@ -1260,7 +1238,7 @@ fn topology_minimum_tolerance(t: &Topology) -> Tolerance {
         networks: minimum_tolerance_for_count(networks),
     }
 }
-/// Implements the default auto search step and keeps its validation and state transitions visible at the call site.
+
 fn default_auto_search() -> ProtectionSearch {
     ProtectionSearch {
         auto_geometry: true,
@@ -1269,7 +1247,7 @@ fn default_auto_search() -> ProtectionSearch {
         ..Default::default()
     }
 }
-/// Implements the default failure model step and keeps its validation and state transitions visible at the call site.
+
 fn default_failure_model() -> FailureModel {
     FailureModel {
         disk_annual_probability: 0.01,
@@ -1281,7 +1259,7 @@ fn default_failure_model() -> FailureModel {
         importance_bias: 8.0,
     }
 }
-/// Implements the default repair model step and keeps its validation and state transitions visible at the call site.
+
 fn default_repair_model() -> RepairModel {
     RepairModel {
         disk_mttr_hours: 24.0,
@@ -1292,7 +1270,7 @@ fn default_repair_model() -> RepairModel {
         repair_bandwidth_bytes_per_sec: 1_000_000_000.0,
     }
 }
-/// Implements the wizard policy step and keeps its validation and state transitions visible at the call site.
+
 fn wizard_policy(name: &str, minimum: &Tolerance) -> Result<Policy> {
     println!("\nPolicy {name}");
     let auto = prompt_bool(
@@ -1395,7 +1373,7 @@ fn max_placeable_fragments(cfg: &Config, p: &Policy) -> usize {
         .sum::<usize>();
     disk_cap.min(host_cap)
 }
-/// Implements the validate protection geometry step and keeps its validation and state transitions visible at the call site.
+
 fn validate_protection_geometry(p: &Protection) -> Result<()> {
     match p {
         Protection::Replication { copies } => {
@@ -1937,7 +1915,8 @@ fn run_wizard(args: &mut Args) -> Result<Config> {
         run_full_wizard(args)
     }
 }
-// ---- Deterministic placement ------------------------------------------------
+
+// Deterministic placement
 fn hash64(parts: &[&[u8]]) -> u64 {
     let mut h = Hasher::new();
     for p in parts {
@@ -1945,11 +1924,11 @@ fn hash64(parts: &[&[u8]]) -> u64 {
     }
     u64::from_le_bytes(h.finalize().as_bytes()[0..8].try_into().unwrap())
 }
-/// Implements the u01 step and keeps its validation and state transitions visible at the call site.
+
 fn u01(x: u64) -> f64 {
     ((x as f64) + 1.0) / ((u64::MAX as f64) + 2.0)
 }
-/// Implements the score step and keeps its validation and state transitions visible at the call site.
+
 fn score(key: u64, frag: usize, salt: u64, d: &Disk) -> f64 {
     let h = hash64(&[
         &key.to_le_bytes(),
@@ -1959,7 +1938,8 @@ fn score(key: u64, frag: usize, salt: u64, d: &Disk) -> f64 {
     ]);
     u01(h).powf(1.0 / (d.weight * d.capacity_bytes as f64))
 }
-/// Implements the place step and keeps its validation and state transitions visible at the call site.
+
+/// Place each fragment in score order while enforcing the policy's failure-domain limits.
 fn place(key: u64, p: &Policy, disks: &[Disk], salt: u64) -> Option<Vec<usize>> {
     let n = p.protection.fragments();
     let mut out = Vec::with_capacity(n);
@@ -2024,7 +2004,9 @@ fn place(key: u64, p: &Policy, disks: &[Disk], salt: u64) -> Option<Vec<usize>> 
     }
     Some(out)
 }
-// ---- Snapshot Monte Carlo and rare-event sampling ---------------------------
+
+// Snapshot Monte Carlo and rare-event sampling
+/// Weight a biased Bernoulli draw by its likelihood under the configured failure model.
 fn bernoulli_lr(x: bool, p: f64, q: f64) -> f64 {
     let p = p.clamp(1e-15, 1.0 - 1e-15);
     let q = q.clamp(1e-15, 1.0 - 1e-15);
@@ -2034,11 +2016,11 @@ fn bernoulli_lr(x: bool, p: f64, q: f64) -> f64 {
         (1.0 - p) / (1.0 - q)
     }
 }
-/// Implements the biased step and keeps its validation and state transitions visible at the call site.
+
 fn biased(p: f64, bias: f64) -> f64 {
     (p * bias).min(0.35).max(p)
 }
-/// Implements the fail domains step and keeps its validation and state transitions visible at the call site.
+
 fn fail_domains<R: Rng>(
     rng: &mut R,
     cfg: &Config,
@@ -2186,7 +2168,6 @@ fn fail_domains<R: Rng>(
     (failed, lr)
 }
 #[derive(Default, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the Eval path.
 struct Eval {
     trials: u64,
     losses: u64,
@@ -2194,7 +2175,7 @@ struct Eval {
     weight_sum: f64,
     rare: Option<Scenario>,
 }
-/// Implements the evaluate step and keeps its validation and state transitions visible at the call site.
+
 fn evaluate(cfg: &Config, salt: u64, trials: u64, seed: u64, importance: bool) -> Eval {
     checkpoint::reduce(
         &("evaluate", cfg, salt, trials, seed, importance),
@@ -2291,7 +2272,7 @@ extern "C" {
         global_parity: u32,
     ) -> i32;
 }
-/// Implements the resolved backend step and keeps its validation and state transitions visible at the call site.
+
 fn resolved_backend(requested: McBackend) -> McBackend {
     #[cfg(feature = "cuda")]
     if matches!(requested, McBackend::Auto | McBackend::Cuda) {
@@ -2335,7 +2316,6 @@ fn validate_requested_backend(requested: McBackend) -> Result<()> {
 }
 
 #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-/// Implements the cuda policy eval step and keeps its validation and state transitions visible at the call site.
 fn gpu_policy_batch(
     cfg: &Config,
     p: &Policy,
@@ -2528,7 +2508,7 @@ fn evaluate_policy(
         },
     )
 }
-/// Implements the ci step and keeps its validation and state transitions visible at the call site.
+
 fn ci(losses: u64, trials: u64) -> (f64, f64) {
     if trials == 0 {
         return (0.0, 1.0);
@@ -2539,7 +2519,7 @@ fn ci(losses: u64, trials: u64) -> (f64, f64) {
     let beta = Beta::new(a, b).unwrap();
     (beta.inverse_cdf(0.025), beta.inverse_cdf(0.975))
 }
-/// Implements the estimate step and keeps its validation and state transitions visible at the call site.
+
 fn estimate(e: &Eval, importance: bool) -> Estimate {
     let p = if importance {
         e.weighted_loss / e.trials.max(1) as f64
@@ -2557,7 +2537,7 @@ fn estimate(e: &Eval, importance: bool) -> Estimate {
         trials: e.trials,
     }
 }
-/// Implements the loss for failure step and keeps its validation and state transitions visible at the call site.
+
 fn loss_for_failure(cfg: &Config, salt: u64, key: u64, failed: &[bool]) -> bool {
     for p in cfg.policies.values() {
         let Some(pl) = place(key, p, &cfg.topology.disks, salt) else {
@@ -2570,7 +2550,9 @@ fn loss_for_failure(cfg: &Config, salt: u64, key: u64, failed: &[bool]) -> bool 
     }
     false
 }
-/// Implements the adaptive importance sampling step and keeps its validation and state transitions visible at the call site.
+
+/// Use each round to adjust the bias toward rare failures, then report the weighted
+/// estimate from the final round.
 fn adaptive_importance_sampling(
     cfg: &Config,
     salt: u64,
@@ -2638,14 +2620,15 @@ fn adaptive_importance_sampling(
         trials_per_round: trials,
     }
 }
-// ---- Continuous-time failure and repair simulation --------------------------
+
+// Continuous-time failure and repair simulation
 fn exp_wait<R: Rng>(rng: &mut R, rate_per_year: f64) -> f64 {
     if rate_per_year <= 0.0 {
         return f64::INFINITY;
     }
     -((1.0 - rng.gen::<f64>()).max(1e-15)).ln() / rate_per_year
 }
-/// Implements the mttr years step and keeps its validation and state transitions visible at the call site.
+
 fn mttr_years(cfg: &Config, domain: &str) -> f64 {
     let h = match domain {
         "disk" => cfg.repair_model.disk_mttr_hours,
@@ -2657,13 +2640,12 @@ fn mttr_years(cfg: &Config, domain: &str) -> f64 {
     h.max(1e-9) / (24.0 * 365.25)
 }
 #[derive(Clone)]
-/// Kagi state or configuration used by the RepairEvent path.
 struct RepairEvent {
     at: f64,
     domain: String,
     id: String,
 }
-/// Implements the time domain simulation step and keeps its validation and state transitions visible at the call site.
+
 fn time_domain_simulation(
     cfg: &Config,
     salt: u64,
@@ -2865,7 +2847,8 @@ fn time_domain_simulation(
         ci95_high: hi,
     }
 }
-// ---- Deterministic tolerance validation and policy optimization -------------
+
+// Deterministic tolerance validation and policy optimization
 fn combinations<T: Clone>(v: &[T], k: usize, limit: usize) -> Vec<Vec<T>> {
     fn rec<T: Clone>(
         v: &[T],
@@ -2895,7 +2878,7 @@ fn combinations<T: Clone>(v: &[T], k: usize, limit: usize) -> Vec<Vec<T>> {
     rec(v, k, 0, &mut vec![], &mut out, limit);
     out
 }
-/// Implements the validate policy step and keeps its validation and state transitions visible at the call site.
+
 fn validate_policy(
     cfg: &Config,
     p: &Policy,
@@ -3019,7 +3002,7 @@ fn geometry_bounds(cfg: &Config, p: &Policy) -> (usize, usize, usize, usize) {
         .min(max_total.saturating_sub(min_k));
     (min_k, max_k, max_total, min_parity.max(1))
 }
-/// Implements the push unique step and keeps its validation and state transitions visible at the call site.
+
 fn push_unique(out: &mut Vec<Protection>, seen: &mut BTreeSet<String>, p: Protection) {
     let k = format!("{:?}", p);
     if seen.insert(k) {
@@ -3164,7 +3147,7 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
     }
     out
 }
-/// Implements the candidate placeable step and keeps its validation and state transitions visible at the call site.
+
 fn candidate_placeable(cfg: &Config, p: &Policy, salt: u64) -> bool {
     (0..16u64).all(|i| {
         place(
@@ -3176,7 +3159,7 @@ fn candidate_placeable(cfg: &Config, p: &Policy, salt: u64) -> bool {
         .is_some()
     })
 }
-/// Implements the scheme result from candidate step and keeps its validation and state transitions visible at the call site.
+
 fn scheme_result_from_candidate(
     cfg: &Config,
     base: &Policy,
@@ -3346,7 +3329,7 @@ fn optimize_scheme(
         },
     )
 }
-/// Implements the schema preference step and keeps its validation and state transitions visible at the call site.
+
 fn schema_preference(schema: &str) -> u8 {
     match schema {
         "clay" => 0,
@@ -3409,7 +3392,8 @@ fn optimize_protections(
     }
     reports
 }
-// ---- Explicit slot/key-range deployment plan -------------------------------
+
+// Explicit slot/key-range deployment plan
 fn slot_key_bounds(slot_bits: u8, start: u64, end: u64) -> (String, String) {
     let shift = 64 - slot_bits as u32;
     let sk = start << shift;
@@ -3420,7 +3404,7 @@ fn slot_key_bounds(slot_bits: u8, start: u64, end: u64) -> (String, String) {
     };
     (format!("0x{sk:016x}"), format!("0x{ek:016x}"))
 }
-/// Implements the slot range step and keeps its validation and state transitions visible at the call site.
+
 fn slot_range(cfg: &Config, start: u64, end: u64, disk: &str) -> SlotRange {
     let (start_key, end_key) = slot_key_bounds(cfg.slot_bits, start, end);
     SlotRange {
@@ -3431,7 +3415,9 @@ fn slot_range(cfg: &Config, start: u64, end: u64, disk: &str) -> SlotRange {
         disk: disk.into(),
     }
 }
-/// Implements the slot map step and keeps its validation and state transitions visible at the call site.
+
+/// Assign each slot using the selected placement salt, then collapse adjacent slots
+/// owned by the same disk into an inclusive range.
 fn slot_map(cfg: &Config, salt: u64) -> (Vec<SlotRange>, Vec<u64>, f64) {
     let slots = 1u64 << cfg.slot_bits;
     let mut owners = Vec::with_capacity(slots as usize);
@@ -3489,7 +3475,7 @@ fn slot_map(cfg: &Config, salt: u64) -> (Vec<SlotRange>, Vec<u64>, f64) {
         .fold(0.0, f64::max);
     (ranges, counts, imbalance)
 }
-/// Implements the repair window step and keeps its validation and state transitions visible at the call site.
+
 fn repair_window(cfg: &Config, p: &Policy) -> f64 {
     let base = cfg
         .repair_model
@@ -3594,7 +3580,8 @@ struct SavedRun {
     config: Config,
     admission_key: String,
 }
-// ---- Program orchestration --------------------------------------------------
+
+// Program orchestration
 fn main() -> Result<()> {
     let cli = Args::parse();
     let mut args = cli.clone();
@@ -3882,7 +3869,8 @@ fn main() -> Result<()> {
     println!("{yaml}");
     Ok(())
 }
-// ---- Unit tests -------------------------------------------------------------
+
+// Unit tests
 #[cfg(test)]
 mod tests {
     use super::*;

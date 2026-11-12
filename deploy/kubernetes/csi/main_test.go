@@ -24,22 +24,29 @@ func TestSafeID(t *testing.T) {
 func TestCreateVolumeIsIdempotentByName(t *testing.T) {
 	created := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method+" "+r.URL.Path {
+		switch r.Method + " " + r.URL.Path {
 		case "GET /v1/volumes":
-			w.Header().Set("Content-Type","application/json")
+			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"existing":{"id":"existing","name":"data","size_bytes":20971520}}`))
 		case "POST /v1/volumes":
 			created = true
 			t.Fatal("idempotent create unexpectedly called POST")
-		default: t.Fatalf("unexpected request %s %s",r.Method,r.URL.Path)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 	}))
 	defer server.Close()
-	d:=&driver{endpoint:server.URL,http:server.Client()}
-	out,err:=d.CreateVolume(context.Background(),&csi.CreateVolumeRequest{Name:"data",CapacityRange:&csi.CapacityRange{RequiredBytes:10*1024*1024},VolumeCapabilities:[]*csi.VolumeCapability{{AccessType:&csi.VolumeCapability_Mount{Mount:&csi.VolumeCapability_MountVolume{FsType:"ext4"}},AccessMode:&csi.VolumeCapability_AccessMode{Mode:csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER}}}})
-	if err!=nil{t.Fatal(err)}
-	if created{t.Fatal("created duplicate volume")}
-	if out.GetVolume().GetVolumeId()!="existing"{t.Fatalf("unexpected volume: %#v",out.GetVolume())}
+	d := &driver{endpoint: server.URL, http: server.Client()}
+	out, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{Name: "data", CapacityRange: &csi.CapacityRange{RequiredBytes: 10 * 1024 * 1024}, VolumeCapabilities: []*csi.VolumeCapability{{AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{FsType: "ext4"}}, AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("created duplicate volume")
+	}
+	if out.GetVolume().GetVolumeId() != "existing" {
+		t.Fatalf("unexpected volume: %#v", out.GetVolume())
+	}
 }
 
 func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
@@ -57,55 +64,91 @@ func TestControllerPublishFencesAndUnpublishReleasesNode(t *testing.T) {
 		if r.Method == http.MethodGet {
 			state := map[string]any{"registrations": map[string]any{}, "reservation": nil}
 			regs := state["registrations"].(map[string]any)
-			for name, key := range registrations { regs[name] = map[string]uint64{"key":key} }
-			if holder != "" { state["reservation"] = map[string]any{"holder":holder,"key":reservationKey,"reservation_type":"exclusive_access"} }
+			for name, key := range registrations {
+				regs[name] = map[string]uint64{"key": key}
+			}
+			if holder != "" {
+				state["reservation"] = map[string]any{"holder": holder, "key": reservationKey, "reservation_type": "exclusive_access"}
+			}
 			_ = json.NewEncoder(w).Encode(state)
 			return
 		}
 		var payload struct {
-			Action string `json:"action"`
-			Initiator string `json:"initiator"`
-			CurrentKey uint64 `json:"current_key"`
-			NewKey uint64 `json:"new_key"`
-			Key uint64 `json:"key"`
+			Action          string `json:"action"`
+			Initiator       string `json:"initiator"`
+			CurrentKey      uint64 `json:"current_key"`
+			NewKey          uint64 `json:"new_key"`
+			Key             uint64 `json:"key"`
 			ReservationType string `json:"reservation_type"`
-			APTPL bool `json:"aptpl"`
-			IgnoreExisting bool `json:"ignore_existing"`
+			APTPL           bool   `json:"aptpl"`
+			IgnoreExisting  bool   `json:"ignore_existing"`
 		}
-		if err:=json.NewDecoder(r.Body).Decode(&payload);err!=nil{http.Error(w,err.Error(),400);return}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 		switch payload.Action {
 		case "register":
-			if registrations[payload.Initiator] != payload.CurrentKey { http.Error(w,"key mismatch",http.StatusConflict);return }
-			if payload.NewKey==0 { delete(registrations,payload.Initiator) } else { registrations[payload.Initiator]=payload.NewKey }
+			if registrations[payload.Initiator] != payload.CurrentKey {
+				http.Error(w, "key mismatch", http.StatusConflict)
+				return
+			}
+			if payload.NewKey == 0 {
+				delete(registrations, payload.Initiator)
+			} else {
+				registrations[payload.Initiator] = payload.NewKey
+			}
 		case "reserve":
-			if registrations[payload.Initiator] != payload.Key || (holder!="" && holder!=payload.Initiator) || payload.ReservationType!="exclusive_access" { http.Error(w,"reserved or invalid reservation type",http.StatusConflict);return }
-			holder=payload.Initiator;reservationKey=payload.Key
+			if registrations[payload.Initiator] != payload.Key || (holder != "" && holder != payload.Initiator) || payload.ReservationType != "exclusive_access" {
+				http.Error(w, "reserved or invalid reservation type", http.StatusConflict)
+				return
+			}
+			holder = payload.Initiator
+			reservationKey = payload.Key
 		case "release":
-			if holder!=payload.Initiator||reservationKey!=payload.Key||payload.ReservationType!="exclusive_access" { http.Error(w,"not reservation holder",http.StatusConflict);return }
-			holder="";reservationKey=0
-		default: http.Error(w,"unknown Serde PR operation",400);return
+			if holder != payload.Initiator || reservationKey != payload.Key || payload.ReservationType != "exclusive_access" {
+				http.Error(w, "not reservation holder", http.StatusConflict)
+				return
+			}
+			holder = ""
+			reservationKey = 0
+		default:
+			http.Error(w, "unknown Serde PR operation", 400)
+			return
 		}
-		w.Header().Set("Content-Type","application/json")
-		_,_=w.Write([]byte(`{"ok":true}`))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
 	defer server.Close()
-	d:=&driver{endpoint:server.URL,http:server.Client()}
-	ctx:=context.Background()
-	if _,err:=d.ControllerPublishVolume(ctx,&csi.ControllerPublishVolumeRequest{VolumeId:"vol-1",NodeId:"node-1"});err!=nil{t.Fatal(err)}
+	d := &driver{endpoint: server.URL, http: server.Client()}
+	ctx := context.Background()
+	if _, err := d.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{VolumeId: "vol-1", NodeId: "node-1"}); err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
-	if holder!="k8s:node-1" {t.Fatalf("reservation holder=%q",holder)}
+	if holder != "k8s:node-1" {
+		t.Fatalf("reservation holder=%q", holder)
+	}
 	mu.Unlock()
-	if _,err:=d.ControllerPublishVolume(ctx,&csi.ControllerPublishVolumeRequest{VolumeId:"vol-1",NodeId:"node-2"});err==nil {
+	if _, err := d.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{VolumeId: "vol-1", NodeId: "node-2"}); err == nil {
 		t.Fatal("second node unexpectedly acquired an exclusive-access reservation")
 	}
 	mu.Lock()
-	if holder!="k8s:node-1" {t.Fatalf("failed competing attach changed holder to %q",holder)}
-	if _,ok:=registrations["k8s:node-2"];ok {t.Fatal("failed competing attach left a stale registration")}
+	if holder != "k8s:node-1" {
+		t.Fatalf("failed competing attach changed holder to %q", holder)
+	}
+	if _, ok := registrations["k8s:node-2"]; ok {
+		t.Fatal("failed competing attach left a stale registration")
+	}
 	mu.Unlock()
-	if _,err:=d.ControllerUnpublishVolume(ctx,&csi.ControllerUnpublishVolumeRequest{VolumeId:"vol-1",NodeId:"node-1"});err!=nil{t.Fatal(err)}
+	if _, err := d.ControllerUnpublishVolume(ctx, &csi.ControllerUnpublishVolumeRequest{VolumeId: "vol-1", NodeId: "node-1"}); err != nil {
+		t.Fatal(err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if holder!=""||len(registrations)!=0 {t.Fatalf("reservation/registrations not released: holder=%q registrations=%v",holder,registrations)}
+	if holder != "" || len(registrations) != 0 {
+		t.Fatalf("reservation/registrations not released: holder=%q registrations=%v", holder, registrations)
+	}
 }
 
 func TestAPIAtUsesProvidedEndpointForJSONRequests(t *testing.T) {
@@ -132,7 +175,7 @@ func TestAPIAtUsesProvidedEndpointForJSONRequests(t *testing.T) {
 	}))
 	defer second.Close()
 	d := &driver{endpoint: first.URL, http: second.Client()}
-	resp, err := d.apiAt(context.Background(), second.URL, http.MethodPost, "/test", map[string]string{"value":"correct"})
+	resp, err := d.apiAt(context.Background(), second.URL, http.MethodPost, "/test", map[string]string{"value": "correct"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,15 +194,15 @@ func TestCreateVolumeRejectsMultiNodeAccessAndImpossibleRoundedLimit(t *testing.
 		}
 	}
 	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
-		Name:"multi-node", VolumeCapabilities:[]*csi.VolumeCapability{capability(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
+		Name: "multi-node", VolumeCapabilities: []*csi.VolumeCapability{capability(csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)},
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("multi-node mode should be rejected, got %v", err)
 	}
 	_, err = d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
-		Name:"capacity-limit",
-		CapacityRange:&csi.CapacityRange{RequiredBytes:1<<20, LimitBytes:2<<20},
-		VolumeCapabilities:[]*csi.VolumeCapability{capability(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER)},
+		Name:               "capacity-limit",
+		CapacityRange:      &csi.CapacityRange{RequiredBytes: 1 << 20, LimitBytes: 2 << 20},
+		VolumeCapabilities: []*csi.VolumeCapability{capability(csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER)},
 	})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("rounded capacity beyond limit should be rejected before API call, got %v", err)

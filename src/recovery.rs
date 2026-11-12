@@ -7,8 +7,6 @@
 //! scores object risk, and determines which repairs should run first without placing new
 //! fragments back onto a resource that has not satisfied its re-entry policy.
 
-// Health-state machine, failure-domain correlation, quarantine, survivability, and repair control.
-//! Autonomous health, failure-domain, repair, rebalance, and flap quarantine controller.
 use crate::cluster::{ObjectManifest, PeerHost};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -19,7 +17,7 @@ use std::{
 use tokio::sync::RwLock;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
-/// Supported ResourceState states or operations.
+/// Placement and recovery state of a host, disk, rack, or site.
 pub enum ResourceState {
     #[default]
     Healthy,
@@ -31,7 +29,6 @@ pub enum ResourceState {
     Quarantined,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the ResourceHealth path.
 pub struct ResourceHealth {
     pub state: ResourceState,
     pub last_seen_ms: u128,
@@ -76,7 +73,6 @@ impl ResourceHealth {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-/// Kagi state or configuration used by the Heartbeat path.
 pub struct Heartbeat {
     pub host: String,
     #[serde(default)]
@@ -95,9 +91,9 @@ pub struct Heartbeat {
     pub io_pressure: f64,
     pub unix_ms: u128,
 }
+// Recovery/survivability policy
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-// ---- Recovery/survivability policy ---------------------------------------------
 pub struct RecoveryConfig {
     /// Health-probe cadence in milliseconds. Default: 2,000.
     #[serde(default = "d_hb")]
@@ -147,43 +143,43 @@ impl Default for RecoveryConfig {
         }
     }
 }
-/// Implements the d hb step and keeps its validation and state transitions visible at the call site.
+
 fn d_hb() -> u64 {
     2_000
 }
-/// Implements the d suspect step and keeps its validation and state transitions visible at the call site.
+
 fn d_suspect() -> u64 {
     6_000
 }
-/// Implements the d down step and keeps its validation and state transitions visible at the call site.
+
 fn d_down() -> u64 {
     15_000
 }
-/// Implements the d out step and keeps its validation and state transitions visible at the call site.
+
 fn d_out() -> u64 {
     120_000
 }
-/// Implements the d repair step and keeps its validation and state transitions visible at the call site.
+
 fn d_repair() -> u64 {
     10_000
 }
-/// Implements the d parallel step and keeps its validation and state transitions visible at the call site.
+
 fn d_parallel() -> usize {
     4
 }
-/// Implements the d return step and keeps its validation and state transitions visible at the call site.
+
 fn d_return() -> u32 {
     3
 }
-/// Implements the d flap window step and keeps its validation and state transitions visible at the call site.
+
 fn d_flap_window() -> u64 {
     300_000
 }
-/// Implements the d flap transitions step and keeps its validation and state transitions visible at the call site.
+
 fn d_flap_transitions() -> u32 {
     4
 }
-/// Implements the d min uptime step and keeps its validation and state transitions visible at the call site.
+
 fn d_min_uptime() -> u64 {
     600_000
 }
@@ -191,34 +187,34 @@ fn d_min_uptime() -> u64 {
 pub struct HealthMap {
     pub resources: Arc<RwLock<BTreeMap<String, ResourceHealth>>>,
 }
-/// Implements the now step and keeps its validation and state transitions visible at the call site.
+
 fn now() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
 }
-/// Implements the host key step and keeps its validation and state transitions visible at the call site.
+
 pub fn host_key(h: &str) -> String {
     format!("host:{h}")
 }
-/// Implements the disk key step and keeps its validation and state transitions visible at the call site.
+
 pub fn disk_key(h: &str, d: &str) -> String {
     format!("disk:{h}/{d}")
 }
-/// Implements the rack key step and keeps its validation and state transitions visible at the call site.
+
 pub fn rack_key(r: &str) -> String {
     format!("rack:{r}")
 }
-/// Implements the site key step and keeps its validation and state transitions visible at the call site.
+
 pub fn site_key(s: &str) -> String {
     format!("site:{s}")
 }
-/// Implements the available step and keeps its validation and state transitions visible at the call site.
+
 fn available(s: ResourceState) -> bool {
     matches!(s, ResourceState::Healthy | ResourceState::Recovering)
 }
-/// Implements the record transition step and keeps its validation and state transitions visible at the call site.
+
 fn record_transition(
     e: &mut ResourceHealth,
     new: ResourceState,
@@ -273,7 +269,9 @@ fn record_transition(
         }
     }
 }
-/// Implements the maybe release step and keeps its validation and state transitions visible at the call site.
+
+/// Keep a flapping resource quarantined until it has remained stable for the full
+/// re-entry interval, then mark it recovering.
 fn maybe_release(e: &mut ResourceHealth, t: u128, cfg: &RecoveryConfig) {
     if !e.flap_quarantined {
         return;
@@ -300,6 +298,8 @@ impl HealthMap {
             .map(|x| x.state)
             .unwrap_or(ResourceState::Healthy)
     }
+
+    /// A disk is usable only when its own state and every known ancestor permit placement.
     pub async fn usable(&self, h: &PeerHost, d: &str) -> bool {
         if !available(self.state(&host_key(&h.id)).await) {
             return false;
@@ -546,7 +546,7 @@ impl HealthMap {
         self.resources.read().await.clone()
     }
 }
-/// Implements the object risk step and keeps its validation and state transitions visible at the call site.
+
 pub async fn object_risk(m: &ObjectManifest, health: &HealthMap, hosts: &[PeerHost]) -> usize {
     let mut good = BTreeSet::new();
     for c in &m.chunks {

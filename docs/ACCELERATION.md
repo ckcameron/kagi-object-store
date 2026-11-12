@@ -53,7 +53,7 @@ SYCL implementation in this release; oneAPI GPU execution uses its OpenCL ICD.
 cuObject is NVIDIA's object-storage transfer SDK, not a replacement for CUDA
 compute. No cuObject, GPUDirect Storage, or GPUDirect RDMA path is enabled here:
 Kagi's current transform boundary accepts host byte buffers, and its fragment
-transport is authenticated HTTP. Introducing GPU staging merely to transfer
+transport uses authenticated HTTP or the optional QUIC path. Introducing GPU staging merely to transfer
 those buffers has no demonstrated advantage over the current CUDA path. A real
 cuObject integration also needs the separate cuObjServer SDK and RDMA hardware,
 which were not available for validation. These frameworks remain unimplemented,
@@ -74,7 +74,8 @@ byte/fallback counters allow benchmarks and CI to prove the provider was actuall
 used rather than merely loaded.
 
 The manual `hardware-execution` workflow uses dedicated self-hosted runner labels
-for CUDA, HIP, OpenCL, ISA-L, IPP, AOCL, AVX2 and AVX-512. GPU validation selects
+for CUDA, HIP, OpenCL, ISA-L, IPP, AOCL, AVX2 and AVX-512. The same
+workflow has dedicated eBPF and directory checks. See [hardware execution](HARDWARE-VALIDATION.md). GPU validation selects
 one exact backend at a time, checks the independent Monte Carlo native kernel,
 then runs all runtime codec families through `kagi-bench --require-acceleration`.
 Any missing device or GPU fallback makes that validation fail.
@@ -90,8 +91,7 @@ KAGI_REQUIRE_GPU_TESTS=1 KAGI_HIP_ARCH=gfx1103 \
 A failed GPU operation must not count as accelerated validation. Test one GPU
 feature at a time to identify the executing provider. The earlier host Radeon
 780M result validated the underlying translated HIP kernels; it does not by
-itself validate the newly integrated Rust paths. See BUILD-VALIDATION.md for
-checks actually executed for this release.
+itself validate the newly integrated Rust paths. See [build validation](../BUILD-VALIDATION.md) for recorded execution evidence.
 
 ## API references
 

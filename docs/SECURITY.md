@@ -8,10 +8,14 @@ Internal cluster operations use ML-DSA authenticated envelopes, per-node persist
 
 Protect Raft state, node PQ private keys, metadata encryption keys, admission keys, and persistent anti-replay state from rollback and unauthorized disclosure. Files in `data_root/pq/` are security state, not disposable caches.
 
-Use mTLS for cluster transport and keep the rustls/aws-lc provider configuration aligned with the post-quantum transport policy. Do not expose internal fragment/Raft endpoints to untrusted networks.
+Configure native HTTPS for transport encryption and server authentication.
+The listener does not require client certificates. Internal fragment and Raft
+requests authenticate using the cluster admission key and ML-DSA request
+signatures. Keep internal endpoints on trusted networks and put any external
+client authentication boundary in front of the public API.
 
 
-## security and monitoring
+## Security policy and monitoring
 
 See [security policy and monitoring](SECURITY-POLICY.md) for node YAML rules, the
 optional BPF build, privileged metadata, authenticated REST/SSE endpoints, the

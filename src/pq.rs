@@ -5,11 +5,9 @@
 //! Internal control traffic is authenticated with ML-DSA identities and bounded replay
 //! state. Key identifiers, validity windows, revocation state, per-peer session epochs, and
 //! monotonic sequence tracking are kept explicit so key rotation does not weaken admission
-//! or restart-time replay guarantees.
+//! or restart-time replay guarantees. BLAKE3 key IDs identify ML-DSA-87 keys across
+//! Raft-managed rotations.
 
-// Post-quantum internal-request authentication, replay protection, session epochs, and ML-DSA key handling.
-//! Mandatory ML-DSA-87 authentication for all internal cluster protocols.
-//! Keys are identified by a BLAKE3 key id and can overlap during Raft-managed rotation.
 use anyhow::{bail, Context, Result};
 use axum::http::HeaderMap;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -43,8 +41,10 @@ struct SenderSessionDisk {
     epoch: u64,
     sequence: u64,
 }
-#[derive(Debug, Clone)] // ---- ML-DSA identities and replicated trust keys -------------------------------
-/// Kagi state or configuration used by the LocalPqIdentity path.
+
+// ML-DSA identities and replicated trust keys
+#[derive(Debug, Clone)]
+/// Node signing key and session state used to stamp internal requests.
 pub struct LocalPqIdentity {
     pub node_id: String,
     pub key_id: String,
@@ -72,7 +72,6 @@ struct PeerSessionStore {
     peers: BTreeMap<String, PeerSessionDisk>,
 }
 #[derive(Debug, Clone, Default)]
-/// Kagi state or configuration used by the RuntimeKeyring path.
 pub struct RuntimeKeyring {
     /// Trusted ML-DSA verification keys, indexed by key id.
     pub keys: Arc<RwLock<BTreeMap<String, TrustedPqKey>>>,
@@ -162,23 +161,23 @@ impl RuntimeKeyring {
         Ok(())
     }
 }
-/// Implements the generate identity step and keeps its validation and state transitions visible at the call site.
+
 pub fn generate_identity(public: &Path, secret: &Path) -> Result<()> {
     let (pk, sk) = ml_dsa_87::try_keygen().map_err(|e| anyhow::anyhow!(e))?;
     fs::write(public, B64.encode(pk.into_bytes()))?;
     fs::write(secret, B64.encode(sk.into_bytes()))?;
     Ok(())
 }
-/// Implements the public key b64 step and keeps its validation and state transitions visible at the call site.
+
 pub fn public_key_b64(path: &Path) -> Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_string())
 }
-/// Implements the key id from public b64 step and keeps its validation and state transitions visible at the call site.
+
 pub fn key_id_from_public_b64(s: &str) -> Result<String> {
     let raw = B64.decode(s.trim())?;
     Ok(blake3::hash(&raw).to_hex().to_string())
 }
-/// Implements the local identity step and keeps its validation and state transitions visible at the call site.
+
 pub fn local_identity(
     node_id: String,
     public: &Path,
@@ -216,13 +215,13 @@ pub fn local_identity(
         })),
     })
 }
-/// Implements the now ms step and keeps its validation and state transitions visible at the call site.
+
 fn now_ms() -> Result<u128> {
     Ok(std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis())
 }
-/// Kagi state or configuration used by the CanonicalRequest path.
+
 struct CanonicalRequest<'a> {
     node: &'a str,
     key_id: &'a str,
@@ -234,7 +233,7 @@ struct CanonicalRequest<'a> {
     path: &'a str,
     body_hash: &'a str,
 }
-/// Implements the canonical step and keeps its validation and state transitions visible at the call site.
+
 fn canonical(r: &CanonicalRequest<'_>) -> Vec<u8> {
     format!(
         "KAGI-MLDSA-HTTP-V3\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
@@ -250,7 +249,7 @@ fn canonical(r: &CanonicalRequest<'_>) -> Vec<u8> {
     )
     .into_bytes()
 }
-/// Implements the sign bytes step and keeps its validation and state transitions visible at the call site.
+
 fn sign_bytes(secret: &Path, msg: &[u8]) -> Result<String> {
     let raw = B64.decode(fs::read_to_string(secret)?.trim())?;
     let arr: [u8; ml_dsa_87::SK_LEN] = raw
@@ -262,7 +261,8 @@ fn sign_bytes(secret: &Path, msg: &[u8]) -> Result<String> {
         .map_err(|e| anyhow::anyhow!(e))?;
     Ok(B64.encode(sig))
 }
-// ---- Detached request envelope construction ------------------------------------
+
+// Detached request envelope construction
 pub fn signed_headers(
     id: &LocalPqIdentity,
     method: &str,
@@ -315,7 +315,8 @@ pub fn signed_headers(
         ("x-kagi-pq-signature", sig),
     ])
 }
-// ---- Verification, replay cache, durable peer epoch/sequence enforcement -------
+
+// Verification, replay cache, durable peer epoch/sequence enforcement
 pub async fn verify_request(
     headers: &HeaderMap,
     method: &str,
@@ -391,7 +392,7 @@ pub async fn verify_request(
     keys.check_and_record_nonce(&node, &nonce, ts, now).await?;
     Ok(node)
 }
-/// Implements the apply headers step and keeps its validation and state transitions visible at the call site.
+
 pub fn apply_headers(
     mut b: reqwest::RequestBuilder,
     headers: Vec<(&'static str, String)>,
