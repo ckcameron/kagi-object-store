@@ -483,6 +483,15 @@ fn object_id(cluster: &str, key: &str, version: u64) -> String {
     h.finalize().to_hex().to_string()
 }
 
+/// Disk IDs and fragment path segments must name one directory entry.
+pub fn is_path_component(value: &str) -> bool {
+    !value.contains(['\\', '\0'])
+        && FsPath::new(value)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            == Some(value)
+}
+
 pub fn fragment_path(root: &FsPath, disk: &str, obj: &str, ver: u64, frag: u32) -> PathBuf {
     root.join("disks")
         .join(disk)
