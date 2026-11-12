@@ -7,6 +7,8 @@ Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 Last signed update: 11 November, 2026
 Documentation added to the wiki on github.
 
+## v0.0.1 (release) - First Development and testing release - 12 November, 2026
+
 ## 0.39.0 (development) — accelerated transports, hardened telemetry, validation and benchmarking
 
 - Bind GC deletion fences to recorded local replicas and recheck retention and references on both local and remote deletion paths; preserve incomplete archive sources.
