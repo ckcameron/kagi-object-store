@@ -79,13 +79,20 @@ Use the example for supported field names.
 Setting the node's `tls` section enables native HTTPS on `listen`. The listener
 presents the configured server certificate and does not require client
 certificates. Internal requests still require the admission key and signed
-ML-DSA envelopes. See [security notes](SECURITY.md).
+ML-DSA envelopes. Configure peer endpoints with the final URL because the
+internal client stops at HTTP redirects. See [security notes](SECURITY.md).
 
 QUIC requires the `quic` Cargo feature, a peer `quic_endpoint`, and TLS material.
 QUIC is TLS 1.3-only and Kagi disables 0-RTT for mutation traffic. HTTPS remains the
 fallback. The 0.39 `prefer_rdma`, `rdma_min_bytes`, and `rdma_endpoint` fields are
 an explicit configuration boundary for RDMA work; they must not be interpreted as
 evidence that the running build has a functional RDMA data path.
+
+### Disk IDs
+
+A runtime disk ID names a single directory entry. Use `device_path` to
+identify the underlying block device. Capacity records with invalid disk IDs
+remain visible through `GET /v1/capacity` and are excluded from active placement.
 
 ### Storage queue controls
 

@@ -463,16 +463,27 @@ fn signed_json<T: Serialize>(
     Ok((body, h))
 }
 
+async fn verified_json_signer<T: Serialize>(
+    st: &V6State,
+    headers: &axum::http::HeaderMap,
+    path: &str,
+    value: &T,
+) -> Option<String> {
+    let b = serde_json::to_vec(value).ok()?;
+    pq::verify_request(headers, "POST", path, &b, &st.data.pq_keys)
+        .await
+        .ok()
+}
+
 async fn verify_json<T: Serialize>(
     st: &V6State,
     headers: &axum::http::HeaderMap,
     path: &str,
     value: &T,
 ) -> bool {
-    let b = serde_json::to_vec(value).unwrap_or_default();
-    pq::verify_request(headers, "POST", path, &b, &st.data.pq_keys)
+    verified_json_signer(st, headers, path, value)
         .await
-        .is_ok()
+        .is_some()
 }
 
 fn validate_runtime_topology(c: &NodeConfig) -> Result<()> {
@@ -488,6 +499,13 @@ fn validate_runtime_topology(c: &NodeConfig) -> Result<()> {
                 "Kagi host {} has {} disks; at least 6 are required",
                 h.id,
                 h.disks.len()
+            );
+        }
+        for disk in &h.disks {
+            anyhow::ensure!(
+                cluster::is_path_component(&disk.id),
+                "disk ID for host {} must be a single path component",
+                h.id
             );
         }
     }
@@ -559,6 +577,7 @@ fn http_client(c: &NodeConfig) -> Result<reqwest::Client> {
     );
     let mut b = reqwest::Client::builder()
         .default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
         .https_only(c.tls.is_some());
     if let Some(t) = &c.tls {
         b = b
@@ -655,7 +674,12 @@ async fn effective_cluster_config(st: &V6State) -> ClusterConfig {
     let ms = st.meta.store.state().await;
     for (host, disks) in ms.capacity_additions {
         if let Some(h) = c.hosts.iter_mut().find(|h| h.id == host) {
-            for d in disks.into_values() {
+            // Older capacity records can contain invalid IDs. Keep them visible
+            // through the capacity API and exclude them from active placement.
+            for d in disks
+                .into_values()
+                .filter(|d| cluster::is_path_component(&d.id))
+            {
                 if let Some(existing) = h.disks.iter_mut().find(|x| x.id == d.id) {
                     *existing = d
                 } else {
@@ -2023,20 +2047,16 @@ async fn volume_pr_cdb(
     }
 }
 
-/// Bind a destructive GC fence to one recorded local replica and recheck retention
-/// against the currently applied metadata. A record ID alone is not authorization
-/// to delete an arbitrary path supplied by a worker.
-/// Use the locally applied fence to authorize deletion of this exact replica. Recheck
-/// retention and live references because they may still keep the immutable version reachable.
-fn gc_delete_authorized(
+/// Select a local replica from the applied fence and build its path from the
+/// committed metadata after rechecking retention and live references.
+fn gc_delete_path(
     ms: &raftmeta::MetadataState,
     req: &GcDeleteRequest,
     local_host: &str,
+    root: &std::path::Path,
     now: u128,
-) -> bool {
-    let Some(g) = ms.garbage.get(&req.garbage_id) else {
-        return false;
-    };
+) -> Option<PathBuf> {
+    let g = ms.garbage.get(&req.garbage_id)?;
     if req.fence_index == 0
         || ms.applied_index < req.fence_index
         || g.fence_index != req.fence_index
@@ -2047,9 +2067,10 @@ fn gc_delete_authorized(
         || g.eligible_after_unix_ms > now
         || g.manifest.worm.immutable(now)
     {
-        return false;
+        return None;
     }
-    let matches = |m: &ObjectManifest| m.object_id == req.object_id && m.version == req.version;
+    let matches =
+        |m: &ObjectManifest| m.object_id == g.manifest.object_id && m.version == g.version;
     if ms.manifests.values().any(matches)
         || ms.versions.values().flatten().any(matches)
         || ms
@@ -2064,15 +2085,36 @@ fn gc_delete_authorized(
             })
         })
     {
-        return false;
+        return None;
     }
-    normalize_chunks(&g.manifest).iter().any(|chunk| {
-        chunk.chunk == req.fragment
-            && chunk
+    let (chunk, replica) = normalize_chunks(&g.manifest)
+        .into_iter()
+        .filter(|chunk| chunk.chunk == req.fragment)
+        .flat_map(|chunk| {
+            chunk
                 .replicas
-                .iter()
-                .any(|replica| replica.host == local_host && replica.disk == req.disk)
-    })
+                .into_iter()
+                .map(move |replica| (chunk.chunk, replica))
+        })
+        .find(|(_, replica)| replica.host == local_host && replica.disk == req.disk)?;
+
+    // Check the committed record as well as newly admitted disks. Older state may
+    // have been written before disk IDs were required to be single path components.
+    let object_id = g.manifest.object_id.as_str();
+    if !cluster::is_path_component(&replica.disk)
+        || !cluster::is_path_component(object_id)
+        || !object_id.get(..2).is_some_and(cluster::is_path_component)
+        || !object_id.get(2..4).is_some_and(cluster::is_path_component)
+    {
+        return None;
+    }
+    Some(fragment_path(
+        root,
+        &replica.disk,
+        object_id,
+        g.version,
+        chunk,
+    ))
 }
 
 async fn gc_delete_in(
@@ -2080,32 +2122,29 @@ async fn gc_delete_in(
     headers: axum::http::HeaderMap,
     Json(req): Json<GcDeleteRequest>,
 ) -> impl IntoResponse {
-    if !verify_json(&st, &headers, "/internal/v1/gc/delete", &req).await {
+    let Some(signer) = verified_json_signer(&st, &headers, "/internal/v1/gc/delete", &req).await
+    else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     if !request_authorized(&st.data.cfg, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let status = st.meta.status().await;
-    if status.term != req.term || status.leader.as_deref() != Some(req.leader_id.as_str()) {
+    if status.term != req.term
+        || signer != req.leader_id
+        || status.leader.as_deref() != Some(signer.as_str())
+    {
         return (StatusCode::CONFLICT, "stale or non-leader GC fence").into_response();
     }
     let ms = st.meta.store.state().await;
-    if !gc_delete_authorized(&ms, &req, &st.data.local_host, now_ms()) {
+    let Some(path) = gc_delete_path(&ms, &req, &st.data.local_host, &st.data.root, now_ms()) else {
         return (
             StatusCode::CONFLICT,
             "GC fence does not authorize this unreferenced, retention-eligible local replica",
         )
             .into_response();
-    }
-    let p = fragment_path(
-        &st.data.root,
-        &req.disk,
-        &req.object_id,
-        req.version,
-        req.fragment,
-    );
-    match tokio::fs::remove_file(&p).await {
+    };
+    match tokio::fs::remove_file(path).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             StatusCode::NO_CONTENT.into_response()
@@ -2145,19 +2184,9 @@ async fn delete_gc_replica(
             "stale or non-leader GC fence"
         );
         let ms = st.meta.store.state().await;
-        anyhow::ensure!(
-            gc_delete_authorized(&ms, &req, &st.data.local_host, now_ms()),
-            "GC fence does not authorize this local replica"
-        );
-
-        let p = fragment_path(
-            &st.data.root,
-            &r.disk,
-            &g.manifest.object_id,
-            g.version,
-            chunk,
-        );
-        match tokio::fs::remove_file(p).await {
+        let path = gc_delete_path(&ms, &req, &st.data.local_host, &st.data.root, now_ms())
+            .context("GC fence does not authorize this local replica")?;
+        match tokio::fs::remove_file(path).await {
             Ok(_) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
@@ -2632,6 +2661,13 @@ async fn capacity_add(
     }
     if !st.data.cfg.hosts.iter().any(|h| h.id == host) {
         return (StatusCode::NOT_FOUND, "unknown host").into_response();
+    }
+    if !cluster::is_path_component(&req.disk.id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            "disk ID must be a single path component",
+        )
+            .into_response();
     }
     if req.disk.capacity_bytes == 0 || req.disk.weight <= 0.0 {
         return (
@@ -3158,13 +3194,12 @@ async fn ui_telemetry(
             let Ok(auth) = pq::signed_headers(identity, "GET", path, &[]) else {
                 continue;
             };
-            let url = format!(
-                "{}{}?after_ms={}",
-                peer.endpoint.trim_end_matches('/'),
-                path,
-                query.after_ms
-            );
-            let request = st.data.client.get(url);
+            let url = format!("{}{}", peer.endpoint.trim_end_matches('/'), path);
+            let request = st
+                .data
+                .client
+                .get(url)
+                .query(&[("after_ms", query.after_ms.to_string())]);
             if let Ok(response) = pq::apply_headers(request, auth).send().await {
                 if response.status().is_success() {
                     if let Ok(value) = response.json::<serde_json::Value>().await {
@@ -3506,11 +3541,7 @@ async fn main() -> Result<()> {
             _ => anyhow::bail!("role must be viewer or admin"),
         };
         webui::upsert_user(&cfg.web_console.userdb, username, &password, role)?;
-        println!(
-            "Kagi console user {} updated in {}",
-            username,
-            cfg.web_console.userdb.display()
-        );
+        println!("Kagi console user updated.");
         return Ok(());
     }
     validate_runtime_topology(&cfg)?;
