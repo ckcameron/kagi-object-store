@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest a new capability or improvement to Kagi.
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe your use case and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like Kagi to do?
+      description: Describe the behavior you would use. An example command or workflow helps if you have one.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: Describe any approach you tried and where it falls short.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Share any relevant constraints or links to related issues.
