@@ -1,0 +1,43 @@
+name: Bug report
+description: Report something in Kagi that behaves incorrectly.
+labels:
+  - bug
+body:
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+      description: Describe the failure and where you saw it, such as a command, API, or deployment.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest set of steps or commands you can. If the failure is intermittent, describe when it occurs.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Kagi version or commit
+      placeholder: Release version, Git commit, or container image tag
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include any relevant OS and kernel versions, enabled Cargo features, or Kubernetes and CSI versions.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or errors
+      description: Paste the relevant lines. Remove credentials, tokens, and private data before posting.
+      render: text
