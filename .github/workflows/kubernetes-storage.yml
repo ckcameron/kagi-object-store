@@ -16,6 +16,9 @@ on:
       - 'src/bin/kagi-cluster-host.rs'
       - '.github/workflows/kubernetes-storage.yml'
   workflow_dispatch:
+permissions:
+  contents: read
+
 jobs:
   csi-driver:
     runs-on: ubuntu-latest

@@ -467,6 +467,37 @@ async fn scsi_bridge_authentication_conflict_and_persistence() {
 }
 
 #[tokio::test]
+async fn placement_ignores_invalid_legacy_disk_ids() {
+    let (st, root) = fixture().await;
+    let host = &st.data.cfg.hosts[0];
+    let mut disk = host.disks[0].clone();
+    for (index, id) in [(1, "disk-added"), (2, "group/disk")] {
+        disk.id = id.into();
+        st.meta
+            .store
+            .apply(
+                index,
+                MetadataCommand::AddCapacity {
+                    host: host.id.clone(),
+                    disk: disk.clone(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let effective = effective_cluster_config(&st).await;
+    assert!(effective.hosts[0]
+        .disks
+        .iter()
+        .any(|d| d.id == "disk-added"));
+    assert!(effective.hosts[0]
+        .disks
+        .iter()
+        .all(|d| d.id != "group/disk"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn gc_fence_binds_replica_and_rechecks_retention_after_restart() {
     let (st, root) = fixture().await;
     let raft = tokio::spawn(st.meta.clone().run());
@@ -521,9 +552,22 @@ async fn gc_fence_binds_replica_and_rechecks_retention_after_restart() {
         fragment: 0,
         disk: "gc-disk".into(),
     };
-    assert!(gc_delete_authorized(
-        &restored,
-        &req,
+    let gc_delete_authorized =
+        |state: &raftmeta::MetadataState, req: &GcDeleteRequest, host: &str, now| {
+            gc_delete_path(state, req, host, &st.data.root, now).is_some()
+        };
+    let expected_path = fragment_path(&st.data.root, &req.disk, &req.object_id, 1, 0);
+    assert_eq!(
+        gc_delete_path(&restored, &req, &st.data.local_host, &st.data.root, 10),
+        Some(expected_path)
+    );
+    let mut altered = restored.clone();
+    let mut short_id = req.clone();
+    short_id.object_id = "id".into();
+    altered.garbage.get_mut(&g.id).unwrap().manifest.object_id = short_id.object_id.clone();
+    assert!(!gc_delete_authorized(
+        &altered,
+        &short_id,
         &st.data.local_host,
         10
     ));
