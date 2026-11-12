@@ -5,6 +5,7 @@
 Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 
 Last signed update: 11 November, 2026
+Documentation added to the wiki on github.
 
 ## 0.39.0 (development) — accelerated transports, hardened telemetry, validation and benchmarking
 
