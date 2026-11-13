@@ -171,7 +171,9 @@ impl ProtectionLayout {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PlacementPlan {
-    pub salt: u64,
+    /// Public input used to choose a deterministic layout.
+    #[serde(rename = "salt")]
+    pub placement_seed: u64,
     pub disks: Vec<DomainDisk>,
     pub protection: ProtectionLayout,
     pub chunk_replicas: usize,
@@ -294,7 +296,7 @@ impl<'a> Occupancy<'a> {
 fn locations_for_host(
     disks: &[DomainDisk],
     owner: &str,
-    salt: u64,
+    placement_seed: u64,
     fragments: usize,
     copies: usize,
     host_limit: usize,
@@ -334,7 +336,7 @@ fn locations_for_host(
                     }
                     let anchor = shard == 0 && copy == 0 && disk.host != owner;
                     let score = hash(&[
-                        owner.as_bytes(), &salt.to_le_bytes(), &(shard as u64).to_le_bytes(),
+                        owner.as_bytes(), &placement_seed.to_le_bytes(), &(shard as u64).to_le_bytes(),
                         &(copy as u64).to_le_bytes(), disk.id.as_bytes(),
                     ]);
                     Some(((anchor, local, global, std::cmp::Reverse(score), &disk.id), index))
@@ -379,7 +381,7 @@ impl PlacementPlan {
         let mut result = locations_for_host(
             &self.disks,
             &permutations.ranges[owner].host,
-            self.salt,
+            self.placement_seed,
             self.protection.fragments(),
             self.chunk_replicas,
             self.max_fragments_per_host,
@@ -464,7 +466,7 @@ impl PlacementPlan {
             &object_position.to_le_bytes(),
             &(shard as u64).to_le_bytes(),
             &(replica as u64).to_le_bytes(),
-            &self.salt.to_le_bytes(),
+            &self.placement_seed.to_le_bytes(),
             disk.id.as_bytes(),
         ]) % width;
         Ok(range.start_key + start + offset)
@@ -565,7 +567,7 @@ impl PlacementPlan {
             let positions = locations_for_host(
                 &self.disks,
                 host,
-                self.salt,
+                self.placement_seed,
                 self.protection.fragments(),
                 self.chunk_replicas,
                 self.max_fragments_per_host,
@@ -591,7 +593,7 @@ pub fn validate_metadata_tolerance(
         "metadata quorum cannot be reached with the mapped voters"
     );
     let plan = PlacementPlan {
-        salt: 0,
+        placement_seed: 0,
         disks: voters.to_vec(),
         protection: ProtectionLayout::ReedSolomon {
             k: quorum,
@@ -894,7 +896,7 @@ mod tests {
 
     fn one_disk_per_host(count: usize, protection: ProtectionLayout) -> PlacementPlan {
         PlacementPlan {
-            salt: 7,
+            placement_seed: 7,
             disks: (0..count)
                 .map(|index| DomainDisk {
                     id: format!("disk-{index}"),
@@ -956,10 +958,10 @@ mod tests {
         disk.networks.push("separate".into());
         plan.disks.push(disk);
         assert!(plan.validate_tolerance().is_ok());
-        // Find a salt that selects the two-disk network group as the anchor.
-        plan.salt = (0..100)
-            .find(|&salt| {
-                locations_for_host(&plan.disks, "host-0", salt, 7, 1, 1, 1)
+        // Find a placement seed that selects the two-disk network group as the anchor.
+        plan.placement_seed = (0..100)
+            .find(|&placement_seed| {
+                locations_for_host(&plan.disks, "host-0", placement_seed, 7, 1, 1, 1)
                     .is_ok_and(|layout| layout[0][0] != 8)
             })
             .unwrap();

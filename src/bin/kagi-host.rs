@@ -254,8 +254,12 @@ fn u01(x: u64) -> f64 {
     ((x as f64) + 1.0) / ((u64::MAX as f64) + 2.0)
 }
 
-fn score(pos: u64, salt: u64, d: &Disk) -> f64 {
-    let h = hash64(&[&pos.to_le_bytes(), &salt.to_le_bytes(), d.id.as_bytes()]);
+fn score(pos: u64, placement_seed: u64, d: &Disk) -> f64 {
+    let h = hash64(&[
+        &pos.to_le_bytes(),
+        &placement_seed.to_le_bytes(),
+        d.id.as_bytes(),
+    ]);
     u01(h).powf(1.0 / d.weight.max(1e-12))
 }
 

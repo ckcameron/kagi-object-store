@@ -4372,7 +4372,7 @@ mod documented_config_tests {
             })
             .collect();
         PlacementPlan {
-            salt: 56,
+            placement_seed: 56,
             disks,
             protection: ProtectionLayout::ReedSolomon { k: 2, m: 4 },
             chunk_replicas: 1,

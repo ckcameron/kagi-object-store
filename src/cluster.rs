@@ -453,12 +453,19 @@ pub async fn locate_object(st: &ClusterState, key: &str) -> Result<Vec<FragmentL
     )
 }
 
-fn score(pos: u64, frag: u32, replica: u32, salt: u64, h: &PeerHost, d: &PeerDisk) -> f64 {
+fn score(
+    pos: u64,
+    frag: u32,
+    replica: u32,
+    placement_seed: u64,
+    h: &PeerHost,
+    d: &PeerDisk,
+) -> f64 {
     let x = hash64(&[
         &pos.to_le_bytes(),
         &frag.to_le_bytes(),
         &replica.to_le_bytes(),
-        &salt.to_le_bytes(),
+        &placement_seed.to_le_bytes(),
         h.id.as_bytes(),
         d.id.as_bytes(),
     ]);
@@ -2900,7 +2907,7 @@ mod at_rest_encryption_tests {
             })
             .collect();
         let plan = PlacementPlan {
-            salt: 18,
+            placement_seed: 18,
             disks,
             protection: ProtectionLayout::ReedSolomon { k: 2, m: 4 },
             chunk_replicas: 1,
@@ -3033,7 +3040,7 @@ mod at_rest_encryption_tests {
         let previous = &planned.locations;
         let mut replacement = plan.clone();
         let next = loop {
-            replacement.salt += 1;
+            replacement.placement_seed += 1;
             let next = planned_object_placement(&replacement, position).unwrap();
             if let Some(target) = next.locations.iter().flatten().find(|target| {
                 previous[target.fragment as usize]
