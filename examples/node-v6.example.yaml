@@ -9,10 +9,19 @@
 # Required. Shared cluster join secret, base64 encoded.
 join_key_b64: "REPLACE_WITH_KAGI_JOIN_KEY"
 
+# Optional validated deployment for new objects. Use the same file and policy on
+# every node. Relative paths resolve next to this node YAML. Match cluster.hosts
+# to the plan and omit erasure geometry, chunk_replicas, and any conflicting
+# replication count when the planner supplies them. The generated join-key hash
+# is also loaded automatically.
+# planner_output:
+#   path: kagi.generated.yaml
+#   policy: default
+
 cluster:
   # Required. Stable logical cluster identifier; peers must agree.
   id: prod-a
-  # Required. Stable 64-bit deterministic-placement salt.
+  # Legacy placement salt. Preserve it when adding a plan to an existing cluster.
   placement_salt: 1161981756646125696
   # Default: 3. Replica count when replication protection is active.
   replication: 3

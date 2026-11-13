@@ -270,7 +270,8 @@ pub const INDEX_HTML: &str = r###"<!doctype html>
 :root{color-scheme:dark;--bg:#071019;--panel:#0d1a26;--panel2:#102333;--line:#1c3b4d;--text:#e8f6ff;--muted:#8cb2c7;--accent:#19d3e6;--accent2:#3388ff;--good:#3be28c;--warn:#ffc857;--bad:#ff667a}
 *{box-sizing:border-box}
 body{margin:0;background:radial-gradient(circle at 15% 0,#0c2d38 0,#071019 34%);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
-header{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:18px;padding:14px 22px;background:#071019e8;border-bottom:1px solid var(--line);backdrop-filter:blur(12px)}
+.console-header{position:sticky;top:0;z-index:4;background:#071019}
+header{display:flex;align-items:center;gap:18px;padding:14px 22px;border-bottom:1px solid var(--line)}
 .brand{font-size:24px;font-weight:800;letter-spacing:.08em;color:var(--accent)}
 .sub,.muted{color:var(--muted)}
 main{padding:20px;display:grid;gap:16px}
@@ -293,15 +294,22 @@ pre{white-space:pre-wrap;overflow:auto;max-height:420px;background:#050b11;paddi
 .badge{display:inline-block;padding:2px 7px;border-radius:999px;background:#123246;color:#aeeefa}
 canvas{width:100%;height:220px;background:#050b11;border:1px solid #183244;border-radius:8px}
 .alert{border-left:3px solid var(--warn);padding:6px 9px;margin:5px 0;background:#0a141d}
+.protection-warning{background:#ffca56;color:#2c1700;padding:12px 22px;font-weight:700}
+.protection-warning.critical{background:#ff4857;color:#210409;border-bottom:3px solid #ffaab1;font-size:16px}
+.protection-warning p{margin:0}
+.protection-warning p+p{margin-top:6px}
 @media(max-width:600px){header{padding:12px}main{padding:12px}th:nth-child(n+5),td:nth-child(n+5){display:none}}
 </style>
 </head>
 <body>
+<div class="console-header">
 <header>
   <div class="brand">KAGI</div>
   <div><b>Distributed Object Storage Console</b><div id="node" class="sub">loading…</div></div>
   <div style="margin-left:auto" id="status" class="badge">connecting</div>
 </header>
+<div id="protectionWarning" class="protection-warning" role="status" hidden></div>
+</div>
 <main>
 <div class="tabs">
   <button class="tab active" data-tab="overview">Overview</button>
@@ -375,6 +383,25 @@ const fmt=n=>new Intl.NumberFormat().format(n||0);
 const bytes=n=>{let x=Number(n||0),u=['B','KiB','MiB','GiB','TiB','PiB'],i=0;while(x>=1024&&i<u.length-1){x/=1024;i++}return x.toFixed(i?1:0)+' '+u[i]};
 const rate=n=>bytes(n)+'/s';
 async function api(p,o){let r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());let t=await r.text();return t?JSON.parse(t):null}
+
+let displayedProtectionWarnings;
+function showProtectionWarnings(protection){
+  const warnings=protection?.warnings||[], next=JSON.stringify(warnings);
+  if(next===displayedProtectionWarnings)return;
+  displayedProtectionWarnings=next;
+  const banner=q('#protectionWarning');
+  banner.hidden=warnings.length===0;
+  banner.classList.toggle('critical',warnings.some(w=>w.severity==='critical'));
+  banner.replaceChildren(...warnings.map(w=>{
+    const row=document.createElement('p');
+    row.textContent=(w.severity==='critical'?'DANGER · ':'WARNING · ')+w.message;
+    return row;
+  }));
+}
+
+async function checkProtection(){
+  try{showProtectionWarnings((await api('/v1/monitor/status')).protection)}catch{}
+}
 
 async function overview(){
   try{
@@ -466,7 +493,21 @@ async function performance(){
 }
 
 async function objects(){let p=encodeURIComponent(q('#prefix').value);let d=await api('/ui/api/objects?prefix='+p);q('#objects').innerHTML='<table><tr><th>Key</th><th>Bytes</th><th>Version</th><th>EC</th></tr>'+d.map(o=>'<tr><td><button class=obj data-k="'+encodeURIComponent(o.key)+'">'+o.key+'</button></td><td>'+bytes(o.bytes)+'</td><td>'+o.version+'</td><td>'+o.erasure_scheme+' '+o.data_shards+'+'+o.parity_shards+'</td></tr>').join('')+'</table>';document.querySelectorAll('.obj').forEach(b=>b.addEventListener('click',()=>detail(decodeURIComponent(b.dataset.k))))}
-async function detail(k){let d=await api('/ui/api/object/'+k.split('/').map(encodeURIComponent).join('/'));q('#objectDetail').innerHTML='<div class=row><span class=badge>'+d.manifest.erasure_scheme+'</span><b>'+d.manifest.key+'</b><span>'+bytes(d.manifest.bytes)+'</span></div><h3>Chunks / localities</h3><pre>'+JSON.stringify(d,null,2)+'</pre>'}
+async function detail(k){
+  const d=await api('/ui/api/object/'+k.split('/').map(encodeURIComponent).join('/'));
+  const title=document.createElement('h3'),info=document.createElement('pre');
+  title.textContent=d.manifest.key+' · '+d.manifest.erasure_scheme+' · '+bytes(d.manifest.bytes);
+  if(d.key_position_hex)d.manifest.key_position=d.key_position_hex;
+  if(d.manifest.planned_placement){
+    d.manifest.planned_placement.position=d.key_position_hex;
+    for(const locations of d.manifest.planned_placement.locations)
+      for(const location of locations)location.position=location.position_hex;
+  }
+  for(const fragment of d.manifest.fragments||[])
+    if(fragment.position_hex)fragment.position=fragment.position_hex;
+  info.textContent=JSON.stringify(d,null,2);
+  q('#objectDetail').replaceChildren(title,info);
+}
 async function buckets(){let d=await api('/ui/api/buckets');q('#buckets').innerHTML='<table><tr><th>Name</th><th>WORM</th><th>Versioning</th></tr>'+Object.values(d).map(b=>'<tr><td>'+b.name+'</td><td>'+b.default_worm.mode+(b.default_worm.legal_hold?' + hold':'')+'</td><td>'+b.versioning+'</td></tr>').join('')+'</table>'}
 async function saveBucket(){let body={name:q('#bucketName').value,default_worm:{mode:q('#wormMode').value,retain_until_unix_ms:q('#retainMs').value?Number(q('#retainMs').value):null,legal_hold:q('#legalHold').checked},versioning:q('#versioning').checked,tags:{}};await api('/ui/api/buckets',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});buckets()}
 async function logs(){let d=await api('/ui/api/logs?scope='+q('#logScope').value);q('#logs').textContent=d.lines.join('\n')}
@@ -477,11 +518,22 @@ q('#refreshPerf').addEventListener('click',performance);
 q('#perfGroup').addEventListener('change',performance);
 q('#perfWindow').addEventListener('change',performance);
 const eventSource=new EventSource('/v1/monitor/stream');
-eventSource.addEventListener('kagi',e=>{const d=JSON.parse(e.data),el=q('#securityEvents');el.textContent=(el.textContent+'\n'+d.severity+' '+d.category+' '+d.resource+' '+d.message).split('\n').slice(-100).join('\n');if(['warning','error','critical'].includes(d.severity)){let p=q('#perfAlerts');if(p.classList.contains('muted')){p.classList.remove('muted');p.textContent=''}p.innerHTML=('<div class=alert>'+d.severity.toUpperCase()+' · '+d.category+' · '+d.resource+' · '+d.message+'</div>'+p.innerHTML).slice(0,12000)}});
+eventSource.addEventListener('kagi',e=>{
+  const d=JSON.parse(e.data),el=q('#securityEvents');
+  el.textContent=(el.textContent+'\n'+d.severity+' '+d.category+' '+d.resource+' '+d.message).split('\n').slice(-100).join('\n');
+  if(['warning','error','critical'].includes(d.severity)){
+    const alerts=q('#perfAlerts'),item=document.createElement('div');
+    if(alerts.classList.contains('muted')){alerts.classList.remove('muted');alerts.textContent=''}
+    item.className='alert';
+    item.textContent=d.severity.toUpperCase()+' · '+d.category+' · '+d.resource+' · '+d.message;
+    alerts.prepend(item);
+    if(alerts.childElementCount>100)alerts.lastElementChild.remove();
+  }
+});
 eventSource.addEventListener('gap',e=>{q('#securityEvents').textContent+='\nEvent gap: '+e.data});
 document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('section[data-page]').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelector('[data-page="'+b.dataset.tab+'"]').classList.add('active');if(b.dataset.tab==='performance')performance();if(b.dataset.tab==='buckets')buckets();if(b.dataset.tab==='logs')logs();if(b.dataset.tab==='security')securityAudit()}));
 q('#search').addEventListener('click',objects);q('#saveBucket').addEventListener('click',saveBucket);q('#refreshLogs').addEventListener('click',logs);
-overview();setInterval(overview,2000);setInterval(()=>{if(document.querySelector('[data-page="performance"]')?.classList.contains('active'))performance();if(document.querySelector('[data-page="logs"]')?.classList.contains('active'))logs()},2000);
+overview();checkProtection();setInterval(overview,2000);setInterval(checkProtection,2000);setInterval(()=>{if(document.querySelector('[data-page="performance"]')?.classList.contains('active'))performance();if(document.querySelector('[data-page="logs"]')?.classList.contains('active'))logs()},2000);
 </script>
 </body>
 </html>"###;

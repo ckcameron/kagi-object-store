@@ -27,6 +27,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
+use kagi_object_store::placement::{mask_position, PlacementPlan, ProtectionLayout};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -102,7 +103,11 @@ pub struct ClusterConfig {
     /// Stable cluster identifier shared by every member.
     pub id: String,
     /// Stable salt used by deterministic fragment placement.
+    #[serde(default)]
     pub placement_salt: u64,
+    /// Validated cluster-wide layout for new writes. An absent plan keeps legacy placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement_plan: Option<PlacementPlan>,
     /// Storage hosts eligible for placement.
     pub hosts: Vec<PeerHost>,
     /// Replica count for replication protection. Default: 3.
@@ -276,6 +281,8 @@ pub struct ProtectedObjectMetadata {
     #[serde(default)]
     pub sub_chunk_no: u32,
     pub chunks: Vec<ChunkMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_placement: Option<PlannedObjectPlacement>,
     #[serde(default)]
     pub worm: WormPolicy,
     #[serde(default)]
@@ -308,17 +315,27 @@ pub struct ObjectManifest {
     pub fragments: Vec<FragmentLocation>,
     #[serde(default)]
     pub chunks: Vec<ChunkMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planned_placement: Option<PlannedObjectPlacement>,
     #[serde(default)]
     pub protected_metadata: Option<EncryptedMetadata>,
     pub committed_at_unix_ms: u128,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FragmentLocation {
     pub fragment: u32,
     pub host: String,
     pub disk: String,
     #[serde(default)]
     pub checksum: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u64>,
+}
+/// Intended destinations for a version, retained when a target is temporarily offline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedObjectPlacement {
+    pub position: u64,
+    pub locations: Vec<Vec<FragmentLocation>>,
 }
 #[derive(Clone)]
 pub struct ClusterState {
@@ -343,6 +360,97 @@ fn hash64(parts: &[&[u8]]) -> u64 {
         h.update(p);
     }
     u64::from_le_bytes(h.finalize().as_bytes()[0..8].try_into().unwrap())
+}
+
+pub fn planned_erasure_layout(protection: &ProtectionLayout) -> Option<ErasureLayout> {
+    protection.erasure_layout().map(|layout| ErasureLayout {
+        scheme: match layout.scheme {
+            kagi_object_store::erasure::ErasureScheme::ReedSolomon => ErasureScheme::ReedSolomon,
+            kagi_object_store::erasure::ErasureScheme::Lrc => ErasureScheme::Lrc,
+            kagi_object_store::erasure::ErasureScheme::Msr => ErasureScheme::Msr,
+            kagi_object_store::erasure::ErasureScheme::Clay => ErasureScheme::Clay,
+        },
+        data_shards: layout.data_shards,
+        parity_shards: layout.parity_shards,
+        repair_helpers: layout.repair_helpers,
+    })
+}
+
+fn planned_object_placement(plan: &PlacementPlan, pos: u64) -> Result<PlannedObjectPlacement> {
+    let position = mask_position(pos);
+    let locations = plan
+        .locations(position)?
+        .into_iter()
+        .enumerate()
+        .map(|(fragment, targets)| {
+            targets
+                .into_iter()
+                .enumerate()
+                .map(|(replica, disk_index)| {
+                    let disk = &plan.disks[disk_index];
+                    Ok(FragmentLocation {
+                        fragment: fragment as u32,
+                        host: disk.host.clone(),
+                        disk: disk.id.clone(),
+                        checksum: None,
+                        position: Some(
+                            plan.chunk_position(position, fragment, replica, disk_index)?,
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PlannedObjectPlacement {
+        position,
+        locations,
+    })
+}
+
+/// Return the manifest's recorded destinations, or the intended layout for a new key.
+pub async fn locate_object(st: &ClusterState, key: &str) -> Result<Vec<FragmentLocation>> {
+    if let Some(manifest) = st.manifests.read().await.get(key) {
+        if !manifest.fragments.is_empty() {
+            return Ok(manifest.fragments.clone());
+        }
+        return Ok(normalize_chunks(manifest)
+            .into_iter()
+            .flat_map(|chunk| {
+                chunk
+                    .replicas
+                    .into_iter()
+                    .map(move |replica| FragmentLocation {
+                        fragment: chunk.chunk,
+                        host: replica.host,
+                        disk: replica.disk,
+                        checksum: replica.checksum,
+                        position: None,
+                    })
+            })
+            .collect());
+    }
+    let pos = hash64(&[st.cfg.id.as_bytes(), b"\0", key.as_bytes()]);
+    if let Some(plan) = &st.cfg.placement_plan {
+        return Ok(planned_object_placement(plan, pos)?
+            .locations
+            .into_iter()
+            .flatten()
+            .collect());
+    }
+    let count = st
+        .cfg
+        .erasure
+        .as_ref()
+        .map_or(st.cfg.replication, |layout| {
+            layout.data_shards + layout.parity_shards
+        });
+    Ok(
+        placement_health(&st.cfg, pos, count, st.cfg.chunk_replicas.max(1), None)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
 }
 
 fn score(pos: u64, frag: u32, replica: u32, salt: u64, h: &PeerHost, d: &PeerDisk) -> f64 {
@@ -410,69 +518,12 @@ async fn placement_health(
                 host: chosen.1.id.clone(),
                 disk: chosen.2.id.clone(),
                 checksum: None,
+                position: None,
             });
         }
         all.push(rs);
     }
     Ok(all)
-}
-
-pub fn placement(cfg: &ClusterConfig, pos: u64, n: usize) -> Result<Vec<FragmentLocation>> {
-    // compatibility: one replica per chunk
-    let rt = tokio::runtime::Handle::try_current();
-    if rt.is_ok() {
-        // synchronous callers cannot block current runtime; use equivalent unfiltered algorithm
-        let mut out = Vec::new();
-        for f in 0..n {
-            let mut c = Vec::new();
-            for h in &cfg.hosts {
-                for d in &h.disks {
-                    c.push((score(pos, f as u32, 0, cfg.placement_salt, h, d), h, d));
-                }
-            }
-            c.sort_by(|a, b| b.0.total_cmp(&a.0));
-            let x = c.first().context("no placement target")?;
-            out.push(FragmentLocation {
-                fragment: f as u32,
-                host: x.1.id.clone(),
-                disk: x.2.id.clone(),
-                checksum: None,
-            });
-        }
-        return Ok(out);
-    }
-    futures_free_placement(cfg, pos, n)
-}
-
-fn futures_free_placement(
-    cfg: &ClusterConfig,
-    pos: u64,
-    n: usize,
-) -> Result<Vec<FragmentLocation>> {
-    let mut out = Vec::new();
-    let mut used = BTreeSet::new();
-    for f in 0..n {
-        let mut c = Vec::new();
-        for h in &cfg.hosts {
-            for d in &h.disks {
-                c.push((score(pos, f as u32, 0, cfg.placement_salt, h, d), h, d));
-            }
-        }
-        c.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let x = c
-            .iter()
-            .find(|(_, h, d)| !used.contains(&(h.id.clone(), d.id.clone())))
-            .or_else(|| c.first())
-            .context("no placement target")?;
-        used.insert((x.1.id.clone(), x.2.id.clone()));
-        out.push(FragmentLocation {
-            fragment: f as u32,
-            host: x.1.id.clone(),
-            disk: x.2.id.clone(),
-            checksum: None,
-        });
-    }
-    Ok(out)
 }
 
 fn object_id(cluster: &str, key: &str, version: u64) -> String {
@@ -1165,6 +1216,7 @@ async fn rpc_store(
     data: &[u8],
 ) -> Result<()> {
     if loc.host == st.local_host {
+        validate_local_fragment_disk(st, &loc.disk).await?;
         let p = fragment_path(&st.root, &loc.disk, &h.object_id, h.version, h.fragment);
         write_fragment_at_rest(
             &st.cfg,
@@ -1224,6 +1276,67 @@ async fn rpc_store(
         bail!("peer {} returned {}", peer.id, r.status())
     }
     Ok(())
+}
+
+/// When a physical device is declared, do not acknowledge a write into the
+/// backing directory after that device is unmounted.
+async fn validate_local_fragment_disk(st: &ClusterState, disk_id: &str) -> Result<()> {
+    if st.cfg.placement_plan.is_none() {
+        return Ok(());
+    }
+    let disk = st
+        .cfg
+        .hosts
+        .iter()
+        .find(|host| host.id == st.local_host)
+        .and_then(|host| host.disks.iter().find(|disk| disk.id == disk_id))
+        .with_context(|| format!("disk {disk_id} is not configured on {}", st.local_host))?;
+    let Some(device) = &disk.device_path else {
+        return Ok(());
+    };
+
+    let mount = st.root.join("disks").join(disk_id);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let device_metadata = tokio::fs::metadata(device)
+            .await
+            .with_context(|| format!("configured disk device {device} is unavailable"))?;
+        let mount_metadata = tokio::fs::metadata(&mount)
+            .await
+            .with_context(|| format!("configured disk mount {} is unavailable", mount.display()))?;
+        anyhow::ensure!(
+            device_metadata.file_type().is_block_device()
+                && mount_metadata.is_dir()
+                && device_metadata.rdev() == mount_metadata.dev(),
+            "configured device {device} is not mounted at {}",
+            mount.display()
+        );
+        if disk.serial_number.is_some() || disk.wwn.is_some() {
+            let disk = disk.clone();
+            let usable = tokio::task::spawn_blocking(move || {
+                crate::storage::probe(
+                    disk.device_path.as_deref(),
+                    &disk.storage_kind,
+                    disk.serial_number.as_deref(),
+                    disk.wwn.as_deref(),
+                )
+                .ok
+            })
+            .await?;
+            anyhow::ensure!(
+                usable,
+                "configured device {device} failed its storage identity check"
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    bail!(
+        "cannot verify configured device {device} is mounted at {} on this platform",
+        mount.display()
+    )
 }
 
 async fn rpc_get(st: &ClusterState, loc: &FragmentLocation, m: &ObjectManifest) -> Result<Vec<u8>> {
@@ -1438,12 +1551,43 @@ async fn put_object_inner(
     let version = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64;
     let oid = object_id(&st.cfg.id, key, version);
     let checksum = blake3::hash(data).to_hex().to_string();
-    let ec = st.cfg.erasure.clone();
-    let (payloads, k, p, scheme, repair_helpers, sub_chunk_no) = if let Some(c) = &ec {
-        let e = st
-            .erasure
-            .encode(data, c.data_shards, c.parity_shards)
-            .await?;
+    let plan = st.cfg.placement_plan.as_ref();
+    let planned = plan
+        .map(|plan| planned_object_placement(plan, pos))
+        .transpose()?;
+    if let Some(planned) = &planned {
+        for target in planned.locations.iter().flatten() {
+            if !planned_target_usable(st, target, health).await {
+                bail!(
+                    "planned fragment destination {}/{} is unavailable",
+                    target.host,
+                    target.disk
+                );
+            }
+        }
+    }
+    let (encoded, replication) = match plan.map(|plan| &plan.protection) {
+        Some(ProtectionLayout::Replication { copies }) => (None, *copies),
+        Some(protection) => {
+            let layout =
+                planned_erasure_layout(protection).context("expected an erasure layout")?;
+            (Some(st.erasure.encode_layout(data, &layout).await?), 0)
+        }
+        None => {
+            let encoded = if let Some(cfg) = &st.cfg.erasure {
+                Some(
+                    st.erasure
+                        .encode(data, cfg.data_shards, cfg.parity_shards)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            (encoded, st.cfg.replication)
+        }
+    };
+    let erasure_coded = encoded.is_some();
+    let (payloads, k, p, scheme, repair_helpers, sub_chunk_no) = if let Some(e) = encoded {
         (
             e.shards,
             e.data_shards as usize,
@@ -1454,7 +1598,7 @@ async fn put_object_inner(
         )
     } else {
         (
-            (0..st.cfg.replication).map(|_| data.to_vec()).collect(),
+            (0..replication).map(|_| data.to_vec()).collect(),
             1,
             0,
             ErasureScheme::ReedSolomon,
@@ -1462,17 +1606,25 @@ async fn put_object_inner(
             0,
         )
     };
-    let desired = placement_health(
-        &st.cfg,
-        pos,
-        payloads.len(),
-        st.cfg.chunk_replicas.max(1),
-        health,
-    )
-    .await?;
-    let required = if scheme == ErasureScheme::Lrc {
+    let desired = if let Some(planned) = &planned {
+        anyhow::ensure!(
+            planned.locations.len() == payloads.len(),
+            "placement and codec disagree on fragment count"
+        );
+        planned.locations.clone()
+    } else {
+        placement_health(
+            &st.cfg,
+            pos,
+            payloads.len(),
+            st.cfg.chunk_replicas.max(1),
+            health,
+        )
+        .await?
+    };
+    let required = if planned.is_some() || scheme == ErasureScheme::Lrc {
         payloads.len()
-    } else if ec.is_some() {
+    } else if erasure_coded {
         k
     } else {
         st.cfg.write_quorum
@@ -1490,22 +1642,29 @@ async fn put_object_inner(
                 version,
                 fragment: i as u32,
                 total_fragments: payloads.len() as u32,
-                key_position: pos,
+                key_position: loc.position.unwrap_or(pos),
                 checksum: sum.clone(),
                 bytes: payload.len() as u64,
             };
-            if rpc_store(st, loc, &hdr, payload).await.is_ok() {
-                replicas.push(FragmentReplica {
-                    host: loc.host.clone(),
-                    disk: loc.disk.clone(),
-                    checksum: Some(sum.clone()),
-                });
-                flat.push(FragmentLocation {
-                    fragment: i as u32,
-                    host: loc.host.clone(),
-                    disk: loc.disk.clone(),
-                    checksum: Some(sum.clone()),
-                });
+            match rpc_store(st, loc, &hdr, payload).await {
+                Ok(()) => {
+                    replicas.push(FragmentReplica {
+                        host: loc.host.clone(),
+                        disk: loc.disk.clone(),
+                        checksum: Some(sum.clone()),
+                    });
+                    let mut stored = loc.clone();
+                    stored.checksum = Some(sum.clone());
+                    flat.push(stored);
+                }
+                Err(error) if planned.is_some() => {
+                    discard_uncommitted_fragments(st, &flat, &oid, version).await;
+                    let _ = rpc_delete_replica(st, loc, &oid, version).await;
+                    return Err(error).with_context(|| {
+                        format!("store planned fragment {i} at {}/{}", loc.host, loc.disk)
+                    });
+                }
+                Err(_) => {}
             }
         }
         if !replicas.is_empty() {
@@ -1528,16 +1687,26 @@ async fn put_object_inner(
             version,
             bytes: data.len() as u64,
             checksum: checksum.clone(),
-            data_shards: if ec.is_some() { k as u16 } else { 0 },
+            data_shards: if erasure_coded { k as u16 } else { 0 },
             parity_shards: p as u16,
             erasure_scheme: scheme,
             repair_helpers,
             sub_chunk_no,
             chunks: chunks.clone(),
+            planned_placement: planned.clone(),
             worm: worm.clone(),
             fs: fs.clone(),
         },
-    )?;
+    );
+    let protected = match protected {
+        Ok(protected) => protected,
+        Err(error) => {
+            if planned.is_some() {
+                discard_uncommitted_fragments(st, &flat, &oid, version).await;
+            }
+            return Err(error);
+        }
+    };
     let m = ObjectManifest {
         key: key.into(),
         object_id: oid,
@@ -1546,21 +1715,42 @@ async fn put_object_inner(
         checksum,
         worm,
         fs,
-        data_shards: if ec.is_some() { k as u16 } else { 0 },
+        data_shards: if erasure_coded { k as u16 } else { 0 },
         parity_shards: p as u16,
         erasure_scheme: scheme,
         repair_helpers,
         sub_chunk_no,
         fragments: flat,
         chunks,
+        planned_placement: planned,
         protected_metadata: Some(protected),
         committed_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
     };
-    let mp = manifest_path(&st.root, key);
-    tokio::fs::create_dir_all(mp.parent().unwrap()).await?;
-    tokio::fs::write(&mp, serde_json::to_vec_pretty(&m)?).await?;
+    if let Err(error) = persist_manifest(&st.root, key, &m).await {
+        if m.planned_placement.is_some() {
+            discard_uncommitted_fragments(st, &m.fragments, &m.object_id, version).await;
+        }
+        return Err(error);
+    }
     st.manifests.write().await.insert(key.into(), m.clone());
     Ok(m)
+}
+
+async fn persist_manifest(root: &FsPath, key: &str, manifest: &ObjectManifest) -> Result<()> {
+    let path = manifest_path(root, key);
+    tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+    let contents = serde_json::to_vec_pretty(manifest)?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = async {
+        tokio::fs::write(&temp, contents).await?;
+        tokio::fs::rename(&temp, &path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temp).await;
+    }
+    result?;
+    Ok(())
 }
 
 /// Read older manifests with a flat fragment list through the current chunk/replica model.
@@ -1591,17 +1781,22 @@ pub async fn get_object(st: &ClusterState, key: &str) -> Result<Vec<u8>> {
     } else {
         serde_json::from_slice(&tokio::fs::read(manifest_path(&st.root, key)).await?)?
     };
+    read_manifest_object(st, &m).await
+}
+
+async fn read_manifest_object(st: &ClusterState, m: &ObjectManifest) -> Result<Vec<u8>> {
     if let Some(env) = &m.protected_metadata {
         let protected = unprotect_metadata(&st.cfg, env)?;
         if protected.object_id != m.object_id
             || protected.version != m.version
             || protected.bytes != m.bytes
             || protected.checksum != m.checksum
+            || protected.planned_placement != m.planned_placement
         {
             bail!("protected object metadata does not match manifest identity")
         }
     }
-    let chunks = normalize_chunks(&m);
+    let chunks = normalize_chunks(m);
     if m.data_shards == 0 {
         for c in &chunks {
             for r in &c.replicas {
@@ -1610,8 +1805,9 @@ pub async fn get_object(st: &ClusterState, key: &str) -> Result<Vec<u8>> {
                     host: r.host.clone(),
                     disk: r.disk.clone(),
                     checksum: r.checksum.clone(),
+                    position: None,
                 };
-                if let Ok(v) = rpc_get(st, &loc, &m).await {
+                if let Ok(v) = rpc_get(st, &loc, m).await {
                     if blake3::hash(&v).to_hex().to_string() == m.checksum {
                         return Ok(v);
                     }
@@ -1630,8 +1826,9 @@ pub async fn get_object(st: &ClusterState, key: &str) -> Result<Vec<u8>> {
                 host: r.host.clone(),
                 disk: r.disk.clone(),
                 checksum: r.checksum.clone(),
+                position: None,
             };
-            if let Ok(v) = rpc_get(st, &loc, &m).await {
+            if let Ok(v) = rpc_get(st, &loc, m).await {
                 if blake3::hash(&v).to_hex().to_string() == c.checksum {
                     shards[c.chunk as usize] = Some(v);
                     break;
@@ -1659,8 +1856,7 @@ pub async fn get_object(st: &ClusterState, key: &str) -> Result<Vec<u8>> {
 }
 
 pub async fn get_object_version(st: &ClusterState, m: &ObjectManifest) -> Result<Vec<u8>> {
-    st.manifests.write().await.insert(m.key.clone(), m.clone());
-    get_object(st, &m.key).await
+    read_manifest_object(st, m).await
 }
 
 pub async fn repair_object(st: &ClusterState, key: &str) -> Result<ObjectManifest> {
@@ -1688,6 +1884,23 @@ async fn replica_usable(
     };
     hm.usable(host, &r.disk).await
 }
+
+async fn planned_target_usable(
+    st: &ClusterState,
+    target: &FragmentLocation,
+    health: Option<&HealthMap>,
+) -> bool {
+    let Some(host) = st.cfg.hosts.iter().find(|host| host.id == target.host) else {
+        return false;
+    };
+    if !host.disks.iter().any(|disk| disk.id == target.disk) {
+        return false;
+    }
+    match health {
+        Some(health) => health.usable(host, &target.disk).await,
+        None => true,
+    }
+}
 /// Repair must verify the immutable replica, not infer presence from disk health.
 async fn replica_valid(
     st: &ClusterState,
@@ -1704,6 +1917,7 @@ async fn replica_valid(
         host: r.host.clone(),
         disk: r.disk.clone(),
         checksum: r.checksum.clone(),
+        position: None,
     };
     rpc_get(st, &loc, m)
         .await
@@ -1727,6 +1941,7 @@ async fn read_valid_chunk(
             host: r.host.clone(),
             disk: r.disk.clone(),
             checksum: r.checksum.clone(),
+            position: None,
         };
         if let Ok(v) = rpc_get(st, &loc, m).await {
             if blake3::hash(&v).to_hex().to_string() == c.checksum {
@@ -1817,6 +2032,7 @@ async fn try_exact_repair(
                 host: r.host.clone(),
                 disk: r.disk.clone(),
                 checksum: r.checksum.clone(),
+                position: None,
             };
             let got = match fetch {
                 RepairFetch::SubChunks { alpha, indices, .. } => {
@@ -1865,10 +2081,63 @@ async fn repair_object_inner(
         .context("manifest unavailable")?;
     let pos = hash64(&[st.cfg.id.as_bytes(), b"\0", key.as_bytes()]);
     let old_chunks = normalize_chunks(&old);
-    let total = if old.data_shards > 0 {
+    let layout = (old.data_shards > 0).then(|| ErasureLayout {
+        scheme: old.erasure_scheme,
+        data_shards: old.data_shards as usize,
+        parity_shards: old.parity_shards as usize,
+        repair_helpers: old.repair_helpers.map(usize::from),
+    });
+    let total = if let Some(planned) = &old.planned_placement {
+        planned.locations.len()
+    } else if old.data_shards > 0 {
         old.data_shards as usize + old.parity_shards as usize
+    } else if st.cfg.placement_plan.is_some() {
+        old_chunks
+            .iter()
+            .map(|chunk| chunk.chunk as usize + 1)
+            .max()
+            .unwrap_or(0)
     } else {
         st.cfg.replication
+    };
+    let planned = if let Some(previous) = &old.planned_placement {
+        let protected = old
+            .protected_metadata
+            .as_ref()
+            .context("planned placement has no protected metadata")?;
+        anyhow::ensure!(
+            unprotect_metadata(&st.cfg, protected)?
+                .planned_placement
+                .as_ref()
+                == Some(previous),
+            "planned placement does not match protected metadata"
+        );
+        if let Some(plan) = st.cfg.placement_plan.as_ref().filter(|plan| {
+            plan.protection.fragments() == total
+                && planned_erasure_layout(&plan.protection) == layout
+        }) {
+            Some(planned_object_placement(plan, previous.position)?)
+        } else {
+            Some(previous.clone())
+        }
+    } else {
+        None
+    };
+    let desired = if let Some(planned) = &planned {
+        planned.locations.clone()
+    } else {
+        let replicas = if st.cfg.placement_plan.is_some() {
+            // Plan-derived settings apply to new versions. Preserve the
+            // observed replication level of a pre-plan object version.
+            old_chunks
+                .iter()
+                .map(|chunk| chunk.replicas.len())
+                .max()
+                .unwrap_or(1)
+        } else {
+            st.cfg.chunk_replicas
+        };
+        placement_health(&st.cfg, pos, total, replicas.max(1), health).await?
     };
     let exact = try_exact_repair(st, &old, health).await.ok().flatten();
     let mut payload_cache: Vec<Option<Vec<u8>>> = vec![None; total];
@@ -1897,15 +2166,9 @@ async fn repair_object_inner(
         }
         if unavailable > 0 && payload_cache.iter().all(|x| x.is_none()) {
             let data = get_object(st, key).await?;
-            let layout = ErasureLayout {
-                scheme: old.erasure_scheme,
-                data_shards: old.data_shards as usize,
-                parity_shards: old.parity_shards as usize,
-                repair_helpers: old.repair_helpers.map(|x| x as usize),
-            };
             payload_cache = st
                 .erasure
-                .encode_layout(&data, &layout)
+                .encode_layout(&data, &layout.expect("encoded object has a layout"))
                 .await?
                 .shards
                 .into_iter()
@@ -1916,8 +2179,6 @@ async fn repair_object_inner(
         let data = get_object(st, key).await?;
         payload_cache = (0..total).map(|_| Some(data.clone())).collect();
     }
-    let desired =
-        placement_health(&st.cfg, pos, total, st.cfg.chunk_replicas.max(1), health).await?;
     let mut chunks = Vec::with_capacity(total);
     let mut flat = Vec::new();
     for i in 0..total {
@@ -1929,6 +2190,9 @@ async fn repair_object_inner(
         let mut bytes = oldc.as_ref().map(|c| c.bytes).unwrap_or(0);
         let mut replicas = Vec::new();
         for target in &desired[i] {
+            if planned.is_some() && !planned_target_usable(st, target, health).await {
+                continue;
+            }
             let existing = oldc.as_ref().and_then(|c| {
                 c.replicas
                     .iter()
@@ -1959,7 +2223,7 @@ async fn repair_object_inner(
                     version: old.version,
                     fragment: i as u32,
                     total_fragments: total as u32,
-                    key_position: pos,
+                    key_position: target.position.unwrap_or(pos),
                     checksum: checksum.clone(),
                     bytes,
                 };
@@ -1971,15 +2235,12 @@ async fn repair_object_inner(
                     disk: target.disk.clone(),
                     checksum: Some(checksum.clone()),
                 });
-                flat.push(FragmentLocation {
-                    fragment: i as u32,
-                    host: target.host.clone(),
-                    disk: target.disk.clone(),
-                    checksum: Some(checksum.clone()),
-                });
+                let mut stored = target.clone();
+                stored.checksum = Some(checksum.clone());
+                flat.push(stored);
             }
         }
-        if replicas.is_empty() {
+        if planned.is_none() && replicas.is_empty() {
             bail!("repair left chunk {i} without a replica")
         }
         chunks.push(ChunkMetadata {
@@ -1988,6 +2249,47 @@ async fn repair_object_inner(
             checksum,
             replicas,
         });
+    }
+    let fully_placed = chunks
+        .iter()
+        .zip(&desired)
+        .all(|(chunk, targets)| chunk.replicas.len() == targets.len());
+    if planned.is_some() && !fully_placed {
+        // Until every planned destination is verified, preserve the entire old
+        // stripe. Its replicas can include temporarily unreachable disks.
+        for previous_chunk in old_chunks {
+            let Some(chunk) = chunks.get_mut(previous_chunk.chunk as usize) else {
+                continue;
+            };
+            for replica in previous_chunk.replicas {
+                if chunk
+                    .replicas
+                    .iter()
+                    .any(|r| r.host == replica.host && r.disk == replica.disk)
+                {
+                    continue;
+                }
+                let position = old
+                    .fragments
+                    .iter()
+                    .find(|location| {
+                        location.fragment == chunk.chunk
+                            && location.host == replica.host
+                            && location.disk == replica.disk
+                    })
+                    .and_then(|location| location.position);
+                flat.push(FragmentLocation {
+                    fragment: chunk.chunk,
+                    host: replica.host.clone(),
+                    disk: replica.disk.clone(),
+                    checksum: replica.checksum.clone(),
+                    position,
+                });
+                chunk.replicas.push(replica);
+            }
+        }
+    } else {
+        old.planned_placement = planned;
     }
     old.fragments = flat;
     old.chunks = chunks.clone();
@@ -2004,16 +2306,13 @@ async fn repair_object_inner(
             repair_helpers: old.repair_helpers,
             sub_chunk_no: old.sub_chunk_no,
             chunks,
+            planned_placement: old.planned_placement.clone(),
             worm: old.worm.clone(),
             fs: old.fs.clone(),
         },
     )?);
+    persist_manifest(&st.root, key, &old).await?;
     st.manifests.write().await.insert(key.into(), old.clone());
-    tokio::fs::write(
-        manifest_path(&st.root, key),
-        serde_json::to_vec_pretty(&old)?,
-    )
-    .await?;
     Ok(old)
 }
 
@@ -2033,6 +2332,7 @@ pub async fn scrub_object(st: &ClusterState, key: &str) -> Result<BTreeMap<Strin
                 host: r.host.clone(),
                 disk: r.disk.clone(),
                 checksum: r.checksum,
+                position: None,
             };
             let good = rpc_get(st, &loc, &m)
                 .await
@@ -2067,16 +2367,11 @@ fn join_authorized(cfg: &ClusterConfig, headers: &axum::http::HeaderMap) -> bool
 async fn rpc_delete_replica(
     st: &ClusterState,
     loc: &FragmentLocation,
-    manifest: &ObjectManifest,
+    object: &str,
+    version: u64,
 ) -> Result<()> {
     if loc.host == st.local_host {
-        let path = fragment_path(
-            &st.root,
-            &loc.disk,
-            &manifest.object_id,
-            manifest.version,
-            loc.fragment,
-        );
+        let path = fragment_path(&st.root, &loc.disk, object, version, loc.fragment);
         match tokio::fs::remove_file(path).await {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2093,7 +2388,7 @@ async fn rpc_delete_replica(
         .context("peer missing")?;
     let path = format!(
         "/internal/v1/fragment/{}/{}/{}/{}",
-        manifest.object_id, manifest.version, loc.fragment, loc.disk
+        object, version, loc.fragment, loc.disk
     );
 
     #[cfg(feature = "quic")]
@@ -2114,6 +2409,17 @@ async fn rpc_delete_replica(
         bail!("peer delete {}", response.status());
     }
     Ok(())
+}
+
+async fn discard_uncommitted_fragments(
+    st: &ClusterState,
+    replicas: &[FragmentLocation],
+    object: &str,
+    version: u64,
+) {
+    for replica in replicas {
+        let _ = rpc_delete_replica(st, replica, object, version).await;
+    }
 }
 
 /// Remove obsolete physical replicas only after the replacement manifest has
@@ -2141,7 +2447,7 @@ pub async fn cleanup_rebalanced_replicas(
             location.host.clone(),
             location.disk.clone(),
         )) {
-            rpc_delete_replica(st, location, old).await?;
+            rpc_delete_replica(st, location, &old.object_id, old.version).await?;
         }
     }
     Ok(())
@@ -2248,6 +2554,12 @@ async fn dispatch_internal_fragment(
                 return InternalFragmentResult::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     b"checksum mismatch".to_vec(),
+                );
+            }
+            if let Err(error) = validate_local_fragment_disk(st, &disk).await {
+                return InternalFragmentResult::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.to_string().into_bytes(),
                 );
             }
             match write_fragment_at_rest(
@@ -2541,6 +2853,7 @@ mod at_rest_encryption_tests {
         ClusterConfig {
             id: "test-cluster".into(),
             placement_salt: 1,
+            placement_plan: None,
             hosts: Vec::new(),
             replication: 3,
             write_quorum: 2,
@@ -2552,6 +2865,236 @@ mod at_rest_encryption_tests {
             join_key_hash_hex: None,
             transport: DataTransportConfig::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn planned_write_locate_and_repair_use_the_same_targets() {
+        use crate::recovery::{disk_key, ResourceHealth};
+        use kagi_object_store::placement::{DomainDisk, FailureBudget};
+
+        let (mut state, root) = crate::security_integration_tests::fixture().await;
+        let mut cfg = (*state.data.cfg).clone();
+        let mut listeners = Vec::new();
+        for _ in &cfg.hosts {
+            listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        }
+        for (host, listener) in cfg.hosts.iter_mut().zip(&listeners) {
+            host.endpoint = format!("http://{}", listener.local_addr().unwrap());
+            for disk in &mut host.disks {
+                disk.storage_kind = StorageKind::Directory;
+                disk.device_path = None;
+                disk.serial_number = None;
+            }
+        }
+        let disks = cfg
+            .hosts
+            .iter()
+            .flat_map(|host| {
+                host.disks.iter().map(|disk| DomainDisk {
+                    id: disk.id.clone(),
+                    host: host.id.clone(),
+                    site: host.site.clone(),
+                    rack: host.rack.clone(),
+                    networks: Vec::new(),
+                })
+            })
+            .collect();
+        let plan = PlacementPlan {
+            salt: 18,
+            disks,
+            protection: ProtectionLayout::ReedSolomon { k: 2, m: 4 },
+            chunk_replicas: 1,
+            max_fragments_per_host: 1,
+            max_fragments_per_disk: 1,
+            tolerate: FailureBudget {
+                racks: 1,
+                hosts: 1,
+                disks: 1,
+                ..Default::default()
+            },
+            acknowledged_unsafe_two_site: true,
+        };
+        plan.validate_tolerance().unwrap();
+        let raw_join_key = [0x4a; 32];
+        cfg.join_key_hash_hex = Some(blake3::hash(&raw_join_key).to_hex().to_string());
+        cfg.placement_plan = Some(plan.clone());
+        state.data.cfg = Arc::new(cfg);
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-kagi-join-key", B64.encode(raw_join_key).parse().unwrap());
+        state.data.client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
+        let identity = state.data.pq_identity.as_ref().unwrap();
+        state.data.pq_keys.keys.write().await.insert(
+            identity.key_id.clone(),
+            crate::pq::TrustedPqKey {
+                key_id: identity.key_id.clone(),
+                node_id: identity.node_id.clone(),
+                public_key_b64: crate::pq::public_key_b64(&root.join("public")).unwrap(),
+                not_before_ms: 0,
+                not_after_ms: None,
+                revoked: false,
+            },
+        );
+        let mut servers = Vec::new();
+        for (host, listener) in state.data.cfg.hosts.iter().zip(listeners) {
+            if host.id == state.data.local_host {
+                continue;
+            }
+            let mut peer = state.data.clone();
+            peer.local_host = host.id.clone();
+            peer.root = root.join(&host.id);
+            servers.push(tokio::spawn(async move {
+                axum::serve(listener, internal_router(peer)).await.unwrap();
+            }));
+        }
+
+        let key = "planned/test";
+        let content = b"one object placed using the validated plan";
+        let expected = locate_object(&state.data, key).await.unwrap();
+        assert_eq!(expected.len(), 6);
+        for target in &expected {
+            let disk = plan.disk_at(target.position.unwrap()).unwrap();
+            assert_eq!((&disk.host, &disk.id), (&target.host, &target.disk));
+        }
+        let manifest = put_object(&state.data, key, content).await.unwrap();
+        assert_eq!(manifest.erasure_scheme, ErasureScheme::ReedSolomon);
+        let actual = locate_object(&state.data, key).await.unwrap();
+        assert_eq!(actual, manifest.fragments);
+        let planned = manifest.planned_placement.as_ref().unwrap();
+        assert_eq!(
+            planned
+                .locations
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(get_object(&state.data, key).await.unwrap(), content);
+
+        let offline = &actual[0];
+        let offline_key = disk_key(&offline.host, &offline.disk);
+        let failure: ResourceHealth = serde_json::from_value(serde_json::json!({
+            "state": "down", "last_seen_ms": 0, "since_ms": 0,
+        }))
+        .unwrap();
+        state
+            .health
+            .resources
+            .write()
+            .await
+            .insert(offline_key.clone(), failure);
+        assert!(put_object_inner(
+            &state.data,
+            key,
+            b"rejected write",
+            Some(&state.health),
+            WormPolicy::default(),
+            None
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("unavailable"));
+        assert_eq!(locate_object(&state.data, key).await.unwrap(), actual);
+
+        for victim in [&actual[0], &actual[1]] {
+            rpc_delete_replica(&state.data, victim, &manifest.object_id, manifest.version)
+                .await
+                .unwrap();
+        }
+        let recovered = repair_object_with_health(&state.data, key, &state.health)
+            .await
+            .unwrap();
+        assert_eq!(recovered.planned_placement, manifest.planned_placement);
+        let scrub = scrub_object(&state.data, key).await.unwrap();
+        assert!(
+            !scrub[&format!(
+                "chunk{}:{}/{}",
+                offline.fragment, offline.host, offline.disk
+            )]
+        );
+        assert_eq!(scrub.values().filter(|healthy| **healthy).count(), 5);
+        assert_eq!(get_object(&state.data, key).await.unwrap(), content);
+        state.health.resources.write().await.remove(&offline_key);
+        repair_object_with_health(&state.data, key, &state.health)
+            .await
+            .unwrap();
+        assert!(scrub_object(&state.data, key)
+            .await
+            .unwrap()
+            .values()
+            .all(|ok| *ok));
+
+        // A renamed/archived alias still addresses the original version's position.
+        let position = planned.position;
+        let previous = &planned.locations;
+        let mut replacement = plan.clone();
+        let next = loop {
+            replacement.salt += 1;
+            let next = planned_object_placement(&replacement, position).unwrap();
+            if let Some(target) = next.locations.iter().flatten().find(|target| {
+                previous[target.fragment as usize]
+                    .iter()
+                    .all(|old| old.host != target.host || old.disk != target.disk)
+            }) {
+                break (next.clone(), disk_key(&target.host, &target.disk));
+            }
+        };
+        let (next, new_offline_key) = next;
+        let mut cfg = (*state.data.cfg).clone();
+        cfg.placement_plan = Some(replacement);
+        state.data.cfg = Arc::new(cfg);
+        let alias = "planned/alias";
+        let mut renamed = state.data.manifests.read().await.get(key).unwrap().clone();
+        renamed.key = alias.to_owned();
+        state
+            .data
+            .manifests
+            .write()
+            .await
+            .insert(alias.to_owned(), renamed.clone());
+        let failure: ResourceHealth = serde_json::from_value(serde_json::json!({
+            "state": "down", "last_seen_ms": 0, "since_ms": 0,
+        }))
+        .unwrap();
+        state
+            .health
+            .resources
+            .write()
+            .await
+            .insert(new_offline_key.clone(), failure);
+        let partial = repair_object_with_health(&state.data, alias, &state.health)
+            .await
+            .unwrap();
+        assert_eq!(partial.planned_placement, renamed.planned_placement);
+        assert!(renamed
+            .fragments
+            .iter()
+            .all(|old| partial.fragments.iter().any(|current| {
+                (current.fragment, &current.host, &current.disk)
+                    == (old.fragment, &old.host, &old.disk)
+            })));
+        state
+            .health
+            .resources
+            .write()
+            .await
+            .remove(&new_offline_key);
+        let migrated = repair_object_with_health(&state.data, alias, &state.health)
+            .await
+            .unwrap();
+        assert_eq!(migrated.planned_placement, Some(next));
+        assert_eq!(migrated.fragments.len(), expected.len());
+        assert_eq!(get_object(&state.data, alias).await.unwrap(), content);
+
+        for server in servers {
+            server.abort();
+            let _ = server.await;
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]

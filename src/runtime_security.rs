@@ -18,7 +18,7 @@ pub struct Finding {
     pub recommendation: String,
 }
 /// Keep a consistent finding schema for CLI, API and change notifications.
-fn finding(
+pub fn finding(
     id: &str,
     severity: &str,
     resource: &str,
@@ -34,6 +34,44 @@ fn finding(
     }
 }
 
+pub fn placement_findings(cfg: &NodeConfig) -> Vec<Finding> {
+    if cfg
+        .cluster
+        .placement_plan
+        .as_ref()
+        .is_some_and(PlacementPlan::unsafe_two_site)
+    {
+        return vec![finding(
+            "integrity.unsafe_two_site",
+            "critical",
+            "cluster",
+            "Dangerous two-site configuration. Losing either site can make objects unavailable.",
+            "Deploy a placement plan that tolerates site loss and verify the Raft voter layout independently.",
+        )];
+    }
+    if cfg.cluster.placement_plan.is_none() {
+        let sites = cfg
+            .cluster
+            .hosts
+            .iter()
+            .filter_map(|host| host.site.as_ref())
+            .collect::<BTreeSet<_>>();
+        let message = if sites.len() == 2 {
+            "This two-site cluster has no validated placement plan. Losing either site can make objects unavailable."
+        } else {
+            "This cluster has no validated placement plan. Object failure tolerance has not been established."
+        };
+        return vec![finding(
+            "integrity.unvalidated_placement",
+            "warning",
+            "cluster",
+            message,
+            "Generate a placement plan with kagi-config and configure each node to use it.",
+        )];
+    }
+    Vec::new()
+}
+
 /// Configuration-only checks also work through the audit CLI before a node is started.
 pub fn audit_config(cfg: &NodeConfig) -> Vec<Finding> {
     let mut findings = vec![finding(
@@ -43,6 +81,7 @@ pub fn audit_config(cfg: &NodeConfig) -> Vec<Finding> {
         "Durability modeling does not replace backups or restore exercises.",
         "Keep an independent backup, test restores, and protect configuration/key material from rollback.",
     )];
+    findings.extend(placement_findings(cfg));
     if !cfg.listen.starts_with("127.0.0.1:") && !cfg.listen.starts_with("[::1]:") {
         findings.push(finding(
             "transport.public_listener",
@@ -167,6 +206,16 @@ pub fn audit_config(cfg: &NodeConfig) -> Vec<Finding> {
 pub async fn audit_runtime(st: &V6State) -> Vec<Finding> {
     let mut findings = audit_config(&st.node_config);
     let state = st.meta.store.state().await;
+    findings.extend(
+        protection_status(
+            &st.node_config,
+            state.membership.as_ref(),
+            state.joint_membership.as_ref(),
+        )
+        .warnings
+        .into_iter()
+        .filter(|finding| finding.resource == "metadata"),
+    );
     for manifest in state.manifests.values() {
         if let Some(metadata) = &manifest.fs {
             if metadata.acl.entries.iter().any(|ace| {
@@ -257,6 +306,7 @@ pub async fn status(State(st): State<V6State>, headers: axum::http::HeaderMap) -
         return webui::unauthorized();
     }
     Json(serde_json::json!({
+        "protection": st.protection_status().await,
         "kernel_enabled": st.security.config.kernel.enabled,
         "kernel_audit_only": st.security.config.kernel.audit_only,
         "kernel_rule_count": st.security.config.kernel.rules.len(),

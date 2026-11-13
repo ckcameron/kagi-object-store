@@ -160,6 +160,9 @@ pub enum MetadataCommand {
         key: String,
         manifest: ObjectManifest,
     },
+    UpdateManifestPlacement {
+        manifest: ObjectManifest,
+    },
     DeleteManifest {
         key: String,
         version: u64,
@@ -416,6 +419,47 @@ pub(crate) fn apply_namespace_mutation(s: &mut MetadataState, m: NamespaceMutati
     }
 }
 
+/// Refresh locations for existing references without recreating a deleted key,
+/// replacing a newer head, or modifying a snapshot's selected object version.
+fn update_manifest_placement(state: &mut MetadataState, repaired: &ObjectManifest) {
+    let refresh = |manifest: &mut ObjectManifest| {
+        if manifest.object_id == repaired.object_id
+            && manifest.version == repaired.version
+            && manifest.checksum == repaired.checksum
+            && manifest.bytes == repaired.bytes
+        {
+            manifest.fragments.clone_from(&repaired.fragments);
+            manifest.chunks.clone_from(&repaired.chunks);
+            manifest
+                .planned_placement
+                .clone_from(&repaired.planned_placement);
+            manifest
+                .protected_metadata
+                .clone_from(&repaired.protected_metadata);
+        }
+    };
+    state.manifests.values_mut().for_each(refresh);
+    state.versions.values_mut().flatten().for_each(refresh);
+    for snapshot in state.snapshots.values_mut() {
+        for object in snapshot.objects.values_mut() {
+            refresh(&mut object.source);
+            if let Some(archived) = &mut object.archived {
+                refresh(archived);
+            }
+        }
+    }
+    for volume in state.volumes.values_mut() {
+        for extent in volume.extents.values_mut() {
+            refresh(&mut extent.manifest);
+        }
+    }
+    for upload in state.s3_uploads.values_mut() {
+        for part in upload.parts.values_mut() {
+            refresh(&mut part.manifest);
+        }
+    }
+}
+
 // Metadata state-machine persistence and ordered application
 impl MetadataStore {
     /// Load the applied metadata snapshot. Backfill historical version lists for snapshots
@@ -461,6 +505,9 @@ impl MetadataStore {
                 }
                 s.delete_markers.remove(&key);
                 s.manifests.insert(key, manifest);
+            }
+            MetadataCommand::UpdateManifestPlacement { manifest } => {
+                update_manifest_placement(&mut s, &manifest);
             }
             MetadataCommand::DeleteManifest {
                 key,
@@ -709,6 +756,10 @@ impl MetadataStore {
     }
     pub async fn state(&self) -> MetadataState {
         self.state.read().await.clone()
+    }
+    pub async fn memberships(&self) -> (Option<Membership>, Option<JointMembership>) {
+        let state = self.state.read().await;
+        (state.membership.clone(), state.joint_membership.clone())
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -1407,6 +1458,102 @@ impl RaftNode {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn repair_refreshes_pinned_versions_without_resurrecting_a_head() {
+        let (state, root) = crate::security_integration_tests::fixture().await;
+        let store = state.meta.store;
+        let original: ObjectManifest = serde_json::from_value(serde_json::json!({
+            "key": "bucket/file", "object_id": "source", "version": 1,
+            "bytes": 17, "checksum": "same", "committed_at_unix_ms": 0,
+            "fragments": [{"fragment": 0, "host": "old", "disk": "disk-1"}]
+        }))
+        .unwrap();
+        let key = original.key.clone();
+        let alias = "bucket/alias".to_string();
+        let mut aliased = original.clone();
+        aliased.key.clone_from(&alias);
+        store
+            .apply(
+                1,
+                MetadataCommand::NamespaceTransaction {
+                    txid: "copy".into(),
+                    mutations: vec![
+                        NamespaceMutation::PutManifest {
+                            key: key.clone(),
+                            manifest: Box::new(original.clone()),
+                        },
+                        NamespaceMutation::PutManifest {
+                            key: alias.clone(),
+                            manifest: Box::new(aliased),
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                2,
+                MetadataCommand::CreateSnapshot {
+                    snapshot: SnapshotRecord {
+                        id: "snapshot".into(),
+                        name: "snapshot".into(),
+                        created_at_unix_ms: 0,
+                        raft_index: 1,
+                        prefix: None,
+                        mode: SnapshotMode::PointInTime,
+                        objects: BTreeMap::from([(
+                            key.clone(),
+                            SnapshotObject {
+                                key: key.clone(),
+                                version: 1,
+                                source: original.clone(),
+                                archived: None,
+                            },
+                        )]),
+                        logical_bytes: 17,
+                        delta_bytes: 0,
+                        archived_bytes: 0,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply(
+                3,
+                MetadataCommand::PutDeleteMarker {
+                    key: key.clone(),
+                    version: 2,
+                    created_unix_ms: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let mut repaired = original;
+        repaired.fragments[0].host = "new".into();
+        store
+            .apply(
+                4,
+                MetadataCommand::UpdateManifestPlacement { manifest: repaired },
+            )
+            .await
+            .unwrap();
+        assert!(store.get(&key).await.is_none());
+        assert_eq!(
+            store.get_version(&key, 1).await.unwrap().fragments[0].host,
+            "new"
+        );
+        let aliased = store.get(&alias).await.unwrap();
+        assert_eq!(aliased.key, alias);
+        assert_eq!(aliased.fragments[0].host, "new");
+        let persisted = MetadataStore::open(store.root.clone()).await.unwrap();
+        let snapshot = &persisted.state().await.snapshots["snapshot"];
+        assert_eq!(snapshot.objects[&key].source.fragments[0].host, "new");
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
     #[tokio::test]
     async fn archive_replay_and_gc_fence_survive_restart() {
         let (state, root) = crate::security_integration_tests::fixture().await;
