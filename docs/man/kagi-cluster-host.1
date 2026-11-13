@@ -34,6 +34,7 @@ controllers for health, repair, maintenance, and snapshots.
 .TP
 .B status
 Print the local node and cluster summary as JSON.
+Status reports any dangerous two-site exception and Raft quorum risks.
 .TP
 .B audit
 Validate the configured security policy and print its effective configuration
@@ -50,10 +51,11 @@ Retrieve the current object and write its bytes to
 .IR OUTPUT .
 .TP
 .BI "locate " KEY
-Print the current fragment placement for an object.
+Print recorded fragment destinations or the intended destinations for a new key.
 .TP
 .BI "repair " KEY
 Repair missing or damaged fragments using the object's protection policy.
+For a planned object, send PUT /v1/repair/<key> to the active Raft leader to commit the updated locations.
 .TP
 .BI "scrub " KEY
 Verify fragment checksums and readability.
@@ -101,6 +103,10 @@ When
 is set, the operations console is available under
 .BR /ui .
 Protect the browser login and session traffic with TLS.
+.SH PLANNED DEPLOYMENTS
+Configure planner_output.path and planner_output.policy in each node YAML to load a validated deployment.
+The configured hosts, racks, sites and disks must match the deployment.
+An acknowledged dangerous two-site configuration displays a persistent red banner in the web console.
 .SH SEE ALSO
 .BR kagi-config (1),
 .BR kagi-host (1),

@@ -25,6 +25,8 @@ mod identity;
 mod maintenance;
 #[path = "../monitoring.rs"]
 mod monitoring;
+#[path = "../planner_output.rs"]
+mod planner_output;
 #[path = "../pq.rs"]
 mod pq;
 #[cfg(feature = "quic")]
@@ -74,7 +76,11 @@ use filesystem::{
     now_ms, reconstruct_bottom_up, Ace, AuthIdentity, ChildRef, FsIndex, FsMetadata, FsObjectType,
     IndexEntry, IndexSnapshot, ObjectAcl,
 };
+use kagi_object_store::placement::{
+    validate_metadata_tolerance, DomainDisk, PlacementPlan, ProtectionLayout, KEYSPACE_BITS,
+};
 use maintenance::{MaintenanceConfig, MaintenanceManager};
+use planner_output::PlannerOutputRef;
 use pq::{LocalPqIdentity, RuntimeKeyring, TrustedPqKey};
 use raftmeta::{
     AppendRequest, BucketRecord, GarbageRecord, Membership, MetadataCommand, MetadataStore,
@@ -84,7 +90,13 @@ use raftmeta::{
 use recovery::{object_risk, HealthMap, Heartbeat, RecoveryConfig};
 use serde::Deserialize;
 use serde::Serialize;
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::IsTerminal,
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio::{net::TcpListener, sync::RwLock};
 use webui::{ConsoleRole, WebConsoleConfig};
 
@@ -192,6 +204,8 @@ struct NodeConfig {
     #[serde(default)]
     security: security::Config,
     cluster: ClusterConfig,
+    #[serde(default)]
+    planner_output: Option<PlannerOutputRef>,
     metadata: MetadataConfig,
     #[serde(default)]
     tls: Option<TlsConfig>,
@@ -368,7 +382,120 @@ fn pq_required() -> bool {
 }
 
 fn load(p: &PathBuf) -> Result<NodeConfig> {
-    Ok(serde_saphyr::from_str(&fs::read_to_string(p)?)?)
+    let input = fs::read_to_string(p)?;
+    let mut config: NodeConfig = serde_saphyr::from_str(&input)?;
+    if let Some(reference) = &config.planner_output {
+        anyhow::ensure!(
+            config.cluster.placement_plan.is_none(),
+            "configure only one of planner_output and cluster.placement_plan"
+        );
+        let (plan, key_hash) = reference.load(p)?;
+        if let Some(configured) = &config.cluster.join_key_hash_hex {
+            anyhow::ensure!(
+                configured == &key_hash,
+                "cluster.join_key_hash_hex conflicts with the planner output"
+            );
+        }
+        config.cluster.join_key_hash_hex = Some(key_hash);
+        config.cluster.placement_plan = Some(plan);
+    }
+    if let Some(plan) = config.cluster.placement_plan.take() {
+        let raw: serde_json::Value = serde_saphyr::from_str(&input)?;
+        apply_placement_plan(&mut config.cluster, plan, &raw["cluster"])?;
+    }
+    Ok(config)
+}
+
+fn apply_placement_plan(
+    cluster: &mut ClusterConfig,
+    plan: PlacementPlan,
+    specified: &serde_json::Value,
+) -> Result<()> {
+    plan.validate_tolerance()
+        .context("invalid placement plan")?;
+    let mut disks = BTreeMap::new();
+    let mut hosts = BTreeSet::new();
+    for host in &cluster.hosts {
+        anyhow::ensure!(hosts.insert(&host.id), "duplicate host {}", host.id);
+        for disk in &host.disks {
+            let id = (&host.id, &disk.id);
+            anyhow::ensure!(
+                disks.insert(id, (&host.site, &host.rack)).is_none(),
+                "duplicate disk {} on host {}",
+                disk.id,
+                host.id
+            );
+        }
+    }
+    anyhow::ensure!(
+        disks.len() == plan.disks.len(),
+        "cluster.hosts must list the exact disk set in the placement plan"
+    );
+    for disk in &plan.disks {
+        anyhow::ensure!(
+            disks.get(&(&disk.host, &disk.id)) == Some(&(&disk.site, &disk.rack)),
+            "host {} disk {} or its site/rack labels differ from the placement plan",
+            disk.host,
+            disk.id
+        );
+    }
+    let replication = match &plan.protection {
+        ProtectionLayout::Replication { copies } => *copies,
+        _ => cluster.replication,
+    };
+    for (name, expected) in [
+        ("chunk_replicas", serde_json::json!(plan.chunk_replicas)),
+        ("replication", serde_json::json!(replication)),
+    ] {
+        require_plan_value(specified, name, expected)?;
+    }
+    cluster.chunk_replicas = plan.chunk_replicas;
+    cluster.replication = replication;
+
+    let erasure = specified.get("erasure");
+    if let Some(layout) = cluster::planned_erasure_layout(&plan.protection) {
+        anyhow::ensure!(
+            !erasure.is_some_and(serde_json::Value::is_null),
+            "cluster.erasure conflicts with the placement plan"
+        );
+        if let Some(settings) = erasure {
+            for (name, expected) in [
+                ("scheme", serde_json::json!(layout.scheme)),
+                ("data_shards", serde_json::json!(layout.data_shards)),
+                ("parity_shards", serde_json::json!(layout.parity_shards)),
+                ("repair_helpers", serde_json::json!(layout.repair_helpers)),
+            ] {
+                require_plan_value(settings, name, expected)
+                    .with_context(|| format!("erasure setting {name}"))?;
+            }
+        }
+        let config = cluster.erasure.get_or_insert_with(Default::default);
+        config.scheme = layout.scheme;
+        config.data_shards = layout.data_shards;
+        config.parity_shards = layout.parity_shards;
+        config.repair_helpers = layout.repair_helpers;
+    } else {
+        anyhow::ensure!(
+            cluster.erasure.is_none(),
+            "cluster.erasure conflicts with replication protection in the placement plan"
+        );
+    }
+    cluster.placement_plan = Some(plan);
+    Ok(())
+}
+
+fn require_plan_value(
+    specified: &serde_json::Value,
+    name: &str,
+    expected: serde_json::Value,
+) -> Result<()> {
+    if let Some(configured) = specified.get(name) {
+        anyhow::ensure!(
+            configured == &expected,
+            "configured {name} conflicts with the placement plan"
+        );
+    }
+    Ok(())
 }
 
 fn validate_pq(c: &NodeConfig) -> Result<()> {
@@ -640,16 +767,6 @@ fn state(
         quic,
     })
 }
-
-// Legacy/public object handlers (superseded paths retained for compatibility)
-async fn api_get(State(st): State<ClusterState>, Path(key): Path<String>) -> impl IntoResponse {
-    match get_object(&st, &key).await {
-        Ok(v) => (StatusCode::OK, v).into_response(),
-        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
-    }
-}
-
-// Unified cluster runtime state and linearizable commit helpers
 #[derive(Clone)]
 struct V6State {
     security: security::Security,
@@ -668,9 +785,188 @@ struct V6State {
     telemetry: telemetry::TelemetryStore,
 }
 
-/// Overlay committed capacity additions on the node's bootstrap topology.
+#[derive(Serialize)]
+struct ProtectionStatus {
+    plan_validated: bool,
+    unsafe_two_site: bool,
+    keyspace_bits: u8,
+    metadata_sites_without_quorum: Vec<String>,
+    metadata_budget_validated: Option<bool>,
+    metadata_network_paths: Option<&'static str>,
+    warnings: Vec<runtime_security::Finding>,
+}
+
+/// Raft availability depends on voter placement independently of fragment recovery.
+fn protection_status(
+    cfg: &NodeConfig,
+    membership: Option<&Membership>,
+    joint_membership: Option<&raftmeta::JointMembership>,
+) -> ProtectionStatus {
+    let plan = cfg.cluster.placement_plan.as_ref();
+    let unsafe_two_site = plan.is_some_and(PlacementPlan::unsafe_two_site);
+    let mut warnings = runtime_security::placement_findings(cfg);
+    let fallback =
+        Membership::from_local_and_peers(&cfg.metadata.node_id, String::new(), &cfg.metadata.peers);
+    let membership = membership.unwrap_or(&fallback);
+    let memberships = match joint_membership {
+        Some(joint) => vec![&joint.old, &joint.new],
+        None => vec![membership],
+    };
+    let voter_layouts: Vec<_> = memberships
+        .into_iter()
+        .map(|membership| (membership.quorum(), voter_failure_domains(cfg, membership)))
+        .collect();
+    let sites: BTreeSet<_> = cfg
+        .cluster
+        .hosts
+        .iter()
+        .filter_map(|host| host.site.as_deref())
+        .chain(
+            voter_layouts
+                .iter()
+                .flat_map(|(_, voters)| voters.iter().filter_map(|voter| voter.site.as_deref())),
+        )
+        .collect();
+    let mut metadata_sites_without_quorum = Vec::new();
+    for site in sites {
+        let retains_quorum = voter_layouts.iter().all(|(quorum, voters)| {
+            voters
+                .iter()
+                .filter_map(|voter| voter.site.as_deref())
+                .filter(|voter_site| *voter_site != site)
+                .count()
+                >= *quorum
+        });
+        if !retains_quorum {
+            metadata_sites_without_quorum.push(site.to_string());
+        }
+    }
+    if !metadata_sites_without_quorum.is_empty() {
+        warnings.push(runtime_security::finding(
+            "integrity.metadata_site_quorum",
+            "warning",
+            "metadata",
+            &format!(
+                "Metadata quorum is not guaranteed after losing any of these sites: {}. Objects may become unavailable even when their chunks can be reconstructed.",
+                metadata_sites_without_quorum.join(", ")
+            ),
+            "Place Raft voters in independent failure domains with a surviving majority after each site loss.",
+        ));
+    }
+    let metadata_budget_validated = plan.map(|plan| {
+        let mut budget = plan.tolerate.clone();
+        budget.disks = 0;
+        let result = voter_layouts.iter().try_for_each(|(quorum, voters)| {
+            if let Some(voter) = voters.iter().find(|voter| {
+                voter.site.is_none()
+                    || voter.rack.is_none()
+                    || (budget.networks > 0 && voter.networks.is_empty())
+            }) {
+                anyhow::bail!("Raft voter {} is missing a site, rack, or required modeled network path", voter.id);
+            }
+            validate_metadata_tolerance(voters, *quorum, &budget)
+        });
+        if let Err(reason) = result {
+            warnings.push(runtime_security::finding(
+                "integrity.metadata_failure_budget",
+                "warning",
+                "metadata",
+                &format!("Metadata quorum could not be validated for the plan's concurrent failure budget. {reason:#}"),
+                "Review Raft voter placement and network paths against the deployment's site, rack, host, and network failure budget.",
+            ));
+            false
+        } else {
+            true
+        }
+    });
+    ProtectionStatus {
+        plan_validated: plan.is_some(),
+        unsafe_two_site,
+        keyspace_bits: if plan.is_some() { KEYSPACE_BITS } else { 64 },
+        metadata_sites_without_quorum,
+        metadata_budget_validated,
+        metadata_network_paths: plan.filter(|plan| plan.tolerate.networks > 0).map(|_| {
+            "The check assumes Raft uses the network paths declared in the plan. Live routing and metadata disk failures are outside this check."
+        }),
+        warnings,
+    }
+}
+
+fn voter_failure_domains(cfg: &NodeConfig, membership: &Membership) -> Vec<DomainDisk> {
+    membership
+        .voters
+        .values()
+        .map(|voter| {
+            let host_id = if voter.id == cfg.metadata.node_id {
+                cfg.local_host.as_str()
+            } else {
+                voter.id.as_str()
+            };
+            let host = cfg.cluster.hosts.iter().find(|host| host.id == host_id);
+            let mut network_paths = cfg
+                .cluster
+                .placement_plan
+                .iter()
+                .flat_map(|plan| plan.disks.iter())
+                .filter(|disk| disk.host == host_id)
+                .map(|disk| disk.networks.iter().cloned().collect::<BTreeSet<_>>());
+            let networks = network_paths
+                .next()
+                .map(|paths| {
+                    network_paths.fold(paths, |common, paths| {
+                        common.intersection(&paths).cloned().collect()
+                    })
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            DomainDisk {
+                id: voter.id.clone(),
+                host: host_id.into(),
+                site: host
+                    .and_then(|host| host.site.clone())
+                    .or_else(|| voter.site.clone()),
+                rack: host
+                    .and_then(|host| host.rack.clone())
+                    .or_else(|| voter.rack.clone()),
+                networks,
+            }
+        })
+        .collect()
+}
+
+impl V6State {
+    async fn protection_status(&self) -> ProtectionStatus {
+        let (membership, joint_membership) = self.meta.store.memberships().await;
+        protection_status(
+            &self.node_config,
+            membership.as_ref(),
+            joint_membership.as_ref(),
+        )
+    }
+}
+
+fn print_protection_warnings(status: &ProtectionStatus) {
+    for finding in &status.warnings {
+        if finding.severity == "critical" && std::io::stderr().is_terminal() {
+            eprintln!("\x1b[1;97;41m DANGER \x1b[0m {}", finding.message);
+        } else {
+            let label = if finding.severity == "critical" {
+                "DANGER"
+            } else {
+                "WARNING"
+            };
+            eprintln!("{label} {}", finding.message);
+        }
+    }
+}
+
+/// Overlay committed capacity additions on the legacy bootstrap topology.
 async fn effective_cluster_config(st: &V6State) -> ClusterConfig {
     let mut c = (*st.data.cfg).clone();
+    if c.placement_plan.is_some() {
+        return c;
+    }
     let ms = st.meta.store.state().await;
     for (host, disks) in ms.capacity_additions {
         if let Some(h) = c.hosts.iter_mut().find(|h| h.id == host) {
@@ -1344,7 +1640,9 @@ async fn raft_append(
 }
 
 async fn raft_status(State(st): State<V6State>) -> impl IntoResponse {
-    Json(st.meta.status().await)
+    let mut status = serde_json::json!(st.meta.status().await);
+    status["protection"] = serde_json::json!(st.protection_status().await);
+    Json(status)
 }
 
 async fn meta_get(State(st): State<V6State>, Path(key): Path<String>) -> impl IntoResponse {
@@ -1478,8 +1776,10 @@ async fn v6_get(
             return StatusCode::FORBIDDEN.into_response();
         }
     }
-    st.data.manifests.write().await.insert(key.clone(), m);
-    api_get(State(st.data), Path(key)).await.into_response()
+    match get_object_version(&st.data, &m).await {
+        Ok(bytes) => (StatusCode::OK, bytes).into_response(),
+        Err(error) => (StatusCode::NOT_FOUND, error.to_string()).into_response(),
+    }
 }
 
 async fn v6_get_version(
@@ -2540,14 +2840,14 @@ async fn user_repair(State(st): State<V6State>, Path(key): Path<String>) -> impl
         return StatusCode::TEMPORARY_REDIRECT.into_response();
     }
     let data = effective_data(&st).await;
-    if let Some(m) = st.meta.store.get(&key).await {
-        data.manifests.write().await.insert(key.clone(), m);
-    }
+    let Some(manifest) = st.meta.store.get(&key).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    data.manifests.write().await.insert(key.clone(), manifest);
     match repair_object_with_health(&data, &key, &st.health).await {
         Ok(m) => match committed(
             &st,
-            MetadataCommand::PutManifest {
-                key: key.clone(),
+            MetadataCommand::UpdateManifestPlacement {
                 manifest: m.clone(),
             },
         )
@@ -2659,6 +2959,13 @@ async fn capacity_add(
     if !st.meta.is_leader().await {
         return StatusCode::TEMPORARY_REDIRECT.into_response();
     }
+    if st.data.cfg.placement_plan.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            "Adding a disk requires a new placement plan and matching node configurations.",
+        )
+            .into_response();
+    }
     if !st.data.cfg.hosts.iter().any(|h| h.id == host) {
         return (StatusCode::NOT_FOUND, "unknown host").into_response();
     }
@@ -2761,15 +3068,19 @@ async fn run_rebalancer(st: V6State) {
             match repair_object_with_health(&data, &old.key, &st.health).await {
                 Ok(new) => match committed(
                     &st,
-                    MetadataCommand::PutManifest {
-                        key: old.key.clone(),
+                    MetadataCommand::UpdateManifestPlacement {
                         manifest: new.clone(),
                     },
                 )
                 .await
                 {
                     Ok(_) => {
-                        let _ = cleanup_rebalanced_replicas(&data, &old, &new).await;
+                        // In-flight reads can still hold the previous version of
+                        // this manifest. Keep old planned copies until they can
+                        // be retired through a reference-aware, fenced operation.
+                        if old.planned_placement.is_none() && new.planned_placement.is_none() {
+                            let _ = cleanup_rebalanced_replicas(&data, &old, &new).await;
+                        }
                     }
                     Err(_) => {
                         complete = false;
@@ -2832,7 +3143,7 @@ async fn run_cluster_controller(st: V6State, cfg: NodeConfig) {
                 if let Ok(m) = repair_object_with_health(&st.data, &key, &st.health).await {
                     let _ = st
                         .meta
-                        .propose(MetadataCommand::PutManifest { key, manifest: m })
+                        .propose(MetadataCommand::UpdateManifestPlacement { manifest: m })
                         .await;
                 }
             } else if let Ok(_permit) = st
@@ -2845,7 +3156,7 @@ async fn run_cluster_controller(st: V6State, cfg: NodeConfig) {
                 if let Ok(m) = repair_object_with_health(&st.data, &key, &st.health).await {
                     let _ = st
                         .meta
-                        .propose(MetadataCommand::PutManifest { key, manifest: m })
+                        .propose(MetadataCommand::UpdateManifestPlacement { manifest: m })
                         .await;
                 }
                 st.maintenance.cpu_yield(started.elapsed()).await;
@@ -3120,7 +3431,9 @@ async fn ui_summary(State(st): State<V6State>, headers: axum::http::HeaderMap) -
         .unwrap_or(0);
     let local = nodes.first().cloned().unwrap_or_default();
     Json(serde_json::json!( {
-        "product":"Kagi","local":local,"nodes":nodes,"cluster": {
+        "product":"Kagi","local":local,"nodes":nodes,
+        "protection": st.protection_status().await,
+        "cluster": {
             "objects":objects,"logical_bytes":logical_bytes,"physical_bytes":physical_bytes,"capacity_bytes":capacity_bytes,"fragments":fragments,"healthy_resources":healthy_resources
         }
     }
@@ -3328,6 +3641,22 @@ async fn ui_object(
         return StatusCode::NOT_FOUND.into_response();
     };
     let hs = st.health.snapshot().await;
+    let positions: BTreeMap<_, _> = m
+        .fragments
+        .iter()
+        .filter_map(|fragment| {
+            fragment.position.map(|position| {
+                (
+                    (
+                        fragment.fragment,
+                        fragment.host.as_str(),
+                        fragment.disk.as_str(),
+                    ),
+                    format!("0x{position:015x}"),
+                )
+            })
+        })
+        .collect();
     let chunks = cluster::normalize_chunks(&m)
         .into_iter()
         .map(|c| {
@@ -3343,6 +3672,7 @@ async fn ui_object(
                     serde_json::json!( {
                         "host":r.host,
                             "disk":r.disk,
+                            "key_position_hex":positions.get(&(c.chunk, r.host.as_str(), r.disk.as_str())),
                             "site":host.and_then(|h|h.site.clone()),
                             "rack":host.and_then(|h|h.rack.clone()),
                             "health":health,
@@ -3379,8 +3709,30 @@ async fn ui_object(
         }
         ))
     }
+    let object_position = m
+        .planned_placement
+        .as_ref()
+        .map(|placement| format!("0x{:015x}", placement.position));
+    let mut manifest = serde_json::json!(&m);
+    let add_hex_position = |item: &mut serde_json::Value| {
+        if let Some(position) = item["position"].as_u64() {
+            item["position_hex"] = serde_json::json!(format!("0x{position:015x}"));
+        }
+    };
+    if let Some(fragments) = manifest["fragments"].as_array_mut() {
+        fragments.iter_mut().for_each(add_hex_position);
+    }
+    if let Some(planned) = manifest.get_mut("planned_placement") {
+        if let Some(chunks) = planned["locations"].as_array_mut() {
+            for chunk in chunks {
+                if let Some(replicas) = chunk.as_array_mut() {
+                    replicas.iter_mut().for_each(add_hex_position);
+                }
+            }
+        }
+    }
     Json(serde_json::json!( {
-        "manifest":m,"chunks":chunks,"durability_margin":durability_margin,"placement_epoch":ms.placement_epoch,"pending_operations":pending
+        "manifest":manifest,"key_position_hex":object_position,"chunks":chunks,"durability_margin":durability_margin,"placement_epoch":ms.placement_epoch,"pending_operations":pending
     }
     )).into_response()
 }
@@ -3612,6 +3964,14 @@ async fn main() -> Result<()> {
     match cli.command {
         Cmd::Audit => unreachable!("handled before runtime startup"),
         Cmd::Serve => {
+            if cfg
+                .cluster
+                .placement_plan
+                .as_ref()
+                .is_some_and(PlacementPlan::unsafe_two_site)
+            {
+                print_protection_warnings(&v6.protection_status().await);
+            }
             #[cfg(all(feature = "ebpf", target_os = "linux"))]
             let _kernel_guard = if cfg.security.kernel.enabled {
                 Some(security_ebpf::start(v6.security.clone())?)
@@ -3887,10 +4247,13 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Status => {
+            let protection = v6.protection_status().await;
+            print_protection_warnings(&protection);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "hosts": &cfg.cluster.hosts,
+                    "protection": protection,
                     "transport": &cfg.cluster.transport,
                     "join_key_configured": st.join_key_b64.is_some(),
                     "erasure_acceleration": st.erasure.acceleration_status(),
@@ -3939,10 +4302,16 @@ async fn main() -> Result<()> {
             }
             fs::write(output, get_object(&st, &key).await?)?
         }
-        Cmd::Repair { key } => println!(
-            "{}",
-            serde_json::to_string_pretty(&repair_object(&st, &key).await?)?
-        ),
+        Cmd::Repair { key } => {
+            anyhow::ensure!(
+                cfg.cluster.placement_plan.is_none(),
+                "repair planned objects through PUT /v1/repair/<key> on the active Raft leader so the updated locations are committed"
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&repair_object(&st, &key).await?)?
+            );
+        }
         Cmd::Scrub { key } => println!(
             "{}",
             serde_json::to_string_pretty(&scrub_object(&st, &key).await?)?
@@ -3954,19 +4323,13 @@ async fn main() -> Result<()> {
             println!("cleared flap quarantine for {resource}");
         }
         Cmd::Locate { key } => {
-            let mut h = blake3::Hasher::new();
-            h.update(cfg.cluster.id.as_bytes());
-            h.update(b"\0");
-            h.update(key.as_bytes());
-            let b = h.finalize();
-            let pos = u64::from_le_bytes(b.as_bytes()[0..8].try_into().unwrap());
+            if let Some(manifest) = v6.meta.store.get(&key).await {
+                st.manifests.write().await.insert(key.clone(), manifest);
+            }
+            let data = effective_data(&v6).await;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&placement(
-                    &cfg.cluster,
-                    pos,
-                    cfg.cluster.replication
-                )?)?
+                serde_json::to_string_pretty(&cluster::locate_object(&data, &key).await?)?
             );
         }
         Cmd::GeneratePqIdentity { .. } => {
@@ -3986,14 +4349,51 @@ mod security_integration_tests;
 #[cfg(test)]
 mod documented_config_tests {
     use super::*;
+    use kagi_object_store::placement::FailureBudget;
+
+    fn example_node() -> NodeConfig {
+        serde_saphyr::from_str(include_str!("../../examples/node-v6.example.yaml"))
+            .expect("examples/node-v6.example.yaml must stay valid")
+    }
+
+    fn acknowledged_example_plan(config: &NodeConfig) -> PlacementPlan {
+        let disks = config
+            .cluster
+            .hosts
+            .iter()
+            .flat_map(|host| {
+                host.disks.iter().map(|disk| DomainDisk {
+                    id: disk.id.clone(),
+                    host: host.id.clone(),
+                    rack: host.rack.clone(),
+                    site: host.site.clone(),
+                    networks: Vec::new(),
+                })
+            })
+            .collect();
+        PlacementPlan {
+            salt: 56,
+            disks,
+            protection: ProtectionLayout::ReedSolomon { k: 2, m: 4 },
+            chunk_replicas: 1,
+            max_fragments_per_host: 1,
+            max_fragments_per_disk: 1,
+            tolerate: FailureBudget {
+                sites: 0,
+                racks: 1,
+                hosts: 1,
+                disks: 1,
+                networks: 0,
+            },
+            acknowledged_unsafe_two_site: true,
+        }
+    }
 
     /// The canonical example is executable documentation: every key must remain
     /// accepted by the same deserializer used in production.
     #[test]
     fn canonical_node_example_deserializes() {
-        let input = include_str!("../../examples/node-v6.example.yaml");
-        let config: NodeConfig =
-            serde_saphyr::from_str(input).expect("examples/node-v6.example.yaml must stay valid");
+        let config = example_node();
         assert_eq!(config.local_host, "host-a1");
         assert_eq!(config.cluster.transport.quic_min_bytes, 65_536);
         assert_eq!(config.telemetry.sample_interval_ms, 1_000);
@@ -4006,5 +4406,62 @@ mod documented_config_tests {
         let input = include_str!("../../examples/node-v6.example.yaml");
         let mutated = format!("{input}\nnot_a_kagi_option: true\n");
         assert!(serde_saphyr::from_str::<NodeConfig>(&mutated).is_err());
+    }
+
+    #[test]
+    fn deployment_loads_exact_geometry_and_warns_about_two_site_loss() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("kagi-plan-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root)?;
+        let outcome = (|| {
+            let plan = acknowledged_example_plan(&example_node());
+            let output = serde_json::json!({
+                "policies": {"default": {"deployment": plan}},
+                "join_admission": {"key_hash_hex": "example"},
+            });
+            fs::write(
+                root.join("kagi.generated.yaml"),
+                serde_saphyr::to_string(&output)?,
+            )?;
+            let input = include_str!("../../examples/node-v6.example.yaml");
+            let mut node: serde_json::Value = serde_saphyr::from_str(input)?;
+            node["planner_output"] =
+                serde_json::json!({"path": "kagi.generated.yaml", "policy": "default"});
+            node["cluster"]["erasure"] = serde_json::json!({"backend": "cpu"});
+            node["cluster"]["join_key_hash_hex"] = serde_json::Value::Null;
+            let path = root.join("node.yaml");
+            fs::write(&path, serde_saphyr::to_string(&node)?)?;
+            let loaded = load(&path)?;
+            assert_eq!(loaded.cluster.join_key_hash_hex.as_deref(), Some("example"));
+            let erasure = loaded.cluster.erasure.as_ref().unwrap();
+            assert_eq!(erasure.scheme, erasure::ErasureScheme::ReedSolomon);
+            assert_eq!((erasure.data_shards, erasure.parity_shards), (2, 4));
+            assert!(matches!(erasure.backend, erasure::BackendKind::Cpu));
+            let status = protection_status(&loaded, None, None);
+            assert!(status.unsafe_two_site);
+            assert_eq!(status.warnings[0].severity, "critical");
+            assert_eq!(
+                status.metadata_sites_without_quorum,
+                vec!["site-a", "site-b"]
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(root)?;
+        outcome
+    }
+
+    #[test]
+    fn rejects_unacknowledged_unsafe_plan_and_runtime_mismatches() {
+        let mut config = example_node();
+        let plan = acknowledged_example_plan(&config);
+        let mut unacknowledged = plan.clone();
+        unacknowledged.acknowledged_unsafe_two_site = false;
+        let empty = serde_json::json!({});
+        assert!(apply_placement_plan(&mut config.cluster, unacknowledged, &empty).is_err());
+
+        let contradictory = serde_json::json!({"erasure": {"data_shards": 9}});
+        assert!(apply_placement_plan(&mut config.cluster, plan.clone(), &contradictory).is_err());
+
+        config.cluster.hosts[0].rack = Some("different-rack".into());
+        assert!(apply_placement_plan(&mut config.cluster, plan, &empty).is_err());
     }
 }
