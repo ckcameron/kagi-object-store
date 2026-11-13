@@ -665,11 +665,11 @@ impl Policy {
     fn plan(
         &self,
         topology: &Topology,
-        salt: u64,
+        placement_seed: u64,
         acknowledged_unsafe_two_site: bool,
     ) -> PlacementPlan {
         PlacementPlan {
-            salt,
+            placement_seed,
             disks: topology.placement_disks.clone(),
             protection: self.protection.layout(),
             chunk_replicas: self.chunk_replicas,
@@ -937,7 +937,8 @@ struct AddressSpacePlan {
     min: String,
     max: String,
     mapping: String,
-    salt: u64,
+    #[serde(rename = "salt")]
+    placement_seed: u64,
     host_ranges: Vec<HostRange>,
     disks: Vec<DiskShare>,
 }
@@ -1081,7 +1082,7 @@ struct ObjectStorageEstimate {
 }
 #[derive(Clone, Copy)]
 struct SchemeSearchRun {
-    salt: u64,
+    placement_seed: u64,
     seed: u64,
     trials: u64,
     backend: McBackend,
@@ -2162,8 +2163,8 @@ struct PlacementCache {
 }
 
 impl PlacementCache {
-    fn new(cfg: &Config, policy: &Policy, salt: u64) -> Self {
-        let plan = policy.plan(&cfg.topology, salt, false);
+    fn new(cfg: &Config, policy: &Policy, placement_seed: u64) -> Self {
+        let plan = policy.plan(&cfg.topology, placement_seed, false);
         let ranges = plan.host_ranges();
         Self {
             by_owner: ranges
@@ -2420,19 +2421,19 @@ struct Eval {
     rare: Option<Scenario>,
 }
 
-fn evaluate(cfg: &Config, salt: u64, trials: u64, seed: u64, importance: bool) -> Eval {
+fn evaluate(cfg: &Config, placement_seed: u64, trials: u64, seed: u64, importance: bool) -> Eval {
     let placements: Vec<_> = cfg
         .policies
         .values()
-        .map(|p| PlacementCache::new(cfg, p, salt))
+        .map(|p| PlacementCache::new(cfg, p, placement_seed))
         .collect();
     checkpoint::reduce(
-        &("evaluate", cfg, salt, trials, seed, importance),
+        &("evaluate", cfg, placement_seed, trials, seed, importance),
         trials,
         |t| {
             let _simulation_tick = SimulationTick;
             let mut rng = ChaCha20Rng::seed_from_u64(
-                seed ^ salt.rotate_left(17) ^ t.wrapping_mul(0x9E3779B97F4A7C15),
+                seed ^ placement_seed.rotate_left(17) ^ t.wrapping_mul(0x9E3779B97F4A7C15),
             );
             let (failed, w) = fail_domains(&mut rng, cfg, importance, None);
             let key = rng.gen::<u64>();
@@ -2697,7 +2698,7 @@ fn evaluate_policy(
     cache: &PlacementCache,
 ) -> Eval {
     let SchemeSearchRun {
-        salt,
+        placement_seed,
         seed,
         trials,
         backend: _backend,
@@ -2715,7 +2716,7 @@ fn evaluate_policy(
                 cfg,
                 policy_name,
                 p,
-                salt,
+                placement_seed,
                 trials,
                 seed,
             ),
@@ -2734,7 +2735,15 @@ fn evaluate_policy(
         );
     }
     checkpoint::reduce(
-        &("policy-tail-v1", cfg, policy_name, p, salt, trials, seed),
+        &(
+            "policy-tail-v1",
+            cfg,
+            policy_name,
+            p,
+            placement_seed,
+            trials,
+            seed,
+        ),
         trials,
         |t| {
             let _simulation_tick = SimulationTick;
@@ -2833,7 +2842,7 @@ fn loss_for_failure(
 /// estimate from the final round.
 fn adaptive_importance_sampling(
     cfg: &Config,
-    salt: u64,
+    placement_seed: u64,
     trials: u64,
     seed: u64,
     rounds: usize,
@@ -2842,18 +2851,18 @@ fn adaptive_importance_sampling(
     let placements: Vec<_> = cfg
         .policies
         .values()
-        .map(|p| PlacementCache::new(cfg, p, salt))
+        .map(|p| PlacementCache::new(cfg, p, placement_seed))
         .collect();
     let mut bias = cfg.failure_model.importance_bias.max(1.0);
     let mut final_stats = WeightedStats::default();
     for round in 0..rounds.max(1) {
         let samples: Vec<(f64, f64, f64)> = checkpoint::reduce(
-            &("adaptive", cfg, salt, trials, seed, round, bias),
+            &("adaptive", cfg, placement_seed, trials, seed, round, bias),
             trials,
             |t| {
                 let _simulation_tick = SimulationTick;
                 let mut rng = ChaCha20Rng::seed_from_u64(
-                    seed ^ salt.rotate_left(23)
+                    seed ^ placement_seed.rotate_left(23)
                         ^ (round as u64).rotate_left(9)
                         ^ t.wrapping_mul(0xD1B54A32D192ED03),
                 );
@@ -2931,7 +2940,7 @@ struct RepairEvent {
 
 fn time_domain_simulation(
     cfg: &Config,
-    salt: u64,
+    placement_seed: u64,
     trials: u64,
     horizon: f64,
     seed: u64,
@@ -2939,15 +2948,16 @@ fn time_domain_simulation(
     let placements: Vec<_> = cfg
         .policies
         .values()
-        .map(|p| PlacementCache::new(cfg, p, salt))
+        .map(|p| PlacementCache::new(cfg, p, placement_seed))
         .collect();
     let losses: (u64, u64) = checkpoint::reduce(
-        &("time", cfg, salt, trials, horizon, seed),
+        &("time", cfg, placement_seed, trials, horizon, seed),
         trials,
         |t| {
             let _simulation_tick = SimulationTick;
-            let mut rng =
-                ChaCha20Rng::seed_from_u64(seed ^ salt ^ t.wrapping_mul(0x94D049BB133111EB));
+            let mut rng = ChaCha20Rng::seed_from_u64(
+                seed ^ placement_seed ^ t.wrapping_mul(0x94D049BB133111EB),
+            );
             let key = rng.gen::<u64>();
             let disks = &cfg.topology.disks;
             let hosts: Vec<String> = disks
@@ -3133,9 +3143,13 @@ fn time_domain_simulation(
     }
 }
 // ---- Deterministic tolerance validation and policy optimization -------------
-fn validate_policy(cfg: &Config, policy: &Policy, salt: u64) -> Result<()> {
+fn validate_policy(cfg: &Config, policy: &Policy, placement_seed: u64) -> Result<()> {
     policy
-        .plan(&cfg.topology, salt, requires_site_acknowledgment(cfg))
+        .plan(
+            &cfg.topology,
+            placement_seed,
+            requires_site_acknowledgment(cfg),
+        )
         .validate_tolerance()
 }
 
@@ -3355,7 +3369,7 @@ fn optimize_scheme(
     run: SchemeSearchRun,
 ) -> Result<SchemeOptimization> {
     let SchemeSearchRun {
-        salt,
+        placement_seed,
         seed,
         trials,
         backend,
@@ -3378,20 +3392,20 @@ fn optimize_scheme(
             "mixed tolerance validation policy={name} {}",
             protection_summary(&candidate.protection),
         ));
-        if let Err(error) = validate_policy(cfg, &candidate, salt) {
+        if let Err(error) = validate_policy(cfg, &candidate, placement_seed) {
             if first_invalid.is_none() {
                 first_invalid = Some((0.0, 1.0, candidate, Some(format!("{error:#}")), None, 0));
             }
             progress_step(geometry_trials);
             continue;
         }
-        let cache = PlacementCache::new(cfg, &candidate, salt);
+        let cache = PlacementCache::new(cfg, &candidate, placement_seed);
         let estimate = evaluate_policy(
             cfg,
             name,
             &candidate,
             SchemeSearchRun {
-                salt,
+                placement_seed,
                 seed,
                 trials: geometry_trials,
                 backend,
@@ -3488,7 +3502,7 @@ fn schema_preference(schema: &str) -> u8 {
 }
 fn optimize_protections(
     cfg: &mut Config,
-    salt: u64,
+    placement_seed: u64,
     seed: u64,
     trials: u64,
     backend: McBackend,
@@ -3499,7 +3513,7 @@ fn optimize_protections(
         let base = cfg.policies[&name].clone();
         let mut per = BTreeMap::new();
         if !base.auto_geometry() {
-            validate_policy(cfg, &base, salt).with_context(|| {
+            validate_policy(cfg, &base, placement_seed).with_context(|| {
                 format!("policy {name} cannot meet the configured mixed failure tolerance")
             })?;
         } else {
@@ -3518,7 +3532,7 @@ fn optimize_protections(
                     &base,
                     schema,
                     SchemeSearchRun {
-                        salt,
+                        placement_seed,
                         seed,
                         trials,
                         backend,
@@ -3600,37 +3614,37 @@ fn select_best_salt(cfg: &Config, args: &Args) -> Result<u64> {
     let mut prelim: Vec<(u64, Eval)> = (0..args.candidates)
         .into_par_iter()
         .filter_map(|c| {
-            let salt = hash64(&[&args.seed.to_le_bytes(), &c.to_le_bytes()]);
+            let placement_seed = hash64(&[&args.seed.to_le_bytes(), &c.to_le_bytes()]);
             if cfg
                 .policies
                 .values()
-                .any(|policy| validate_policy(cfg, policy, salt).is_err())
+                .any(|policy| validate_policy(cfg, policy, placement_seed).is_err())
             {
                 progress_tick(args.trials);
                 return None;
             }
-            let eval = evaluate(cfg, salt, args.trials, args.seed, false);
+            let eval = evaluate(cfg, placement_seed, args.trials, args.seed, false);
             let loss = eval.losses as f64 / eval.trials.max(1) as f64;
             progress_best_keyspace(
                 loss,
                 format!(
-                    "loss={loss:.3e} salt=0x{salt:016x} {}",
+                    "loss={loss:.3e} salt=0x{placement_seed:016x} {}",
                     policy_schema_summary(cfg)
                 ),
             );
-            Some((salt, eval))
+            Some((placement_seed, eval))
         })
         .collect();
     prelim.sort_by(|a, b| {
         (a.1.losses as f64 / a.1.trials.max(1) as f64)
             .total_cmp(&(b.1.losses as f64 / b.1.trials.max(1) as f64))
     });
-    if let Some((salt, e)) = prelim.first() {
+    if let Some((placement_seed, e)) = prelim.first() {
         let loss = e.losses as f64 / e.trials.max(1) as f64;
         progress_best_keyspace(
             loss,
             format!(
-                "loss={loss:.3e} salt=0x{salt:016x} {}",
+                "loss={loss:.3e} salt=0x{placement_seed:016x} {}",
                 policy_schema_summary(cfg)
             ),
         );
@@ -3641,24 +3655,30 @@ fn select_best_salt(cfg: &Config, args: &Args) -> Result<u64> {
         (finals.len() as u64).saturating_mul(args.rare_trials),
     );
     let mut best = None::<(f64, u64)>;
-    for (salt, _) in finals {
-        let rare = evaluate(cfg, *salt, args.rare_trials, args.seed ^ 0xA5A5A5A5, true);
+    for (placement_seed, _) in finals {
+        let rare = evaluate(
+            cfg,
+            *placement_seed,
+            args.rare_trials,
+            args.seed ^ 0xA5A5A5A5,
+            true,
+        );
         let p = rare.weighted_loss / rare.trials.max(1) as f64;
         let overhead = cfg.policies.values().map(Policy::overhead).sum::<f64>();
         let obj = cfg.optimization.loss_weight * p + cfg.optimization.overhead_weight * overhead;
         progress_best_keyspace(
             p,
             format!(
-                "loss={p:.3e} objective={obj:.6e} salt=0x{salt:016x} {}",
+                "loss={p:.3e} objective={obj:.6e} salt=0x{placement_seed:016x} {}",
                 policy_schema_summary(cfg)
             ),
         );
         if best.map(|x| obj < x.0).unwrap_or(true) {
-            best = Some((obj, *salt));
+            best = Some((obj, *placement_seed));
         }
     }
-    if let Some((_, salt)) = best {
-        return Ok(salt);
+    if let Some((_, placement_seed)) = best {
+        return Ok(placement_seed);
     }
     bail!("no placement salt met every mixed failure budget")
 }
@@ -3802,45 +3822,57 @@ fn main() -> Result<()> {
         .chain(
             (0..args.candidates)
                 .map(|i| hash64(&[&args.seed.to_le_bytes(), &i.to_le_bytes()]))
-                .filter(|salt| *salt != preferred_salt),
+                .filter(|placement_seed| *placement_seed != preferred_salt),
         )
         .peekable();
     let (first_salt, first_reports) = loop {
-        let salt = salt_candidates
+        let placement_seed = salt_candidates
             .next()
             .context("no placement salt candidates")?;
         let mut candidate = cfg.clone();
         match optimize_protections(
             &mut candidate,
-            salt,
+            placement_seed,
             args.seed,
             args.trials,
             args.mc_backend,
         ) {
             Ok(reports) => {
                 cfg = candidate;
-                break (salt, reports);
+                break (placement_seed, reports);
             }
             Err(error) if salt_candidates.peek().is_none() => return Err(error),
             Err(_) => progress_operation_label(format!(
-                "placement salt {salt:#x} has no feasible geometry"
+                "placement salt {placement_seed:#x} has no feasible geometry"
             )),
         }
     };
     progress_phase(2, PHASES, "placement search across verified salts");
-    let salt = select_best_salt(&cfg, &args).unwrap_or(first_salt);
+    let placement_seed = select_best_salt(&cfg, &args).unwrap_or(first_salt);
     progress_phase(3, PHASES, "erasure geometry search at selected salt");
-    let scheme_reports = if salt == first_salt {
+    let scheme_reports = if placement_seed == first_salt {
         first_reports
     } else {
-        optimize_protections(&mut cfg, salt, args.seed, args.trials, args.mc_backend)?
+        optimize_protections(
+            &mut cfg,
+            placement_seed,
+            args.seed,
+            args.trials,
+            args.mc_backend,
+        )?
     };
     progress_phase(4, PHASES, "final ordinary Monte Carlo");
     progress_operation("final ordinary Monte Carlo", args.trials);
-    let mc = evaluate(&cfg, salt, args.trials, args.seed, false);
+    let mc = evaluate(&cfg, placement_seed, args.trials, args.seed, false);
     progress_phase(5, PHASES, "final rare-event Monte Carlo");
     progress_operation("final importance-sampled Monte Carlo", args.rare_trials);
-    let rare = evaluate(&cfg, salt, args.rare_trials, args.seed ^ 0xA5A5A5A5, true);
+    let rare = evaluate(
+        &cfg,
+        placement_seed,
+        args.rare_trials,
+        args.seed ^ 0xA5A5A5A5,
+        true,
+    );
     progress_phase(
         6,
         PHASES,
@@ -3874,7 +3906,7 @@ fn main() -> Result<()> {
             ),
             0,
         );
-        let deployment = p.plan(&cfg.topology, salt, acknowledged_unsafe_two_site);
+        let deployment = p.plan(&cfg.topology, placement_seed, acknowledged_unsafe_two_site);
         deployment
             .validate_tolerance()
             .with_context(|| format!("cannot emit deployment for policy {name}"))?;
@@ -3906,7 +3938,7 @@ fn main() -> Result<()> {
     );
     let ais = adaptive_importance_sampling(
         &cfg,
-        salt,
+        placement_seed,
         args.rare_trials,
         args.seed ^ 0xC3C3C3C3,
         args.ais_rounds,
@@ -3922,7 +3954,7 @@ fn main() -> Result<()> {
     );
     let td = time_domain_simulation(
         &cfg,
-        salt,
+        placement_seed,
         args.time_trials,
         args.horizon_years,
         args.seed ^ 0x5A5A5A5A,
@@ -3940,7 +3972,7 @@ fn main() -> Result<()> {
             min: "0x0000000000000000".into(),
             max: format!("0x{:016x}", mask_position(u64::MAX)),
             mapping: "equal_host_ranges".into(),
-            salt,
+            placement_seed,
             host_ranges,
             disks,
         },
