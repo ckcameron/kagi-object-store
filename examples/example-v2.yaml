@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: CC-BY-NC-SA-4.0
-# Kagi 0.38.0 example: minimum six-host cluster, six 8 TB NVMe disks per host, three failure-domain sites.
+# Historical Kagi 0.38.0 example. Use example.yaml with the current planner.
+# Legacy topology: minimum six-host cluster, six 8 TB NVMe disks per host, three failure-domain sites.
 slot_bits: 12
 topology:
   mount_root: /var/lib/kagi/disks

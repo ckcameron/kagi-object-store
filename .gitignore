@@ -12,3 +12,10 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# Local kagi-config output and checkpoint directories.
+/buildnow/
+/checkbuild/
+/run/run/
+kagi.generated.yaml
+kagi.wizard.yaml

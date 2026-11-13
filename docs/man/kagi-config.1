@@ -1,32 +1,15 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
 .TH KAGI-CONFIG 1 "November 2026" "Kagi 0.39.0" "User Commands"
 .SH NAME
-kagi-config \- model Kagi failure domains and generate a placement plan
+kagi-config \- model Kagi failure domains, optimize chunk geometry, and emit a 60-bit placement plan
 .SH SYNOPSIS
 .B kagi-config
 .RB { \-c " " \fIFILE\fR " | " \-\-wizard " | " \-\-resume " " \fIDIR\fR }
 .RI [ options ]
 .SH DESCRIPTION
-Runs Monte Carlo and deterministic failure-domain analysis for a proposed
-Kagi topology.
-The planner searches placement salts, compares Reed-Solomon, LRC,
-product-matrix MSR, and CLAY geometries, and emits a 64-bit keyspace plan.
-The minimum topology is six hosts with six disks per host.
+Runs Monte Carlo and deterministic analysis of concurrent site, rack, host, network and disk failures. It compares Reed-Solomon, LRC, MSR and CLAY chunk geometries and emits a placement salt, equal host ranges and validated deployment policies.
 .PP
-The plan contains the topology, optimizer estimates, protection policies,
-placement salt, and global and per-disk slot assignments.
-Review the selected geometry and deterministic validation results before
-provisioning.
-The simulation estimates durability under the supplied model and workload.
-Zero observed losses leave the estimate unresolved.
-.PP
-The plan records tested geometries for each erasure family.
-With
-.B optimize.auto_geometry
-enabled, the planner selects a feasible geometry by simulated loss and
-the configured objective.
-.B optimize.max_total_fragments
-sets the search ceiling, which defaults to 32.
+The minimum supported topology is six servers across at least two racks, with at least six disks per server. A policy must tolerate concurrent disk, host and rack failures. Site and network tolerance apply where those domains have multiple members. With exactly two sites, a policy may explicitly allow zero site failures after the operator types I ACCEPT THAT LOSING A SITE CAN MAKE OBJECTS UNAVAILABLE.
 .SH INPUT AND OUTPUT
 .TP
 .BR \-c ", " \-\-config " " \fIFILE\fR
@@ -35,9 +18,9 @@ Read topology and policy inputs from YAML.
 .B \-\-wizard
 Build the input interactively.
 Quick mode asks for counts of sites, racks per site, hosts per rack, and NVMe
-disks per host.
-It uses 8 TB NVMe disks, weight 1.0, default failure and repair rates, 16 slot
-bits, automatic erasure geometry, and sequential /24 networks from 10.0.0.0/8.
+disks per host. It uses 8 TB NVMe disks, default failure and repair rates,
+automatic EC geometry, and two modeled network paths per host on distinct
+sequential /24 subnets from 10.0.0.0/8.
 The full wizard asks for disk classes, capacities, failure assumptions,
 multi-homing, and policy constraints.
 .TP
@@ -53,7 +36,9 @@ Override the root for generated disk mount paths.
 Write the generated plan as YAML.
 The default is
 .IR kagi.generated.yaml .
-The same plan is printed to standard output.
+The same plan is printed to standard output. It includes equal host ranges
+and per-policy deployments that can be loaded through planner_output.
+A finite simulation with zero observed losses leaves the estimate unresolved.
 .TP
 .BI \-\-join-key-output " FILE"
 Write the base64 cluster admission key.
@@ -83,9 +68,8 @@ The default is 100000.
 Number of ordinary Monte Carlo finalists to reevaluate.
 The default is 8.
 .TP
-.BI \-\-validation-keys " N"
-Number of deterministic key samples for tolerance validation.
-The default is 128.
+.B --validation-keys N
+Accepted for compatibility. Validation covers every distinct host-range layout.
 .TP
 .BI \-\-time-trials " N"
 Continuous-time trajectories.
@@ -94,6 +78,18 @@ The default is 20000.
 .BI \-\-horizon-years " YEARS"
 Years per continuous-time trajectory.
 The default is 10.
+.TP
+.B --max-storage-overhead RATIO
+Maximum nominal stored fragment payload ratio for a candidate geometry.
+.TP
+.B --example-object-size-bytes BYTES
+Object size used for storage overhead comparisons. Repeat to compare several sizes.
+.TP
+.B --chunk-replicas N
+Store N physical copies of each encoded chunk.
+.TP
+.B --object-replicas N
+Force N full-object copies instead of erasure coding.
 .TP
 .BI \-\-ais-rounds " N"
 Adaptive importance-sampling rounds.

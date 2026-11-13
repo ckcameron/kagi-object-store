@@ -203,8 +203,11 @@ pub fn disk_key(h: &str, d: &str) -> String {
     format!("disk:{h}/{d}")
 }
 
-pub fn rack_key(r: &str) -> String {
-    format!("rack:{r}")
+fn rack_key(site: Option<&str>, rack: &str) -> String {
+    match site {
+        Some(site) => format!("rack:{}:{site}:{rack}", site.len()),
+        None => format!("rack:{rack}"),
+    }
 }
 
 pub fn site_key(s: &str) -> String {
@@ -308,7 +311,7 @@ impl HealthMap {
             return false;
         }
         if let Some(r) = &h.rack {
-            if !available(self.state(&rack_key(r)).await) {
+            if !available(self.state(&rack_key(h.site.as_deref(), r)).await) {
                 return false;
             }
         }
@@ -455,14 +458,17 @@ impl HealthMap {
         let mut sites: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for h in hosts {
             if let Some(r) = &h.rack {
-                racks.entry(r.clone()).or_default().push(h.id.clone())
+                racks
+                    .entry(rack_key(h.site.as_deref(), r))
+                    .or_default()
+                    .push(h.id.clone())
             }
             if let Some(s) = &h.site {
                 sites.entry(s.clone()).or_default().push(h.id.clone())
             }
         }
         for (r, hs) in racks {
-            domains.push((rack_key(&r), hs))
+            domains.push((r, hs))
         }
         for (s, hs) in sites {
             domains.push((site_key(&s), hs))
