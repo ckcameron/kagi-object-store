@@ -20,8 +20,13 @@ kagi-config(1), kagi-install(1), kagi-volume-nbd(1)
 The runtime supports Reed-Solomon, canonical product-matrix MSR with d=2k-2, and CLAY. CLAY is the default configured EC family. With the cuda feature, data-heavy GF(256) transforms use the CUDA matrix engine when above gpu_threshold_bytes. Single-chunk CLAY/MSR recovery uses bandwidth-optimal helper requests rather than downloading complete helper chunks.
 .SH TOPOLOGY MINIMUM
 The daemon requires at least six configured hosts and at least six disks on every host.
+.SH PLANNED DEPLOYMENTS
+Configure planner_output.path and planner_output.policy in each node YAML to load a validated kagi-config deployment. The configured hosts, racks, sites and disks must match the deployment.
+Status reports the selected plan's dangerous two-site exception and Raft quorum risks. A site outage can interrupt access even when the surviving chunks can reconstruct an object.
+.PP
+Use PUT /v1/repair/<key> on the active Raft leader to repair a planned object and commit its updated locations.
 
 .SH KAGI WEB CONSOLE
 Each serving node exposes the Kagi operations console at /ui when web_console.enabled is true. The local user database stores Argon2id password hashes and viewer/admin roles. Use the web-user-add subcommand with --password-file to bootstrap users. The browser authentication exchange must be protected by TLS or a trusted TLS reverse proxy.
 .PP
-The console provides cluster monitoring, object/chunk locality inspection, known pending object operations, local/cluster logs, and Raft-backed bucket/WORM lifecycle administration.
+The console provides cluster monitoring, object/chunk locality inspection, known pending object operations, local/cluster logs, and Raft-backed bucket/WORM lifecycle administration. A persistent red banner identifies an acknowledged dangerous two-site configuration.

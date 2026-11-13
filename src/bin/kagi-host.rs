@@ -19,9 +19,13 @@ use axum::{
 };
 use blake3::Hasher;
 use clap::{Parser, Subcommand};
+use kagi_object_store::placement::{mask_position, PlacementPlan, KEYSPACE_BITS};
+#[path = "../planner_output.rs"]
+mod planner_output;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::IsTerminal,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
@@ -61,6 +65,8 @@ struct Config {
     server: Server,
     #[serde(default)]
     placement: Placement,
+    #[serde(default)]
+    planner_output: Option<planner_output::PlannerOutputRef>,
 }
 #[derive(Debug, Clone, Deserialize)]
 /// Kagi state or configuration used by the Cluster path.
@@ -68,6 +74,8 @@ struct Cluster {
     id: String,
     #[serde(default)]
     placement_salt: u64,
+    #[serde(default)]
+    placement_plan: Option<PlacementPlan>,
 }
 #[derive(Debug, Clone, Deserialize)]
 /// Kagi state or configuration used by the Host path.
@@ -163,6 +171,8 @@ struct Status {
     keyspace_bits: u8,
     slot_bits: u8,
     disks: Vec<DiskStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    site_loss_warning: Option<&'static str>,
 }
 #[derive(Clone)]
 /// Kagi state or configuration used by the App path.
@@ -180,6 +190,71 @@ fn hash64(parts: &[&[u8]]) -> u64 {
 /// Implements the keypos step and keeps its validation and state transitions visible at the call site.
 fn keypos(cluster: &str, key: &str) -> u64 {
     hash64(&[cluster.as_bytes(), b"\0", key.as_bytes()])
+}
+
+const SITE_LOSS_WARNING: &str =
+    "Unsafe two-site layout. Losing a site can make stored objects unavailable.";
+
+fn site_loss_warning(cfg: &Config) -> Option<&'static str> {
+    cfg.cluster
+        .placement_plan
+        .as_ref()
+        .filter(|plan| plan.unsafe_two_site())
+        .map(|_| SITE_LOSS_WARNING)
+}
+
+fn print_site_loss_warning(cfg: &Config) {
+    if let Some(message) = site_loss_warning(cfg) {
+        if std::io::stderr().is_terminal() {
+            eprintln!("\x1b[1;97;41m DANGER \x1b[0m {message}");
+        } else {
+            eprintln!("DANGER {message}");
+        }
+    }
+}
+
+fn locate_key(cfg: &Config, key: &str) -> Result<serde_json::Value> {
+    let pos = keypos(&cfg.cluster.id, key);
+    if let Some(plan) = &cfg.cluster.placement_plan {
+        let pos = mask_position(pos);
+        let mut fragments = Vec::new();
+        for (fragment, disks) in plan.locations(pos)?.iter().enumerate() {
+            for (replica, &disk_index) in disks.iter().enumerate() {
+                let disk = &plan.disks[disk_index];
+                let position = plan.chunk_position(pos, fragment, replica, disk_index)?;
+                fragments.push(serde_json::json!({
+                    "fragment": fragment,
+                    "replica": replica,
+                    "position": format!("0x{position:015x}"),
+                    "site": disk.site,
+                    "rack": disk.rack,
+                    "host": disk.host,
+                    "disk": disk.id,
+                }));
+            }
+        }
+        return Ok(serde_json::json!({
+            "key": key,
+            "position": format!("0x{pos:015x}"),
+            "keyspace_bits": KEYSPACE_BITS,
+            "fragments": fragments,
+        }));
+    }
+    let disk = local_disk(cfg, pos).map(|disk| &disk.id);
+    Ok(serde_json::json!({
+        "key": key,
+        "position": format!("0x{pos:016x}"),
+        "slot": pos >> (64 - cfg.placement.slot_bits),
+        "local_disk": disk,
+    }))
+}
+
+fn local_object_access(cfg: &Config) -> Result<()> {
+    anyhow::ensure!(
+        cfg.cluster.placement_plan.is_none(),
+        "use kagi-cluster-host for objects protected by a cluster placement plan"
+    );
+    Ok(())
 }
 /// Implements the u01 step and keeps its validation and state transitions visible at the call site.
 fn u01(x: u64) -> f64 {
@@ -331,25 +406,66 @@ fn validate(cfg: &Config) -> Result<()> {
 }
 /// Implements the load step and keeps its validation and state transitions visible at the call site.
 fn load(path: &PathBuf) -> Result<Config> {
-    serde_saphyr::from_str(
+    let mut cfg: Config = serde_saphyr::from_str(
         &fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
     )
-    .context("parse host YAML")
+    .context("parse host YAML")?;
+    if let Some(reference) = &cfg.planner_output {
+        anyhow::ensure!(
+            cfg.cluster.placement_plan.is_none(),
+            "choose planner_output or cluster.placement_plan"
+        );
+        cfg.cluster.placement_plan = Some(reference.load(path)?.0);
+    }
+    if let Some(plan) = &cfg.cluster.placement_plan {
+        plan.validate_tolerance()?;
+        let planned_disks: std::collections::BTreeSet<_> = plan
+            .disks
+            .iter()
+            .filter(|disk| disk.host == cfg.host.id)
+            .map(|disk| (disk.id.as_str(), disk.site.as_deref(), disk.rack.as_deref()))
+            .collect();
+        let local_disks = cfg
+            .host
+            .disks
+            .iter()
+            .map(|disk| {
+                (
+                    disk.id.as_str(),
+                    cfg.host.site.as_deref(),
+                    cfg.host.rack.as_deref(),
+                )
+            })
+            .collect();
+        anyhow::ensure!(
+            planned_disks == local_disks,
+            "local host topology does not match the placement plan"
+        );
+    }
+    Ok(cfg)
+}
+
+fn host_status(cfg: &Config, disks: Vec<DiskStatus>) -> Status {
+    Status {
+        cluster: cfg.cluster.id.clone(),
+        host: cfg.host.id.clone(),
+        site: cfg.host.site.clone(),
+        rack: cfg.host.rack.clone(),
+        keyspace_bits: if cfg.cluster.placement_plan.is_some() {
+            KEYSPACE_BITS
+        } else {
+            64
+        },
+        slot_bits: cfg.placement.slot_bits,
+        disks,
+        site_loss_warning: site_loss_warning(cfg),
+    }
 }
 /// Implements the health step and keeps its validation and state transitions visible at the call site.
 async fn health(State(a): State<App>) -> impl IntoResponse {
     let disks = a.cfg.host.disks.iter().map(disk_status).collect::<Vec<_>>();
     let ok = disks.iter().all(|d| d.state == "online");
-    let body = serde_json::to_string(&Status {
-        cluster: a.cfg.cluster.id.clone(),
-        host: a.cfg.host.id.clone(),
-        site: a.cfg.host.site.clone(),
-        rack: a.cfg.host.rack.clone(),
-        keyspace_bits: 64,
-        slot_bits: a.cfg.placement.slot_bits,
-        disks,
-    })
-    .unwrap();
+    let body = serde_json::to_string(&host_status(&a.cfg, disks)).unwrap();
     (
         if ok {
             StatusCode::OK
@@ -362,12 +478,10 @@ async fn health(State(a): State<App>) -> impl IntoResponse {
 }
 /// Implements the locate step and keeps its validation and state transitions visible at the call site.
 async fn locate(State(a): State<App>, Path(key): Path<String>) -> impl IntoResponse {
-    let pos = keypos(&a.cfg.cluster.id, &key);
-    let disk = local_disk(&a.cfg, pos).map(|d| d.id.clone());
-    axum::Json(serde_json::json!( {
-        "key":key,"position":format!("0x{pos:016x}"),"slot":pos>>(64-a.cfg.placement.slot_bits),"local_disk":disk
+    match locate_key(&a.cfg, &key) {
+        Ok(locations) => axum::Json(locations).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
-    ))
 }
 /// Implements the put obj step and keeps its validation and state transitions visible at the call site.
 async fn put_obj(
@@ -461,16 +575,21 @@ async fn delete_obj(State(a): State<App>, Path(key): Path<String>) -> Response {
 /// Implements the serve step and keeps its validation and state transitions visible at the call site.
 async fn serve(cfg: Config) -> Result<()> {
     validate(&cfg)?;
+    print_site_loss_warning(&cfg);
     let addr: SocketAddr = cfg.server.listen.parse().context("invalid server.listen")?;
     let appstate = App { cfg: Arc::new(cfg) };
     let app = Router::new()
         .route("/health", get(health))
-        .route("/v1/locate/*key", get(locate))
-        .route(
+        .route("/v1/locate/*key", get(locate));
+    let app = if appstate.cfg.cluster.placement_plan.is_none() {
+        app.route(
             "/v1/object/*key",
             put(put_obj).get(get_obj).head(head_obj).delete(delete_obj),
         )
-        .with_state(appstate);
+    } else {
+        app
+    }
+    .with_state(appstate);
     let l = TcpListener::bind(addr).await?;
     println!("kagi-host listening on {addr}");
     axum::serve(l, app).await?;
@@ -485,19 +604,13 @@ async fn main() -> Result<()> {
         Command::Serve => serve(cfg).await?,
         Command::Validate => {
             validate(&cfg)?;
+            print_site_loss_warning(&cfg);
             println!("OK: {} / {}", cfg.cluster.id, cfg.host.id);
         }
         Command::Status => {
             validate(&cfg)?;
-            let s = Status {
-                cluster: cfg.cluster.id.clone(),
-                host: cfg.host.id.clone(),
-                site: cfg.host.site.clone(),
-                rack: cfg.host.rack.clone(),
-                keyspace_bits: 64,
-                slot_bits: cfg.placement.slot_bits,
-                disks: cfg.host.disks.iter().map(disk_status).collect(),
-            };
+            print_site_loss_warning(&cfg);
+            let s = host_status(&cfg, cfg.host.disks.iter().map(disk_status).collect());
             println!("{}", serde_json::to_string_pretty(&s)?);
         }
         Command::Disks => {
@@ -506,6 +619,13 @@ async fn main() -> Result<()> {
             }
         }
         Command::Locate { key } => {
+            if cfg.cluster.placement_plan.is_some() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&locate_key(&cfg, &key)?)?
+                );
+                return Ok(());
+            }
             let p = keypos(&cfg.cluster.id, &key);
             let d = local_disk(&cfg, p).map(|x| x.id.as_str()).unwrap_or("-");
             println!(
@@ -514,6 +634,7 @@ async fn main() -> Result<()> {
             );
         }
         Command::Put { key, file } => {
+            local_object_access(&cfg)?;
             validate(&cfg)?;
             let p = keypos(&cfg.cluster.id, &key);
             let d = local_disk(&cfg, p).context("no disk")?;
@@ -523,11 +644,13 @@ async fn main() -> Result<()> {
             println!("stored 0x{p:016x} {} {}", d.id, dst.display());
         }
         Command::Get { key, output } => {
+            local_object_access(&cfg)?;
             let p = keypos(&cfg.cluster.id, &key);
             let d = local_disk(&cfg, p).context("no disk")?;
             fs::copy(object_path(d, p, &key), output)?;
         }
         Command::Delete { key } => {
+            local_object_access(&cfg)?;
             let p = keypos(&cfg.cluster.id, &key);
             let d = local_disk(&cfg, p).context("no disk")?;
             let path = object_path(d, p, &key);

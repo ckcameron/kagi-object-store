@@ -29,6 +29,13 @@ Browser authentication currently uses HTTP Basic against the Argon2id user datab
 
 ## Views
 
+The console displays a persistent red danger banner when an acknowledged
+two-site policy allows zero site failures. Losing a site can make objects
+unavailable. The banner also reports configured sites whose loss can prevent a
+Raft majority and any failure to validate quorum under the plan's concurrent
+outage budget. The same protection information is available through
+`/v1/monitor/status` and `kagi-cluster-host status`.
+
 - **Overview** — local/cluster object counts, logical bytes, fragment counts, resource-health totals, node role/leader information, Linux load, memory availability and uptime. It refreshes every two seconds.
 - **Object explorer** — prefix search, immutable manifest metadata, EC family/geometry, every chunk replica, host/rack/site/disk locality, current resource health, checksum metadata, and known pending GC or snapshot-archive work.
 - **Buckets & Lifecycle** — viewer inspection plus admin creation/update of Raft-replicated bucket metadata, versioning intent and default WORM mode/retain-until/legal-hold properties. Object PUTs inherit the bucket WORM default if no per-object retention header is supplied.

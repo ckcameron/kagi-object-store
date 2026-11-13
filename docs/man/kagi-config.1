@@ -1,19 +1,19 @@
 .\" SPDX-License-Identifier: CC-BY-NC-SA-4.0
 .TH KAGI-CONFIG 1 "September 2026" "Kagi 0.38.0" "User Commands"
 .SH NAME
-kagi-config \- model Kagi failure domains, optimize EC chunk geometry, and emit a 64-bit slot plan
+kagi-config \- model Kagi failure domains, optimize chunk geometry, and emit a 60-bit placement plan
 .SH SYNOPSIS
 .B kagi-config
 [\fB--config\fR FILE | \fB--wizard\fR] [OPTIONS]
 .SH DESCRIPTION
-Runs Monte Carlo and deterministic failure-domain analysis over site/rack/host/network/disk topology. It selects a placement salt, compares Reed-Solomon, LRC, MSR and CLAY chunk geometries, and emits explicit global and per-disk slot/key ranges.
+Runs Monte Carlo and deterministic analysis of concurrent site, rack, host, network and disk failures. It compares Reed-Solomon, LRC, MSR and CLAY chunk geometries and emits a placement salt, equal host ranges and validated deployment policies.
 .PP
-The minimum supported topology is six servers with at least six disks per server. Each failure category is configured to tolerate two simultaneous losses where at least three independent domains exist, one loss where exactly two domains exist, and zero where only one domain exists.
+The minimum supported topology is six servers across at least two racks, with at least six disks per server. A policy must tolerate concurrent disk, host and rack failures. Site and network tolerance apply where those domains have multiple members. With exactly two sites, a policy may explicitly allow zero site failures after the operator types I ACCEPT THAT LOSING A SITE CAN MAKE OBJECTS UNAVAILABLE.
 .SH WIZARD
 .B --wizard
 starts by asking whether to use quick defaults.
 .PP
-Quick mode asks only for number of sites, racks per site, hosts per rack, and NVMe disks per host. It uses 8 TB NVMe disks, weight 1.0, default failure/repair rates, slot_bits 16, automatic EC geometry selection, and sequential /24 networks from 10.0.0.0/8. Host addresses are assigned .1 through .254 in each generated subnet.
+Quick mode asks for number of sites, racks per site, hosts per rack, and NVMe disks per host. It uses 8 TB NVMe disks, default failure and repair rates, and automatic EC geometry selection. Every host has two modeled network paths on distinct sequential /24 subnets from 10.0.0.0/8.
 .PP
 Answer no to receive the full questionnaire for disk classes, AFRs, capacities, site/rack CIDRs, multi-homing, host names, device identities, failure rates, repair behavior, and policy constraints.
 .SH OPTIONS
@@ -49,19 +49,31 @@ Importance-sampling trials per finalist.
 Ordinary-MC finalists evaluated with rare-event simulation.
 .TP
 .B --validation-keys N
-Key samples used for deterministic failure-tolerance validation.
+Accepted for compatibility. Validation covers every distinct host-range layout.
 .TP
 .B --time-trials N
 Continuous-time trajectories.
 .TP
 .B --horizon-years YEARS
 Years per continuous-time trajectory.
+.TP
+.B --max-storage-overhead RATIO
+Maximum stored fragment payload relative to object size for a candidate geometry.
+.TP
+.B --example-object-size-bytes BYTES
+Object size used for storage overhead comparisons. Repeat to compare several sizes.
+.TP
+.B --chunk-replicas N
+Store N physical copies of each encoded chunk.
+.TP
+.B --object-replicas N
+Force N full-object copies instead of erasure coding.
 .SH EC GEOMETRY OPTIMIZATION
 For every policy, the output reports the lowest-loss feasible tested geometry for Reed-Solomon, LRC, MSR, and CLAY. If optimize.auto_geometry is true, the policy's selected protection is changed to the feasible family/geometry with the lowest simulated unreadable probability, with the configured objective used as the secondary criterion.
 .PP
 Automatic search is bounded by topology placement limits and defaults to no more than 32 total chunks. Set optimize.max_total_fragments to change this ceiling.
 .SH OUTPUT
-The YAML output contains infrastructure, optimizer results, selected policy protection, per-schema geometry reports, placement salt, global slot assignments, and keyspace.disks[].slot_ranges. Disk mount names are generated as host-diskclass-ordinal under the configured mount root.
+The YAML output contains infrastructure, optimizer results, per-schema geometry reports, keyspace.host_ranges, and policies.<name>.deployment. Reference the output and policy in the node YAML's planner_output setting. Disk mount names are generated as host-diskclass-ordinal under the configured mount root.
 .SH FILES
 .I kagi.join.key
 contains a newly generated cluster admission secret unless overridden.

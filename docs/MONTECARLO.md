@@ -4,9 +4,17 @@
 
 ## Purpose
 
-`kagi-config` turns physical failure domains into a deployable 64-bit Kagi placement plan. It models sites, racks, hosts, network paths, disk classes, repair behavior, correlated failures, and data-protection geometry. The generated YAML contains the selected placement salt, exact per-disk slot/key ranges, mount paths, failure estimates, and the best tested chunk geometry for every supported erasure-code family.
+`kagi-config` turns physical failure domains into a deployable 60-bit Kagi
+placement plan. It models sites, racks, hosts, network paths, disk classes,
+repair behavior, correlated failures, and data-protection geometry. The
+generated YAML contains the selected placement salt, equal host key ranges,
+mount paths, failure estimates, and the best tested geometry for each supported
+erasure-code family.
 
-The planner is advisory: it evaluates placement and recoverability policy. The runtime data-plane codec remains the authoritative implementation boundary. The runtime implements Reed-Solomon, canonical product-matrix MSR (`d=2k-2`), and CLAY; LRC remains planner-only.
+Set `planner_output` in each node YAML to deploy a selected policy. The planner
+and runtime use the same placement and code geometry. The planner measures
+chunk reconstructability. Operational status also checks Raft site quorum,
+which can affect access to reconstructible objects.
 
 ## Invocation modes
 
@@ -36,17 +44,16 @@ Answer `Y` for quick mode or `N` for the full topology questionnaire.
 
 The planner rejects configurations with fewer than **6 servers total** or fewer than **6 disks on any server**. These limits are validated for wizard-generated and YAML-provided configurations.
 
-Each policy must also request at least two simultaneous losses in each failure category when that is structurally possible. The minimum is computed as:
-
-- 1 domain: tolerance 0
-- 2 domains: tolerance 1
-- 3 or more domains: tolerance 2
-
-This rule applies independently to disks, hosts, racks, sites, and network domains. A higher user-configured tolerance is allowed.
+The topology needs at least two racks. Each policy must tolerate at least one
+concurrent failure of a disk, host, and rack. When the topology has multiple
+sites or network domains, each corresponding minimum is one. When there are
+exactly two sites, an operator can set `tolerate.sites: 0` and type
+`I ACCEPT THAT LOSING A SITE CAN MAKE OBJECTS UNAVAILABLE` at setup. The daemon
+displays a persistent danger warning for that policy.
 
 ## Quick-default mode
 
-Quick mode asks only for:
+Quick mode asks for:
 
 1. number of sites;
 2. racks per site;
@@ -55,7 +62,6 @@ Quick mode asks only for:
 
 It enforces at least six total servers and at least six disks per host. All other values are synthesized from defaults:
 
-- slot bits: `16`;
 - mount root: `/var/lib/kagi/disks` unless `--mount-root` overrides it;
 - disk class: `nvme`;
 - disk capacity: `8,000,000,000,000` bytes (8 TB decimal) per disk;
@@ -89,7 +95,9 @@ Quick mode allocates sequential `/24` networks from `10.0.0.0/8`:
 10.1.0.0/24
 ```
 
-Addresses within each subnet are assigned serially from `.1` through `.254`. A rack with more than 254 hosts receives additional `/24` ranges automatically. Quick mode assigns one storage network path to each host; use the full wizard to model multi-homing.
+Addresses within each subnet are assigned serially from `.1` through `.254`.
+Quick mode assigns two storage network paths per host on distinct subnets. A
+rack with more than 254 hosts receives another pair of `/24` ranges.
 
 ## Full wizard
 
@@ -118,13 +126,24 @@ Example:
 The planner compares these families independently for every policy:
 
 - Reed-Solomon / MDS (`k + m`);
-- LRC (`k`, local groups, local parity, global parity);
+- LRC (`k`, local groups, one local parity per group, one global parity);
 - MSR (`k + m`, repair fan-in `d`);
 - CLAY (`k + m`, repair fan-in `d`).
 
 For each schema, the planner varies chunk geometry within the physically placeable limits of the configured disks and the policy's `max_fragments_per_host` / `max_fragments_per_disk`. The default automatic search ceiling is 32 total chunks and may be raised with `optimize.max_total_fragments`.
 
-Each candidate is evaluated in isolation against the real topology failure model. Candidates are ordered first by simulated unreadable probability, then by the existing storage-overhead objective. The best candidates are subjected to deterministic tolerance validation across disk, host, rack, site, and network-domain losses. A geometry that cannot satisfy the requested tolerance is not considered feasible even if its sampled loss rate is low.
+Each candidate is evaluated against the configured topology and failure model.
+Deterministic validation checks the joint budget across disk, host, rack,
+site, and network failures before ranking feasible geometries by estimated
+unreadable probability on the same importance-sampled failure draws. For
+single-copy layouts where the disk-loss margin is known, a higher margin can
+break equal probability estimates before storage overhead. An estimate with
+zero observed loss events is reported as unresolved. Use `optimize.max_storage_overhead` to set a ceiling and
+`chunk_replicas` to specify physical copies per encoded chunk. The ceiling
+applies to the nominal payload ratio. For a specific object size, the
+`estimated_object_storage` report includes codec padding and physical copies.
+Filesystem and encryption overhead are outside this estimate. A verification
+that reaches its work limit is reported as infeasible with a diagnostic.
 
 The planner alternates placement-salt selection and geometry optimization so chunk count is selected against the placement it will actually use rather than an arbitrary fixed salt.
 
@@ -171,13 +190,24 @@ Each `policies.<name>.erasure_scheme_optimization` record includes:
 - tolerance-validation result and counterexample if infeasible; and
 - estimated repair window.
 
-## Per-disk slot/keyspace output
+## Deployment output
 
-The output contains both a global `keyspace.slot_assignment` list and per-disk `keyspace.disks[].slot_ranges`. Each range contains exact start/end slot numbers and inclusive 64-bit key bounds. Per-disk records include host, class, ordinal, generated mount name/path, device path, weight, target fraction, target slot count, actual slot count, and every contiguous range owned by that disk.
+The output contains the contiguous `keyspace.host_ranges` and a validated
+`policies.<name>.deployment` for each selected policy. Per-disk records include
+the host, class, ordinal, generated mount name/path, and device path. The
+deployed plan derives each chunk position and its destination from the object
+key, chunk and copy indexes, salt, and topology. Within a host, disks with
+the same network paths rotate by object position. This distributes data across
+those disks while preserving the verified mixed-failure tolerance.
 
 ## Failure modeling
 
-Disk failures use class-specific AFR when present and otherwise fall back to `failure_model.disk_annual_probability`. Host, rack, site, and network failures are modeled independently unless correlated events are configured. A multi-homed host is network-unreachable only when all of its configured network domains are failed.
+Disk failures use class-specific AFR when present and otherwise fall back to
+`failure_model.disk_annual_probability`. Disks have the highest default rate.
+Individual failures are sampled in the same scenario across levels, and a
+parent failure removes its descendants. Configured correlated events add
+failures to the same scenario. A multi-homed host is network-unreachable when
+all of its configured network domains fail.
 
 The optimizer performs ordinary Monte Carlo, importance sampling, adaptive rare-event biasing, deterministic tolerance validation, and continuous-time failure/repair trajectories.
 
@@ -223,7 +253,12 @@ The GPU path intentionally accelerates the regular, massively parallel portion o
 
 ### Runtime presets
 
-`--run-mode full` preserves the normal high-confidence workload. `quick30` and `quick60` reduce candidate count, ordinary/rare-event trials, deterministic validation keys, AIS rounds and time-domain trajectories. The generated optimizer section records both the run mode and a reduced-confidence warning. These names indicate approximate runtime classes on a well-provisioned modern multi-core system (and are especially useful with CUDA); they are not wall-clock guarantees.
+`--run-mode full` preserves the normal high-confidence workload. `quick30` and
+`quick60` reduce candidate count, ordinary/rare-event trials, AIS rounds and
+time-domain trajectories. They apply the same deterministic validation as full
+mode. The generated optimizer section records both the run mode and a
+reduced-confidence warning. These names indicate approximate runtime classes
+on a well-provisioned modern multi-core system.
 
 Examples:
 

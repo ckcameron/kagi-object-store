@@ -639,7 +639,7 @@ fn lrc_encode(data: &[u8], layout: &ErasureLayout) -> Result<EncodedShards> {
 
 /// Select a basis by elimination, rather than assuming any k surviving rows
 /// suffice. This also supports recoverable patterns involving local parity.
-fn lrc_basis(layout: &ErasureLayout, available: &[usize]) -> Result<Vec<usize>> {
+pub(crate) fn lrc_basis(layout: &ErasureLayout, available: &[usize]) -> Result<Vec<usize>> {
     let k = layout.data_shards;
     let matrix = lrc_matrix(layout);
     let mut pivots: Vec<Option<Vec<u8>>> = vec![None; k];

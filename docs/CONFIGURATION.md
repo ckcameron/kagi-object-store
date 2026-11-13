@@ -19,6 +19,7 @@ important defaults are:
 | `listen` | `0.0.0.0:7400` | TCP API/web listener |
 | `s3` | absent | disabled; see [S3 configuration](S3.md) |
 | `s3.max_object_bytes` | 67,108,864 | bound for objects, parts and assembled multipart uploads |
+| `planner_output` | absent | generated 60-bit placement plan for new objects |
 | `cluster.active_key_id` | null | nonzero key generation for new writes; null selects legacy |
 | `cluster.at_rest_keys` | empty map | retained generation roots; see [rotation](AT-REST-ROTATION.md) |
 | `cluster.replication` | 3 | replication copies |
@@ -74,6 +75,42 @@ The `security` section defaults to no additional kernel or logical-object rules.
 When present, security configuration uses `deny_unknown_fields`: misspelled security
 keys fail configuration parsing rather than being silently ignored.
 
+### Deploying a placement plan
+
+Generate an output file with `kagi-config` and distribute the same file to every
+cluster node. In each node YAML, select the policy by name.
+
+```yaml
+planner_output:
+  path: kagi.generated.yaml
+  policy: default
+```
+
+Relative paths resolve against the node YAML's directory. Keep `cluster.hosts`
+and its endpoints in the node YAML. Its host IDs, disk IDs, sites, and racks must
+match the selected policy's deployment. The node loads the generated join-key
+hash and verifies it against its configured `join_key_b64`. The plan supplies the
+codec, geometry, and copy counts. Omit those fields or match the plan exactly.
+Acceleration options such as `cluster.erasure.backend` may still be set for an
+EC plan. Mount each configured local device at `data_root/disks/<disk-id>`.
+You can also embed the same deployment under `cluster.placement_plan` and
+configure the join-key hash separately.
+
+Existing manifests retain their recorded locations. Keep the previous
+`cluster.placement_salt` when adding a plan to an existing cluster. Generate and
+distribute a new plan and matching node configurations before adding capacity
+to a planned deployment.
+
+For exactly two labeled sites, an operator can explicitly set a policy's
+`tolerate.sites` to zero. Setup requires typing
+`I ACCEPT THAT LOSING A SITE CAN MAKE OBJECTS UNAVAILABLE`. A plan that uses
+this exception without the recorded acknowledgment is rejected. Status
+commands and the web console display a persistent danger warning while the
+exception is active. They also report the sites whose loss can prevent a Raft
+majority, and whether Raft retains quorum within the plan's concurrent site,
+rack, host, and network failure budget. That check assumes Raft uses the
+declared network paths and that metadata storage survives data-disk faults.
+
 ### Transport caveats
 
 QUIC requires the `quic` Cargo feature, a peer `quic_endpoint`, and TLS material.
@@ -95,8 +132,6 @@ enabled); it is not a vendor drive-cache command. Unsupported sysfs writes fail 
 ## Monte Carlo topology
 
 ```yaml
-slot_bits: 16
-
 topology:
   mount_root: /var/lib/kagi/disks
   network_domains:
@@ -201,11 +236,20 @@ policies:
 
 The planner requires at least six hosts and at least six disks on every host. Configuration-file inputs are checked with the same validator used for wizard output.
 
-The minimum requested tolerance for each failure-domain category is derived from the number of independent members in that category: zero for one member, one for two members, and two for three or more members. Higher values may be configured.
+Hosts and disks require site and rack labels, and the topology needs at least two
+racks. The planner requires tolerance of at least one disk, one host, and one
+rack. It also requires one site when there are multiple sites, subject to the
+two-site exception above. A network tolerance applies where there are multiple
+configured network domains. The planner tests the configured failures
+concurrently.
 
 ## Automatic EC geometry search
 
-Every policy receives a per-schema optimization report for Reed-Solomon, LRC, MSR and CLAY. Add `optimize.auto_geometry: true` when the optimizer should also replace the policy's seed `protection` with the lowest-loss feasible geometry.
+Set `optimize.auto_geometry: true` to compare Reed-Solomon, LRC, MSR, and CLAY
+and replace the seed `protection` with the lowest-loss feasible geometry. Supply
+`optimize.replication_copies` to include whole-object replication in that
+comparison. A fixed protection policy is checked against the same mixed failure
+requirements and overhead ceiling.
 
 ```yaml
 policies:
@@ -232,7 +276,7 @@ policies:
       # max_data_fragments may be supplied to narrow the search.
 ```
 
-Supported planner `protection.type` values are `replication`, `reed_solomon`, `lrc`, `msr`, and `clay`. Runtime codecs exist for Reed-Solomon, canonical product-matrix MSR, and CLAY; LRC remains planning-only.
+Supported planner `protection.type` values are `replication`, `reed_solomon`, `lrc`, `msr`, and `clay`. The runtime LRC layout uses one local parity shard per group and one global parity shard. Use `chunk_replicas` for the number of physical copies of each encoded chunk and `optimize.max_storage_overhead` to limit the automatic geometry search.
 
 The automatic search is bounded by both the configured search ceiling and the actual number of fragments that can be placed under `max_fragments_per_host` and `max_fragments_per_disk`.
 
@@ -241,12 +285,11 @@ The automatic search is bounded by both the configured search ceiling and the ac
 Quick mode uses:
 
 ```text
-slot_bits: 16
 mount_root: /var/lib/kagi/disks
 media: nvme
 capacity per disk: 8,000,000,000,000 bytes
 weight: 1.0
-network pool: sequential /24s from 10.0.0.0/8
+network pool: two paths per host on distinct sequential /24s from 10.0.0.0/8
 disk annual failure probability: 0.01
 host annual failure probability: 0.002
 rack annual failure probability: 0.0005

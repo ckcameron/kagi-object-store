@@ -2,7 +2,7 @@
 // Copyright (c) 2026 CK Cameron. Licensed under CC BY-NC-SA 4.0.
 //! Kagi topology planner, Monte Carlo durability simulator, and deployment-plan generator.
 //!
-//! This binary turns a physical topology and failure model into a deterministic 64-bit
+//! This binary turns a physical topology and failure model into a deterministic 60-bit
 //! keyspace layout. It evaluates replication and erasure-code candidates, validates the
 //! configured failure envelope, estimates rare loss events, and writes the selected disk
 //! slot ranges. The interactive wizard and progress renderer live here because they are
@@ -11,21 +11,21 @@
 mod checkpoint;
 mod durability;
 
-// Link the core's native accelerator libraries for this binary's Monte Carlo FFI.
-#[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-use kagi_object_store as _;
-
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use blake3::Hasher;
 use clap::{Parser, ValueEnum};
+use kagi_object_store::placement::{
+    mask_position, DiskPermutations, DomainDisk, FailureBudget, HostRange, PlacementPlan,
+    ProtectionLayout, KEYSPACE_BITS, TWO_SITE_ACKNOWLEDGMENT,
+};
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{Beta, ContinuousCDF};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -60,7 +60,7 @@ struct Args {
     #[arg(long, conflicts_with = "resume")]
     checkpoint: Option<PathBuf>,
     /// Resume using the saved topology and options; no original input file is needed.
-    #[arg(long, conflicts_with_all=["config","wizard","trials","candidates","seed","rare_trials","finalists","validation_keys","time_trials","horizon_years","ais_rounds","elite_fraction","run_mode","mc_backend","output","join_key_output","mount_root","checkpoint_batch_trials","checkpoint_seconds"])]
+    #[arg(long, conflicts_with_all=["config","wizard","trials","candidates","seed","rare_trials","finalists","validation_keys","time_trials","horizon_years","ais_rounds","elite_fraction","run_mode","mc_backend","output","join_key_output","mount_root","checkpoint_batch_trials","checkpoint_seconds","max_storage_overhead","example_object_size_bytes","chunk_replicas","object_replicas"])]
     resume: Option<PathBuf>,
     /// Save completed batches at this interval, checked at batch boundaries.
     #[arg(long, default_value_t = 60)]
@@ -95,8 +95,8 @@ struct Args {
     /// Number of best ordinary-MC candidates to evaluate with importance sampling.
     #[arg(long, default_value_t = 8)]
     finalists: usize,
-    /// Number of deterministic keyspace samples used for exhaustive tolerance validation.
-    #[arg(long, default_value_t = 128)]
+    // Accepted for compatibility with older command lines. Validation now covers all host ranges.
+    #[arg(long, default_value_t = 128, hide = true)]
     validation_keys: usize,
     /// Continuous-time failure/repair trajectories per finalist.
     #[arg(long, default_value_t = 20_000)]
@@ -125,6 +125,19 @@ struct Args {
     /// Monte Carlo execution backend. CUDA accelerates bulk EC readability scoring when built with --features cuda.
     #[arg(long,value_enum,default_value_t=McBackend::Auto)]
     mc_backend: McBackend,
+    /// Cap the nominal stored/logical payload ratio for every selected policy.
+    #[arg(long)]
+    max_storage_overhead: Option<f64>,
+    /// Object size for the encoded-payload estimate. Repeat for multiple sizes.
+    #[arg(long)]
+    #[serde(default)]
+    example_object_size_bytes: Vec<u64>,
+    /// Number of copies of every planned chunk.
+    #[arg(long)]
+    chunk_replicas: Option<usize>,
+    /// Plan this many full object copies instead of searching erasure geometries.
+    #[arg(long, conflicts_with = "chunk_replicas")]
+    object_replicas: Option<usize>,
 }
 /// Implements the apply run mode step and keeps its validation and state transitions visible at the call site.
 fn apply_run_mode(args: &mut Args) {
@@ -431,6 +444,7 @@ fn progress_best_schema(loss: f64, summary: impl Into<String>) {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the Config path.
 struct Config {
+    #[serde(default = "default_slot_bits")]
     slot_bits: u8,
     topology: Topology,
     policies: BTreeMap<String, Policy>,
@@ -439,6 +453,16 @@ struct Config {
     repair_model: RepairModel,
     #[serde(default)]
     optimization: Optimization,
+    #[serde(default = "default_example_object_sizes")]
+    example_object_sizes_bytes: Vec<u64>,
+}
+
+fn default_slot_bits() -> u8 {
+    16
+}
+
+fn default_example_object_sizes() -> Vec<u64> {
+    vec![4_096, 1_048_576, 1_073_741_824]
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the Topology path.
@@ -453,6 +477,8 @@ struct Topology {
     #[serde(default)]
     hosts: Vec<HostTopology>,
     disks: Vec<Disk>,
+    #[serde(skip)]
+    placement_disks: Vec<DomainDisk>,
 }
 /// Implements the default mount root step and keeps its validation and state transitions visible at the call site.
 fn default_mount_root() -> String {
@@ -531,9 +557,12 @@ struct Policy {
     protection: Protection,
     #[serde(default)]
     locality: Locality,
+    #[serde(default)]
     tolerate: Tolerance,
     #[serde(default)]
     optimize: Option<ProtectionSearch>,
+    #[serde(default = "one_usize")]
+    chunk_replicas: usize,
 }
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -572,14 +601,16 @@ impl Protection {
         match self {
             Self::Replication { copies } => *copies,
             Self::ReedSolomon { k, m } | Self::Msr { k, m, .. } | Self::Clay { k, m, .. } => {
-                *k + *m
+                k.saturating_add(*m)
             }
             Self::Lrc {
                 k,
                 local_groups,
                 local_parity,
                 global_parity,
-            } => *k + *local_groups * *local_parity + *global_parity,
+            } => k
+                .saturating_add(local_groups.saturating_mul(*local_parity))
+                .saturating_add(*global_parity),
         }
     }
     fn data_fragments(&self) -> usize {
@@ -603,46 +634,73 @@ impl Protection {
             Self::Clay { .. } => "clay",
         }
     }
-    fn overhead(&self) -> f64 {
+    fn layout(&self) -> ProtectionLayout {
         match self {
-            Self::Replication { copies } => *copies as f64,
-            Self::ReedSolomon { k, .. }
-            | Self::Lrc { k, .. }
-            | Self::Msr { k, .. }
-            | Self::Clay { k, .. } => self.fragments() as f64 / *k as f64,
+            Self::Replication { copies } => ProtectionLayout::Replication { copies: *copies },
+            Self::ReedSolomon { k, m } => ProtectionLayout::ReedSolomon { k: *k, m: *m },
+            Self::Lrc { k, .. } => ProtectionLayout::Lrc {
+                k: *k,
+                m: self.parity_fragments(),
+            },
+            Self::Msr { k, m, d } => ProtectionLayout::Msr {
+                k: *k,
+                m: *m,
+                d: *d,
+            },
+            Self::Clay { k, m, d } => ProtectionLayout::Clay {
+                k: *k,
+                m: *m,
+                d: *d,
+            },
         }
     }
     fn readable(&self, alive: &[bool]) -> bool {
-        match self {
-            Self::Replication { .. } => alive.iter().any(|x| *x),
-            Self::ReedSolomon { k, .. } | Self::Msr { k, .. } | Self::Clay { k, .. } => {
-                alive.iter().filter(|x| **x).count() >= *k
-            }
-            Self::Lrc {
-                k,
-                local_groups,
-                local_parity,
-                global_parity,
-            } => {
-                if *local_groups == 0 || !(*k).is_multiple_of(*local_groups) {
-                    return false;
-                }
-                let per = *k / *local_groups;
-                let mut deficit = 0usize;
-                let mut idx = 0usize;
-                for _ in 0..*local_groups {
-                    let len = per + *local_parity;
-                    let survivors = alive[idx..idx + len].iter().filter(|x| **x).count();
-                    deficit += per.saturating_sub(survivors);
-                    idx += len;
-                }
-                let gp = alive[idx..idx + *global_parity]
-                    .iter()
-                    .filter(|x| **x)
-                    .count();
-                deficit <= gp
-            }
+        self.layout().readable(alive)
+    }
+}
+
+impl Policy {
+    fn auto_geometry(&self) -> bool {
+        self.optimize
+            .as_ref()
+            .is_some_and(|search| search.auto_geometry)
+    }
+
+    fn plan(
+        &self,
+        topology: &Topology,
+        salt: u64,
+        acknowledged_unsafe_two_site: bool,
+    ) -> PlacementPlan {
+        PlacementPlan {
+            salt,
+            disks: topology.placement_disks.clone(),
+            protection: self.protection.layout(),
+            chunk_replicas: self.chunk_replicas,
+            max_fragments_per_host: self.locality.max_fragments_per_host,
+            max_fragments_per_disk: self.locality.max_fragments_per_disk,
+            tolerate: FailureBudget {
+                sites: self.tolerate.sites,
+                racks: self.tolerate.racks,
+                hosts: self.tolerate.hosts,
+                disks: self.tolerate.disks,
+                networks: self.tolerate.networks,
+            },
+            acknowledged_unsafe_two_site: acknowledged_unsafe_two_site && self.tolerate.sites == 0,
         }
+    }
+
+    fn overhead(&self) -> f64 {
+        self.protection
+            .layout()
+            .nominal_overhead(self.chunk_replicas)
+    }
+
+    fn within_overhead_limit(&self) -> bool {
+        self.optimize
+            .as_ref()
+            .and_then(|search| search.max_storage_overhead)
+            .is_none_or(|limit| self.overhead() <= limit)
     }
 }
 /// Implements the protection summary step and keeps its validation and state transitions visible at the call site.
@@ -684,6 +742,9 @@ struct ProtectionSearch {
     max_data_fragments: Option<usize>,
     #[serde(default)]
     replication_copies: Vec<usize>,
+    /// Maximum encoded payload bytes divided by logical payload bytes.
+    #[serde(default)]
+    max_storage_overhead: Option<f64>,
     #[serde(default)]
     rs_k: Vec<usize>,
     #[serde(default)]
@@ -709,7 +770,7 @@ struct ProtectionSearch {
     #[serde(default)]
     clay_d: Vec<usize>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the Optimization path.
 struct Optimization {
     #[serde(default = "default_loss_weight")]
@@ -718,6 +779,15 @@ struct Optimization {
     overhead_weight: f64,
     #[serde(default = "default_imbalance_weight")]
     imbalance_weight: f64,
+}
+impl Default for Optimization {
+    fn default() -> Self {
+        Self {
+            loss_weight: default_loss_weight(),
+            overhead_weight: default_overhead_weight(),
+            imbalance_weight: default_imbalance_weight(),
+        }
+    }
 }
 /// Implements the default loss weight step and keeps its validation and state transitions visible at the call site.
 fn default_loss_weight() -> f64 {
@@ -747,7 +817,7 @@ struct RepairModel {
     #[serde(default)]
     repair_bandwidth_bytes_per_sec: f64,
 }
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the Locality path.
 struct Locality {
     #[serde(default)]
@@ -758,6 +828,16 @@ struct Locality {
     max_fragments_per_host: usize,
     #[serde(default = "one_usize")]
     max_fragments_per_disk: usize,
+}
+impl Default for Locality {
+    fn default() -> Self {
+        Self {
+            site: Mode::Ignore,
+            rack: Mode::Ignore,
+            max_fragments_per_host: 1,
+            max_fragments_per_disk: 1,
+        }
+    }
 }
 /// Implements the one usize step and keeps its validation and state transitions visible at the call site.
 fn one_usize() -> usize {
@@ -773,19 +853,36 @@ enum Mode {
     #[default]
     Ignore,
 }
+const TOPOLOGY_DEFAULT: usize = usize::MAX;
+
+fn topology_default() -> usize {
+    TOPOLOGY_DEFAULT
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the Tolerance path.
 struct Tolerance {
-    #[serde(default)]
+    #[serde(default = "topology_default")]
     disks: usize,
-    #[serde(default)]
+    #[serde(default = "topology_default")]
     hosts: usize,
-    #[serde(default)]
+    #[serde(default = "topology_default")]
     racks: usize,
-    #[serde(default)]
+    #[serde(default = "topology_default")]
     sites: usize,
-    #[serde(default)]
+    #[serde(default = "topology_default")]
     networks: usize,
+}
+impl Default for Tolerance {
+    fn default() -> Self {
+        Self {
+            disks: TOPOLOGY_DEFAULT,
+            hosts: TOPOLOGY_DEFAULT,
+            racks: TOPOLOGY_DEFAULT,
+            sites: TOPOLOGY_DEFAULT,
+            networks: TOPOLOGY_DEFAULT,
+        }
+    }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 /// Kagi state or configuration used by the FailureModel path.
@@ -853,21 +950,10 @@ struct AddressSpacePlan {
     bits: u8,
     min: String,
     max: String,
-    slot_bits: u8,
-    slots: u64,
     mapping: String,
     salt: u64,
-    slot_assignment: Vec<SlotRange>,
+    host_ranges: Vec<HostRange>,
     disks: Vec<DiskShare>,
-}
-#[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the SlotRange path.
-struct SlotRange {
-    start_slot: u64,
-    end_slot: u64,
-    start_key: String,
-    end_key: String,
-    disk: String,
 }
 #[derive(Debug, Serialize)]
 /// Kagi state or configuration used by the DiskShare path.
@@ -880,18 +966,6 @@ struct DiskShare {
     path: String,
     device_path: Option<String>,
     weight: f64,
-    expected_fraction: f64,
-    expected_slots: u64,
-    actual_slots: u64,
-    slot_ranges: Vec<DiskSlotRange>,
-}
-#[derive(Debug, Serialize)]
-/// Kagi state or configuration used by the DiskSlotRange path.
-struct DiskSlotRange {
-    start_slot: u64,
-    end_slot: u64,
-    start_key: String,
-    end_key: String,
 }
 #[derive(Debug, Serialize)]
 /// Kagi state or configuration used by the OptimizerResult path.
@@ -906,7 +980,6 @@ struct OptimizerResult {
     adaptive_importance_sampling: AdaptiveEstimate,
     time_domain: TimeDomainEstimate,
     objective_score: f64,
-    slot_imbalance: f64,
     rarest_observed_data_loss_scenario: Option<Scenario>,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -995,11 +1068,12 @@ struct PolicyOutput {
     selected_protection: Protection,
     fragments: usize,
     storage_overhead: f64,
+    estimated_object_storage: Vec<ObjectStorageEstimate>,
     tolerance_validated: bool,
-    minimum_counterexample: Option<Counterexample>,
     estimated_repair_window_hours: f64,
     /// Best simulated chunk geometry for every supported erasure-coding family.
     erasure_scheme_optimization: BTreeMap<String, SchemeOptimization>,
+    deployment: PlacementPlan,
 }
 #[derive(Debug, Clone, Serialize)]
 /// Kagi state or configuration used by the SchemeOptimization path.
@@ -1013,35 +1087,26 @@ struct SchemeOptimization {
     total_fragments: usize,
     simulated_unreadable_probability: f64,
     simulation_trials: u64,
+    sampled_loss_events: u64,
+    loss_probability_resolved: bool,
+    disk_failures_to_unreadable: Option<usize>,
     objective_score: f64,
     storage_overhead: f64,
+    estimated_object_storage: Vec<ObjectStorageEstimate>,
     tolerance_validated: bool,
-    minimum_counterexample: Option<Counterexample>,
     estimated_repair_window_hours: f64,
 }
 #[derive(Debug, Clone, Serialize)]
-/// Kagi state or configuration used by the Counterexample path.
-struct Counterexample {
-    key: String,
-    domain: String,
-    failed: Vec<String>,
+struct ObjectStorageEstimate {
+    logical_bytes: u64,
+    encoded_payload_bytes: u64,
+    extra_payload_bytes: u64,
 }
-#[derive(Debug, Clone)]
-/// Kagi state or configuration used by the SchemeCandidateMetrics path.
-struct SchemeCandidateMetrics {
-    loss: f64,
-    trials: u64,
-    score: f64,
-    feasible: bool,
-    counterexample: Option<Counterexample>,
-}
-#[derive(Debug, Clone, Copy)]
-/// Kagi state or configuration used by the SchemeSearchRun path.
+#[derive(Clone, Copy)]
 struct SchemeSearchRun {
     salt: u64,
     seed: u64,
     trials: u64,
-    validation_keys: usize,
     backend: McBackend,
 }
 // ---- Wizard, topology normalization, and validation -------------------------
@@ -1112,8 +1177,22 @@ fn normalize_topology(cfg: &mut Config, mount_override: Option<&Path>) {
         }
         cfg.topology.hosts = hosts.into_values().collect();
     }
+    let hosts: BTreeMap<_, _> = cfg
+        .topology
+        .hosts
+        .iter()
+        .map(|h| (h.name.as_str(), h))
+        .collect();
     let mut ordinal = BTreeMap::<(String, String), usize>::new();
     for d in &mut cfg.topology.disks {
+        if let Some(host) = hosts.get(d.host.as_str()) {
+            if d.site.is_none() {
+                d.site = host.site.clone();
+            }
+            if d.rack.is_none() {
+                d.rack = host.rack.clone();
+            }
+        }
         if d.class.trim().is_empty() {
             d.class = "default".into();
         }
@@ -1131,6 +1210,32 @@ fn normalize_topology(cfg: &mut Config, mount_override: Option<&Path>) {
                 .join(&d.mount_name)
                 .to_string_lossy()
                 .into_owned();
+        }
+    }
+    cfg.topology.placement_disks = cfg
+        .topology
+        .disks
+        .iter()
+        .map(|d| DomainDisk {
+            id: d.id.clone(),
+            host: d.host.clone(),
+            rack: d.rack.clone(),
+            site: d.site.clone(),
+            networks: disk_networks(cfg, d),
+        })
+        .collect();
+    let minimum = topology_minimum_tolerance(&cfg.topology);
+    for p in cfg.policies.values_mut() {
+        for (value, default) in [
+            (&mut p.tolerate.disks, minimum.disks),
+            (&mut p.tolerate.hosts, minimum.hosts),
+            (&mut p.tolerate.racks, minimum.racks),
+            (&mut p.tolerate.sites, minimum.sites),
+            (&mut p.tolerate.networks, minimum.networks),
+        ] {
+            if *value == TOPOLOGY_DEFAULT {
+                *value = default;
+            }
         }
     }
 }
@@ -1226,39 +1331,75 @@ fn quick_ipv4_cidr(index: usize) -> Result<String> {
     }
     Ok(format!("10.{}.{}.0/24", index / 256, index % 256))
 }
-/// A failure category should tolerate two simultaneous losses whenever at least three
-/// independent members exist.  With two members the achievable minimum is one; with
-/// one member it is zero because losing that sole domain necessarily removes all data.
+/// Require one loss by default whenever there is more than one domain member.
 fn minimum_tolerance_for_count(n: usize) -> usize {
-    if n >= 3 {
-        2
-    } else {
-        n.saturating_sub(1)
-    }
+    usize::from(n >= 2)
 }
 /// Implements the topology minimum tolerance step and keeps its validation and state transitions visible at the call site.
-fn topology_minimum_tolerance(t: &Topology) -> Tolerance {
+fn topology_domain_counts(t: &Topology) -> Tolerance {
     let hosts = t.hosts.len();
     let racks = t
-        .hosts
+        .disks
         .iter()
-        .filter_map(|h| h.rack.as_ref())
+        .filter_map(|d| d.site.as_ref().zip(d.rack.as_ref()))
         .collect::<BTreeSet<_>>()
         .len();
     let sites = t
-        .hosts
+        .disks
         .iter()
         .filter_map(|h| h.site.as_ref())
         .collect::<BTreeSet<_>>()
         .len();
-    let networks = t.network_domains.len();
+    let networks = if t.placement_disks.is_empty() {
+        t.hosts
+            .iter()
+            .flat_map(|h| h.networks.iter())
+            .collect::<BTreeSet<_>>()
+            .len()
+    } else {
+        t.placement_disks
+            .iter()
+            .flat_map(|d| d.networks.iter())
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
     Tolerance {
-        disks: minimum_tolerance_for_count(t.disks.len()),
-        hosts: minimum_tolerance_for_count(hosts),
-        racks: minimum_tolerance_for_count(racks),
-        sites: minimum_tolerance_for_count(sites),
-        networks: minimum_tolerance_for_count(networks),
+        disks: t.disks.len(),
+        hosts,
+        racks,
+        sites,
+        networks,
     }
+}
+
+fn topology_minimum_tolerance(t: &Topology) -> Tolerance {
+    let counts = topology_domain_counts(t);
+    Tolerance {
+        disks: minimum_tolerance_for_count(counts.disks),
+        hosts: minimum_tolerance_for_count(counts.hosts),
+        racks: minimum_tolerance_for_count(counts.racks),
+        sites: minimum_tolerance_for_count(counts.sites),
+        networks: minimum_tolerance_for_count(counts.networks),
+    }
+}
+
+fn requires_site_acknowledgment(cfg: &Config) -> bool {
+    topology_domain_counts(&cfg.topology).sites == 2
+        && cfg.policies.values().any(|p| p.tolerate.sites == 0)
+}
+
+fn acknowledge_site_risk(cfg: &Config) -> Result<bool> {
+    if !requires_site_acknowledgment(cfg) {
+        return Ok(false);
+    }
+    eprintln!("\x1b[1;97;41m DANGER: LOSING ONE SITE CAN MAKE OBJECTS UNAVAILABLE \x1b[0m");
+    eprintln!("Type exactly: {TWO_SITE_ACKNOWLEDGMENT}");
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    if response.trim_end_matches(['\r', '\n']) != TWO_SITE_ACKNOWLEDGMENT {
+        bail!("the required two-site outage acknowledgment was not entered");
+    }
+    Ok(true)
 }
 /// Implements the default auto search step and keeps its validation and state transitions visible at the call site.
 fn default_auto_search() -> ProtectionSearch {
@@ -1317,7 +1458,7 @@ fn wizard_policy(name: &str, minimum: &Tolerance) -> Result<Policy> {
                 k: prompt_usize_min("LRC data fragments k", 4, 2)?,
                 local_groups: prompt_usize_min("LRC local groups", 2, 1)?,
                 local_parity: prompt_usize_min("Local parity per group", 1, 1)?,
-                global_parity: prompt_usize_min("Global parity", 2, 1)?,
+                global_parity: prompt_usize_min("Global parity", 1, 1)?,
             },
             "msr" => Protection::Msr {
                 k: prompt_usize_min("MSR data fragments k", 4, 2)?,
@@ -1367,6 +1508,7 @@ fn wizard_policy(name: &str, minimum: &Tolerance) -> Result<Policy> {
         protection,
         locality,
         tolerate,
+        chunk_replicas: 1,
         optimize: if auto {
             Some(default_auto_search())
         } else {
@@ -1385,18 +1527,20 @@ fn max_placeable_fragments(cfg: &Config, p: &Policy) -> usize {
     for d in &cfg.topology.disks {
         *per_host.entry(d.host.as_str()).or_default() += 1;
     }
-    let host_cap = per_host
-        .into_values()
-        .map(|dcount| {
-            dcount
+    let host_cap = per_host.into_values().fold(0usize, |capacity, disks| {
+        capacity.saturating_add(
+            disks
                 .saturating_mul(p.locality.max_fragments_per_disk)
-                .min(p.locality.max_fragments_per_host)
-        })
-        .sum::<usize>();
-    disk_cap.min(host_cap)
+                .min(p.locality.max_fragments_per_host),
+        )
+    });
+    disk_cap.min(host_cap) / p.chunk_replicas.max(1)
 }
 /// Implements the validate protection geometry step and keeps its validation and state transitions visible at the call site.
 fn validate_protection_geometry(p: &Protection) -> Result<()> {
+    if !matches!(p, Protection::Replication { .. }) && p.fragments() > 255 {
+        bail!("erasure geometry exceeds 255 fragments");
+    }
     match p {
         Protection::Replication { copies } => {
             if *copies < 1 {
@@ -1416,32 +1560,29 @@ fn validate_protection_geometry(p: &Protection) -> Result<()> {
         } => {
             if *k < 2
                 || *local_groups < 1
-                || *local_parity < 1
-                || *global_parity < 1
-                || !(*k).is_multiple_of(*local_groups)
+                || *local_groups > *k
+                || *local_parity != 1
+                || *global_parity != 1
             {
-                bail!("lrc requires k>=2, positive parity, and local_groups dividing k")
+                bail!("Kagi LRC requires k>=2, 1..=k local groups, one local parity per group, and one global parity")
             }
         }
         Protection::Msr { k, m, d } => {
-            let want = 2 * k - 2;
-            if *k < 2 || *m < k.saturating_sub(1) || *d != want || *d >= *k + *m {
+            let want = k.saturating_mul(2).saturating_sub(2);
+            if *k < 2 || *m < k.saturating_sub(1) || *d != want || *d >= p.fragments() {
                 bail!("msr runtime uses product-matrix MSR and requires k>=2, m>=k-1, d=2k-2, and d<k+m")
             }
         }
         Protection::Clay { k, m, d } => {
-            if *k < 2 || *m < 2 || *d < *k + 1 || *d >= *k + *m {
+            if *k < 2 || *m < 2 || *d <= *k || *d >= p.fragments() {
                 bail!("clay requires k>=2, m>=2, and k+1<=d<k+m")
             }
         }
     }
-    Ok(())
+    p.layout().validate()
 }
 /// Validate topology/model invariants before expensive simulation begins.
 fn validate_config(cfg: &Config) -> Result<()> {
-    if !(8..=24).contains(&cfg.slot_bits) {
-        bail!("slot_bits must be 8..=24; explicit slot output above 2^24 is intentionally refused")
-    }
     if cfg.topology.disks.is_empty() {
         bail!("no disks configured")
     }
@@ -1465,10 +1606,38 @@ fn validate_config(cfg: &Config) -> Result<()> {
             bail!("{name} annual failure probability must be in 0..=1")
         }
     }
+    let max_other_probability = cfg
+        .failure_model
+        .host_annual_probability
+        .max(cfg.failure_model.rack_annual_probability)
+        .max(cfg.failure_model.site_annual_probability)
+        .max(cfg.failure_model.network_annual_probability);
+    if cfg.failure_model.disk_annual_probability < max_other_probability {
+        bail!("the fallback disk annual failure probability must be at least the host, rack, site, and network probabilities");
+    }
+    for class in &cfg.topology.disk_classes {
+        if let Some(rate) = class.annual_failure_probability {
+            if !(max_other_probability..=1.0).contains(&rate) {
+                bail!("disk class {} annual failure probability must be between {max_other_probability} and 1", class.name);
+            }
+        }
+    }
+    for event in &cfg.failure_model.correlated_events {
+        if !(0.0..=1.0).contains(&event.probability) || event.count_max < event.count_min {
+            bail!(
+                "correlated failure events require probability in 0..=1 and count_max >= count_min"
+            );
+        }
+    }
     let mut host_ids = BTreeSet::new();
     for h in &cfg.topology.hosts {
         if !host_ids.insert(h.name.as_str()) {
             bail!("duplicate host name {}", h.name)
+        }
+        if h.site.as_deref().is_none_or(|site| site.trim().is_empty())
+            || h.rack.as_deref().is_none_or(|rack| rack.trim().is_empty())
+        {
+            bail!("host {} requires a site and rack", h.name);
         }
     }
     let network_ids: BTreeSet<_> = cfg
@@ -1490,6 +1659,19 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if !host_ids.contains(d.host.as_str()) {
             bail!("disk {} references unknown host {}", d.id, d.host)
         }
+        let host = cfg
+            .topology
+            .hosts
+            .iter()
+            .find(|h| h.name == d.host)
+            .unwrap();
+        if d.site != host.site || d.rack != host.rack {
+            bail!(
+                "disk {} must use the site and rack of its host {}",
+                d.id,
+                host.name
+            );
+        }
         *per_host.entry(d.host.as_str()).or_default() += 1;
         if !mount_paths.insert(d.path.as_str()) {
             bail!("duplicate disk mount path {}", d.path)
@@ -1510,22 +1692,57 @@ fn validate_config(cfg: &Config) -> Result<()> {
             )
         }
     }
-    let minimum = topology_minimum_tolerance(&cfg.topology);
+    let counts = topology_domain_counts(&cfg.topology);
+    if counts.racks < 2 {
+        bail!("Kagi requires at least two racks to tolerate a rack outage");
+    }
     for (name, p) in &cfg.policies {
         validate_protection_geometry(&p.protection).with_context(|| format!("policy {name}"))?;
-        for (domain, actual, required) in [
-            ("disk", p.tolerate.disks, minimum.disks),
-            ("host", p.tolerate.hosts, minimum.hosts),
-            ("rack", p.tolerate.racks, minimum.racks),
-            ("site", p.tolerate.sites, minimum.sites),
-            ("network", p.tolerate.networks, minimum.networks),
+        for (domain, actual, count) in [
+            ("disk", p.tolerate.disks, counts.disks),
+            ("host", p.tolerate.hosts, counts.hosts),
+            ("rack", p.tolerate.racks, counts.racks),
+            ("site", p.tolerate.sites, counts.sites),
+            ("network", p.tolerate.networks, counts.networks),
         ] {
+            let required = if domain == "site" && count == 2 && actual == 0 {
+                0
+            } else {
+                minimum_tolerance_for_count(count)
+            };
+            let maximum = count - count.div_ceil(4);
             if actual < required {
                 bail!("policy {name} requests tolerance {actual} for {domain} failures; topology requires at least {required}")
             }
+            if actual > maximum {
+                bail!("policy {name} requests tolerance {actual} for {domain} failures; at most {maximum} of {count} {domain} domains may be requested (75%)");
+            }
         }
-        if p.locality.max_fragments_per_host == 0 || p.locality.max_fragments_per_disk == 0 {
-            bail!("policy {name} fragment locality limits must be positive")
+        if p.locality.max_fragments_per_host == 0
+            || p.locality.max_fragments_per_disk == 0
+            || p.chunk_replicas == 0
+        {
+            bail!("policy {name} fragment locality limits and chunk_replicas must be positive")
+        }
+        if let Some(limit) = p
+            .optimize
+            .as_ref()
+            .and_then(|search| search.max_storage_overhead)
+        {
+            if !limit.is_finite() || limit < 1.0 {
+                bail!("policy {name} max_storage_overhead must be a finite ratio of at least 1.0");
+            }
+            if !p.auto_geometry() && !p.within_overhead_limit() {
+                bail!("policy {name} requires {:.4}x nominal storage, above max_storage_overhead {limit:.4}x", p.overhead());
+            }
+        }
+        if !p.auto_geometry()
+            && p.protection
+                .fragments()
+                .checked_mul(p.chunk_replicas)
+                .is_none_or(|n| n > u32::MAX as usize)
+        {
+            bail!("policy {name} requires more placements than the fragment format can represent");
         }
         if p.protection.fragments() > max_placeable_fragments(cfg, p)
             && !p
@@ -1547,10 +1764,18 @@ fn validate_config(cfg: &Config) -> Result<()> {
 /// the only required inputs; every other value uses documented defaults.
 fn run_quick_wizard(args: &Args) -> Result<Config> {
     println!("\nQuick-default mode: generated names, sequential 10.0.0.0/8 /24 networks, 8 TB NVMe disks, and default failure/repair rates.\n");
-    let sites = prompt_usize_min("Number of sites", 1, 1)?;
-    let racks_per_site = prompt_usize_min("Racks per site", 1, 1)?;
+    let sites = prompt_usize_min("Number of sites", 6, 1)?;
+    let minimum_racks = if sites == 1 { 2 } else { 1 };
+    let default_racks = match sites {
+        1 => 4,
+        2 => 3,
+        3..=5 => 2,
+        _ => 1,
+    };
+    let racks_per_site = prompt_usize_min("Racks per site", default_racks, minimum_racks)?;
+    let default_hosts = 6usize.div_ceil(sites.saturating_mul(racks_per_site));
     let hosts_per_rack = loop {
-        let h = prompt_usize_min("Hosts per rack", 6, 1)?;
+        let h = prompt_usize_min("Hosts per rack", default_hosts, 1)?;
         let total = sites.saturating_mul(racks_per_site).saturating_mul(h);
         if total >= 6 {
             break h;
@@ -1573,37 +1798,36 @@ fn run_quick_wizard(args: &Args) -> Result<Config> {
         let site = format!("site-{:02}", si + 1);
         for ri in 0..racks_per_site {
             let rack = format!("{}-rack-{:02}", site, ri + 1);
-            let network_count = hosts_per_rack.div_ceil(254);
+            let network_count = hosts_per_rack.div_ceil(254) * 2;
             let mut rack_networks = Vec::new();
             for ni in 0..network_count {
                 let cidr = quick_ipv4_cidr(subnet)?;
                 subnet += 1;
                 let id = format!("{}-net-{:02}", rack, ni + 1);
+                rack_networks.push((id.clone(), cidr.clone()));
                 network_domains.push(NetworkDomain {
-                    id: id.clone(),
+                    id,
                     cidr,
                     site: Some(site.clone()),
                     rack: Some(rack.clone()),
                 });
-                rack_networks.push(id);
             }
             for hi in 0..hosts_per_rack {
                 let host = format!("{}-host-{:02}", rack, hi + 1);
-                let net_idx = hi / 254;
+                let net_idx = (hi / 254) * 2;
                 let host_idx = (hi % 254) as u32;
-                let net_id = rack_networks[net_idx].clone();
-                let cidr = &network_domains
-                    .iter()
-                    .find(|n| n.id == net_id)
-                    .expect("quick network exists")
-                    .cidr;
-                let address = nth_ipv4(cidr, host_idx).context("quick-mode IPv4 allocation")?;
+                let mut networks = Vec::with_capacity(2);
+                let mut addresses = Vec::with_capacity(2);
+                for (id, cidr) in &rack_networks[net_idx..net_idx + 2] {
+                    networks.push(id.clone());
+                    addresses.push(nth_ipv4(cidr, host_idx).context("quick-mode IPv4 allocation")?);
+                }
                 hosts.push(HostTopology {
                     name: host.clone(),
                     site: Some(site.clone()),
                     rack: Some(rack.clone()),
-                    networks: vec![net_id.clone()],
-                    addresses: vec![address],
+                    networks: networks.clone(),
+                    addresses,
                 });
                 for di in 1..=disks_per_host {
                     let mount_name = generated_mount_name(&host, "nvme", di);
@@ -1619,7 +1843,7 @@ fn run_quick_wizard(args: &Args) -> Result<Config> {
                         class: "nvme".into(),
                         ordinal: di,
                         mount_name,
-                        networks: vec![net_id.clone()],
+                        networks: networks.clone(),
                         site: Some(site.clone()),
                         rack: Some(rack.clone()),
                         host: host.clone(),
@@ -1641,8 +1865,8 @@ fn run_quick_wizard(args: &Args) -> Result<Config> {
         }],
         hosts,
         disks,
+        placement_disks: Vec::new(),
     };
-    let tolerate = topology_minimum_tolerance(&topology);
     let policy = Policy {
         protection: Protection::Clay { k: 4, m: 2, d: 5 },
         locality: Locality {
@@ -1651,8 +1875,9 @@ fn run_quick_wizard(args: &Args) -> Result<Config> {
             max_fragments_per_host: 1,
             max_fragments_per_disk: 1,
         },
-        tolerate,
+        tolerate: Tolerance::default(),
         optimize: Some(default_auto_search()),
+        chunk_replicas: 1,
     };
     Ok(Config {
         slot_bits: 16,
@@ -1661,6 +1886,7 @@ fn run_quick_wizard(args: &Args) -> Result<Config> {
         failure_model: default_failure_model(),
         repair_model: default_repair_model(),
         optimization: Optimization::default(),
+        example_object_sizes_bytes: default_example_object_sizes(),
     })
 }
 /// Full wizard for operators who need explicit failure rates, disk classes, addressing,
@@ -1840,6 +2066,7 @@ fn run_full_wizard(args: &Args) -> Result<Config> {
         disk_classes,
         hosts,
         disks,
+        placement_disks: Vec::new(),
     };
     let minimum = topology_minimum_tolerance(&topology);
     let pc = prompt_usize_min("Number of data-protection policies", 1, 1)?;
@@ -1909,6 +2136,7 @@ fn run_full_wizard(args: &Args) -> Result<Config> {
         failure_model,
         repair_model,
         optimization,
+        example_object_sizes_bytes: default_example_object_sizes(),
     })
 }
 /// Interactive entry point.  Quick mode is deliberately the first question so an
@@ -1945,85 +2173,98 @@ fn hash64(parts: &[&[u8]]) -> u64 {
     }
     u64::from_le_bytes(h.finalize().as_bytes()[0..8].try_into().unwrap())
 }
-/// Implements the u01 step and keeps its validation and state transitions visible at the call site.
-fn u01(x: u64) -> f64 {
-    ((x as f64) + 1.0) / ((u64::MAX as f64) + 2.0)
+type ShardPlacement = Vec<Vec<usize>>;
+
+struct PlacementCache {
+    by_owner: Vec<Option<ShardPlacement>>,
+    permutations: DiskPermutations,
 }
-/// Implements the score step and keeps its validation and state transitions visible at the call site.
-fn score(key: u64, frag: usize, salt: u64, d: &Disk) -> f64 {
-    let h = hash64(&[
-        &key.to_le_bytes(),
-        &(frag as u64).to_le_bytes(),
-        &salt.to_le_bytes(),
-        d.id.as_bytes(),
-    ]);
-    u01(h).powf(1.0 / (d.weight * d.capacity_bytes as f64))
-}
-/// Implements the place step and keeps its validation and state transitions visible at the call site.
-fn place(key: u64, p: &Policy, disks: &[Disk], salt: u64) -> Option<Vec<usize>> {
-    let n = p.protection.fragments();
-    let mut out = Vec::with_capacity(n);
-    let mut hc: HashMap<&str, usize> = HashMap::new();
-    let mut dc: HashMap<usize, usize> = HashMap::new();
-    let mut sites = BTreeSet::new();
-    let mut racks = BTreeSet::new();
-    for f in 0..n {
-        let mut c: Vec<_> = disks
-            .iter()
-            .enumerate()
-            .map(|(i, d)| (i, score(key, f, salt, d)))
-            .collect();
-        c.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let chosen = c
-            .into_iter()
-            .find(|(i, _)| {
-                let d = &disks[*i];
-                if *dc.get(i).unwrap_or(&0) >= p.locality.max_fragments_per_disk {
-                    return false;
-                }
-                if *hc.get(d.host.as_str()).unwrap_or(&0) >= p.locality.max_fragments_per_host {
-                    return false;
-                }
-                if p.locality.site == Mode::Spread {
-                    let all = disks
-                        .iter()
-                        .filter_map(|x| x.site.as_ref())
-                        .collect::<BTreeSet<_>>()
-                        .len();
-                    if sites.len() < all
-                        && d.site.as_ref().map(|s| sites.contains(s)).unwrap_or(false)
-                    {
-                        return false;
-                    }
-                }
-                if p.locality.rack == Mode::Spread {
-                    let all = disks
-                        .iter()
-                        .filter_map(|x| x.rack.as_ref())
-                        .collect::<BTreeSet<_>>()
-                        .len();
-                    if racks.len() < all
-                        && d.rack.as_ref().map(|r| racks.contains(r)).unwrap_or(false)
-                    {
-                        return false;
-                    }
-                }
-                true
-            })?
-            .0;
-        let d = &disks[chosen];
-        *dc.entry(chosen).or_default() += 1;
-        *hc.entry(d.host.as_str()).or_default() += 1;
-        if let Some(s) = &d.site {
-            sites.insert(s.clone());
+
+impl PlacementCache {
+    fn new(cfg: &Config, policy: &Policy, salt: u64) -> Self {
+        let plan = policy.plan(&cfg.topology, salt, false);
+        let ranges = plan.host_ranges();
+        Self {
+            by_owner: ranges
+                .iter()
+                .map(|r| plan.locations(r.start_key).ok())
+                .collect(),
+            permutations: plan.permutations(),
         }
-        if let Some(r) = &d.rack {
-            racks.insert(r.clone());
-        }
-        out.push(chosen);
     }
-    Some(out)
+
+    fn lookup(&self, position: u64) -> Option<TrialPlacement<'_>> {
+        let position = mask_position(position);
+        let owner = self.permutations.owner_index(position)?;
+        Some(TrialPlacement {
+            base: self.by_owner.get(owner)?.as_ref()?,
+            permutations: &self.permutations,
+            position,
+            owner,
+        })
+    }
 }
+
+struct TrialPlacement<'a> {
+    base: &'a ShardPlacement,
+    permutations: &'a DiskPermutations,
+    position: u64,
+    owner: usize,
+}
+
+impl TrialPlacement<'_> {
+    fn shards(&self) -> impl Iterator<Item = impl Iterator<Item = usize> + '_> + '_ {
+        self.base.iter().map(|copies| {
+            copies.iter().map(|&disk| {
+                self.permutations
+                    .disk_index_for_owner(self.position, self.owner, disk)
+            })
+        })
+    }
+}
+
+// For one physical copy of each MDS shard, sort disks by the number of
+// shards they hold and remove the most populated disks first. Replication
+// becomes unreadable when every disk holding at least one whole copy is lost.
+fn disk_loss_margin(protection: &Protection, cache: &PlacementCache) -> Option<usize> {
+    if matches!(protection, Protection::Lrc { .. }) {
+        return None;
+    }
+    let shards_to_lose = protection.fragments() - protection.data_fragments() + 1;
+    cache
+        .by_owner
+        .iter()
+        .map(|layout| {
+            let mut counts = BTreeMap::<usize, usize>::new();
+            for copies in layout.as_ref()? {
+                let [disk] = copies.as_slice() else {
+                    return None;
+                };
+                *counts.entry(*disk).or_default() += 1;
+            }
+            let mut counts: Vec<_> = counts.into_values().collect();
+            counts.sort_unstable_by(|a, b| b.cmp(a));
+            let mut lost = 0;
+            counts
+                .iter()
+                .position(|count| {
+                    lost += count;
+                    lost >= shards_to_lose
+                })
+                .map(|index| index + 1)
+        })
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min()
+}
+
+fn surviving_shards(placement: &TrialPlacement<'_>, failed: &[bool]) -> Vec<bool> {
+    placement
+        .shards()
+        .map(|mut copies| copies.any(|disk| !failed[disk]))
+        .collect()
+}
+
 // ---- Snapshot Monte Carlo and rare-event sampling ---------------------------
 fn bernoulli_lr(x: bool, p: f64, q: f64) -> f64 {
     let p = p.clamp(1e-15, 1.0 - 1e-15);
@@ -2035,10 +2276,19 @@ fn bernoulli_lr(x: bool, p: f64, q: f64) -> f64 {
     }
 }
 /// Implements the biased step and keeps its validation and state transitions visible at the call site.
+fn geometry_bias(cfg: &Config) -> f64 {
+    cfg.failure_model.importance_bias.max(16.0)
+}
+
 fn biased(p: f64, bias: f64) -> f64 {
     (p * bias).min(0.35).max(p)
 }
 /// Implements the fail domains step and keeps its validation and state transitions visible at the call site.
+fn rack_id(disk: &Disk) -> Option<String> {
+    let (site, rack) = disk.site.as_ref().zip(disk.rack.as_ref())?;
+    Some(format!("{}:{site}{rack}", site.len()))
+}
+
 fn fail_domains<R: Rng>(
     rng: &mut R,
     cfg: &Config,
@@ -2068,11 +2318,7 @@ fn fail_domains<R: Rng>(
             fs.insert(s);
         }
     }
-    for r in ds
-        .iter()
-        .filter_map(|d| d.rack.clone())
-        .collect::<BTreeSet<_>>()
-    {
+    for r in ds.iter().filter_map(rack_id).collect::<BTreeSet<_>>() {
         let p = cfg.failure_model.rack_annual_probability;
         let q = if importance { biased(p, b) } else { p };
         let x = rng.gen_bool(q.clamp(0.0, 1.0));
@@ -2137,7 +2383,7 @@ fn fail_domains<R: Rng>(
                     }
                 }
                 Domain::Rack => {
-                    let v: Vec<_> = ds.iter().filter_map(|d| d.rack.clone()).collect();
+                    let v: Vec<_> = ds.iter().filter_map(rack_id).collect();
                     if !v.is_empty() {
                         for _ in 0..count {
                             fr.insert(v[rng.gen_range(0..v.len())].clone());
@@ -2176,7 +2422,7 @@ fn fail_domains<R: Rng>(
             lr *= bernoulli_lr(x, p, q);
         }
         if x || fh.contains(&d.host)
-            || d.rack.as_ref().map(|x| fr.contains(x)).unwrap_or(false)
+            || rack_id(d).is_some_and(|id| fr.contains(&id))
             || d.site.as_ref().map(|x| fs.contains(x)).unwrap_or(false)
             || network_unreachable(cfg, d, &fnw)
         {
@@ -2196,6 +2442,11 @@ struct Eval {
 }
 /// Implements the evaluate step and keeps its validation and state transitions visible at the call site.
 fn evaluate(cfg: &Config, salt: u64, trials: u64, seed: u64, importance: bool) -> Eval {
+    let placements: Vec<_> = cfg
+        .policies
+        .values()
+        .map(|p| PlacementCache::new(cfg, p, salt))
+        .collect();
     checkpoint::reduce(
         &("evaluate", cfg, salt, trials, seed, importance),
         trials,
@@ -2211,20 +2462,21 @@ fn evaluate(cfg: &Config, salt: u64, trials: u64, seed: u64, importance: bool) -
                 weight_sum: w,
                 ..Default::default()
             };
-            for (name, p) in &cfg.policies {
-                let Some(pl) = place(key, p, &cfg.topology.disks, salt) else {
+            for ((name, p), cache) in cfg.policies.iter().zip(&placements) {
+                let Some(pl) = cache.lookup(key) else {
                     e.losses += 1;
                     e.weighted_loss += w;
                     break;
                 };
-                let alive: Vec<_> = pl.iter().map(|i| !failed[*i]).collect();
+                let alive = surviving_shards(&pl, &failed);
                 if !p.protection.readable(&alive) {
                     e.losses += 1;
                     e.weighted_loss += w;
                     let fd = pl
-                        .iter()
-                        .filter(|i| failed[**i])
-                        .map(|i| cfg.topology.disks[*i].id.clone())
+                        .shards()
+                        .flatten()
+                        .filter(|i| failed[*i])
+                        .map(|i| cfg.topology.disks[i].id.clone())
                         .collect();
                     e.rare = Some(Scenario {
                         policy: name.clone(),
@@ -2339,35 +2591,41 @@ fn validate_requested_backend(requested: McBackend) -> Result<()> {
 fn gpu_policy_batch(
     cfg: &Config,
     p: &Policy,
-    salt: u64,
     start: u64,
     end: u64,
     seed: u64,
     backend: McBackend,
+    cache: &PlacementCache,
 ) -> Eval {
     let trials = end - start;
     let fragments = p.protection.fragments();
     if fragments == 0 || trials == 0 {
         return Eval::default();
     }
-    let rows: Vec<Vec<u8>> = (start..end)
+    let rows: Vec<(Vec<u8>, f64)> = (start..end)
         .into_par_iter()
         .map(|t| {
             let _simulation_tick = SimulationTick;
-            let mut rng = ChaCha20Rng::seed_from_u64(
-                seed ^ salt.rotate_left(17) ^ t.wrapping_mul(0x9E3779B97F4A7C15),
-            );
-            let (failed, _) = fail_domains(&mut rng, cfg, false, None);
+            let mut rng = ChaCha20Rng::seed_from_u64(seed ^ t.wrapping_mul(0x9E3779B97F4A7C15));
+            let (failed, weight) = fail_domains(&mut rng, cfg, true, Some(geometry_bias(cfg)));
             let key = rng.gen::<u64>();
-            let Some(pl) = place(key, p, &cfg.topology.disks, salt) else {
-                return vec![0; fragments];
-            };
-            pl.iter().map(|i| if failed[*i] { 0 } else { 1 }).collect()
+            let row = cache.lookup(key).map_or_else(
+                || vec![0; fragments],
+                |pl| {
+                    surviving_shards(&pl, &failed)
+                        .into_iter()
+                        .map(u8::from)
+                        .collect()
+                },
+            );
+            (row, weight)
         })
         .collect();
     let mut alive = Vec::with_capacity(trials as usize * fragments);
-    for r in rows {
-        alive.extend_from_slice(&r)
+    let mut weights = Vec::with_capacity(trials as usize);
+    for (row, weight) in rows {
+        alive.extend_from_slice(&row);
+        weights.push(weight);
     }
     let (mode, k, lg, lp, gp) = match p.protection {
         Protection::Replication { .. } => (0, 1, 0, 0, 0),
@@ -2440,8 +2698,13 @@ fn gpu_policy_batch(
     Eval {
         trials,
         losses,
-        weighted_loss: losses as f64,
-        weight_sum: trials as f64,
+        weighted_loss: lost
+            .iter()
+            .zip(&weights)
+            .filter(|(loss, _)| **loss != 0)
+            .map(|(_, w)| w)
+            .sum(),
+        weight_sum: weights.iter().sum(),
         rare: None,
     }
 }
@@ -2452,21 +2715,35 @@ fn evaluate_policy(
     cfg: &Config,
     policy_name: &str,
     p: &Policy,
-    salt: u64,
-    trials: u64,
-    seed: u64,
-    _backend: McBackend,
+    run: SchemeSearchRun,
+    cache: &PlacementCache,
 ) -> Eval {
+    let SchemeSearchRun {
+        salt,
+        seed,
+        trials,
+        backend: _backend,
+    } = run;
     #[cfg(any(feature = "cuda", feature = "hip", feature = "opencl"))]
-    if matches!(
-        resolved_backend(_backend),
-        McBackend::Cuda | McBackend::Hip | McBackend::Opencl
-    ) {
+    if !matches!(p.protection, Protection::Lrc { .. })
+        && matches!(
+            resolved_backend(_backend),
+            McBackend::Cuda | McBackend::Hip | McBackend::Opencl
+        )
+    {
         return checkpoint::batches(
-            &("gpu-policy", cfg, policy_name, p, salt, trials, seed),
+            &(
+                "gpu-policy-tail-v1",
+                cfg,
+                policy_name,
+                p,
+                salt,
+                trials,
+                seed,
+            ),
             trials,
             |start, end| {
-                gpu_policy_batch(cfg, p, salt, start, end, seed, resolved_backend(_backend))
+                gpu_policy_batch(cfg, p, start, end, seed, resolved_backend(_backend), cache)
             },
             Eval::default,
             |mut a, b| {
@@ -2479,33 +2756,32 @@ fn evaluate_policy(
         );
     }
     checkpoint::reduce(
-        &("policy", cfg, policy_name, p, salt, trials, seed),
+        &("policy-tail-v1", cfg, policy_name, p, salt, trials, seed),
         trials,
         |t| {
             let _simulation_tick = SimulationTick;
-            let mut rng = ChaCha20Rng::seed_from_u64(
-                seed ^ salt.rotate_left(17) ^ t.wrapping_mul(0x9E3779B97F4A7C15),
-            );
-            let (failed, w) = fail_domains(&mut rng, cfg, false, None);
+            let mut rng = ChaCha20Rng::seed_from_u64(seed ^ t.wrapping_mul(0x9E3779B97F4A7C15));
+            let (failed, w) = fail_domains(&mut rng, cfg, true, Some(geometry_bias(cfg)));
             let key = rng.gen::<u64>();
             let mut e = Eval {
                 trials: 1,
                 weight_sum: w,
                 ..Default::default()
             };
-            let Some(pl) = place(key, p, &cfg.topology.disks, salt) else {
+            let Some(pl) = cache.lookup(key) else {
                 e.losses = 1;
                 e.weighted_loss = w;
                 return e;
             };
-            let alive: Vec<_> = pl.iter().map(|i| !failed[*i]).collect();
+            let alive = surviving_shards(&pl, &failed);
             if !p.protection.readable(&alive) {
                 e.losses = 1;
                 e.weighted_loss = w;
                 let fd = pl
-                    .iter()
-                    .filter(|i| failed[**i])
-                    .map(|i| cfg.topology.disks[*i].id.clone())
+                    .shards()
+                    .flatten()
+                    .filter(|i| failed[*i])
+                    .map(|i| cfg.topology.disks[i].id.clone())
                     .collect();
                 e.rare = Some(Scenario {
                     policy: policy_name.into(),
@@ -2558,12 +2834,17 @@ fn estimate(e: &Eval, importance: bool) -> Estimate {
     }
 }
 /// Implements the loss for failure step and keeps its validation and state transitions visible at the call site.
-fn loss_for_failure(cfg: &Config, salt: u64, key: u64, failed: &[bool]) -> bool {
-    for p in cfg.policies.values() {
-        let Some(pl) = place(key, p, &cfg.topology.disks, salt) else {
+fn loss_for_failure(
+    cfg: &Config,
+    placements: &[PlacementCache],
+    key: u64,
+    failed: &[bool],
+) -> bool {
+    for (p, cache) in cfg.policies.values().zip(placements) {
+        let Some(pl) = cache.lookup(key) else {
             return true;
         };
-        let alive: Vec<bool> = pl.iter().map(|i| !failed[*i]).collect();
+        let alive = surviving_shards(&pl, failed);
         if !p.protection.readable(&alive) {
             return true;
         }
@@ -2579,6 +2860,11 @@ fn adaptive_importance_sampling(
     rounds: usize,
     elite_fraction: f64,
 ) -> AdaptiveEstimate {
+    let placements: Vec<_> = cfg
+        .policies
+        .values()
+        .map(|p| PlacementCache::new(cfg, p, salt))
+        .collect();
     let mut bias = cfg.failure_model.importance_bias.max(1.0);
     let mut final_stats = WeightedStats::default();
     for round in 0..rounds.max(1) {
@@ -2594,7 +2880,7 @@ fn adaptive_importance_sampling(
                 );
                 let (failed, w) = fail_domains(&mut rng, cfg, true, Some(bias));
                 let key = rng.gen::<u64>();
-                let loss = loss_for_failure(cfg, salt, key, &failed);
+                let loss = loss_for_failure(cfg, &placements, key, &failed);
                 let failed_fraction =
                     failed.iter().filter(|x| **x).count() as f64 / failed.len().max(1) as f64;
                 vec![(if loss { 1.0 } else { 0.0 }, w, failed_fraction)]
@@ -2671,6 +2957,11 @@ fn time_domain_simulation(
     horizon: f64,
     seed: u64,
 ) -> TimeDomainEstimate {
+    let placements: Vec<_> = cfg
+        .policies
+        .values()
+        .map(|p| PlacementCache::new(cfg, p, salt))
+        .collect();
     let losses: (u64, u64) = checkpoint::reduce(
         &("time", cfg, salt, trials, horizon, seed),
         trials,
@@ -2688,7 +2979,7 @@ fn time_domain_simulation(
                 .collect();
             let racks: Vec<String> = disks
                 .iter()
-                .filter_map(|d| d.rack.clone())
+                .filter_map(rack_id)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
@@ -2827,10 +3118,7 @@ fn time_domain_simulation(
                     .map(|d| {
                         failed_disks.contains(&d.id)
                             || failed_hosts.contains(&d.host)
-                            || d.rack
-                                .as_ref()
-                                .map(|r| failed_racks.contains(r))
-                                .unwrap_or(false)
+                            || rack_id(d).is_some_and(|id| failed_racks.contains(&id))
                             || d.site
                                 .as_ref()
                                 .map(|s| failed_sites.contains(s))
@@ -2838,7 +3126,7 @@ fn time_domain_simulation(
                             || network_unreachable(cfg, d, &failed_networks)
                     })
                     .collect();
-                if loss_for_failure(cfg, salt, key, &failed) {
+                if loss_for_failure(cfg, &placements, key, &failed) {
                     return (1u64, 1u64);
                 }
             }
@@ -2866,127 +3154,12 @@ fn time_domain_simulation(
     }
 }
 // ---- Deterministic tolerance validation and policy optimization -------------
-fn combinations<T: Clone>(v: &[T], k: usize, limit: usize) -> Vec<Vec<T>> {
-    fn rec<T: Clone>(
-        v: &[T],
-        k: usize,
-        start: usize,
-        cur: &mut Vec<T>,
-        out: &mut Vec<Vec<T>>,
-        limit: usize,
-    ) {
-        if out.len() >= limit {
-            return;
-        }
-        if cur.len() == k {
-            out.push(cur.clone());
-            return;
-        }
-        for i in start..v.len() {
-            cur.push(v[i].clone());
-            rec(v, k, i + 1, cur, out, limit);
-            cur.pop();
-            if out.len() >= limit {
-                return;
-            }
-        }
-    }
-    let mut out = vec![];
-    rec(v, k, 0, &mut vec![], &mut out, limit);
-    out
+fn validate_policy(cfg: &Config, policy: &Policy, salt: u64) -> Result<()> {
+    policy
+        .plan(&cfg.topology, salt, requires_site_acknowledgment(cfg))
+        .validate_tolerance()
 }
-/// Implements the validate policy step and keeps its validation and state transitions visible at the call site.
-fn validate_policy(
-    cfg: &Config,
-    p: &Policy,
-    salt: u64,
-    keys: usize,
-) -> (bool, Option<Counterexample>) {
-    let domains = [
-        ("disk", p.tolerate.disks),
-        ("host", p.tolerate.hosts),
-        ("rack", p.tolerate.racks),
-        ("site", p.tolerate.sites),
-        ("network", p.tolerate.networks),
-    ];
-    for ki in 0..keys {
-        progress_step(1);
-        let key = hash64(&[b"validation", &(ki as u64).to_le_bytes()]);
-        let Some(pl) = place(key, p, &cfg.topology.disks, salt) else {
-            return (false, None);
-        };
-        for (domain, maxfail) in domains {
-            if maxfail == 0 {
-                continue;
-            }
-            let vals: Vec<String> = match domain {
-                "disk" => pl
-                    .iter()
-                    .map(|i| cfg.topology.disks[*i].id.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                "host" => pl
-                    .iter()
-                    .map(|i| cfg.topology.disks[*i].host.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                "rack" => pl
-                    .iter()
-                    .filter_map(|i| cfg.topology.disks[*i].rack.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                "site" => pl
-                    .iter()
-                    .filter_map(|i| cfg.topology.disks[*i].site.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                _ => pl
-                    .iter()
-                    .flat_map(|i| disk_networks(cfg, &cfg.topology.disks[*i]))
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-            };
-            for n in 1..=maxfail.min(vals.len()) {
-                for failed in combinations(&vals, n, 200_000) {
-                    let set: BTreeSet<_> = failed.iter().cloned().collect();
-                    let alive: Vec<bool> = pl
-                        .iter()
-                        .map(|i| {
-                            let d = &cfg.topology.disks[*i];
-                            if domain == "network" {
-                                !network_unreachable(cfg, d, &set)
-                            } else {
-                                let id = match domain {
-                                    "disk" => Some(d.id.as_str()),
-                                    "host" => Some(d.host.as_str()),
-                                    "rack" => d.rack.as_deref(),
-                                    _ => d.site.as_deref(),
-                                };
-                                !id.map(|x| set.contains(x)).unwrap_or(false)
-                            }
-                        })
-                        .collect();
-                    if !p.protection.readable(&alive) {
-                        return (
-                            false,
-                            Some(Counterexample {
-                                key: format!("0x{key:016x}"),
-                                domain: domain.into(),
-                                failed,
-                            }),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    (true, None)
-}
+
 /// Return bounded automatic-search limits derived from both operator constraints and
 /// what the topology can physically place.  The default 32-chunk ceiling keeps the
 /// geometry search tractable; it can be raised with optimize.max_total_fragments.
@@ -2997,27 +3170,29 @@ fn geometry_bounds(cfg: &Config, p: &Policy) -> (usize, usize, usize, usize) {
         .and_then(|s| s.max_total_fragments)
         .unwrap_or(32)
         .min(feasible)
-        .max(3);
+        .min(255);
     let min_k = search
         .and_then(|s| s.min_data_fragments)
         .unwrap_or(2)
-        .max(2)
-        .min(max_total.saturating_sub(1));
+        .max(2);
     let max_k = search
         .and_then(|s| s.max_data_fragments)
         .unwrap_or(max_total.saturating_sub(1))
-        .min(max_total.saturating_sub(1))
-        .max(min_k);
-    let min_parity = p
-        .tolerate
-        .disks
-        .max(p.tolerate.hosts)
-        .max(p.tolerate.racks)
-        .max(p.tolerate.sites)
-        .max(p.tolerate.networks)
-        .max(1)
-        .min(max_total.saturating_sub(min_k));
-    (min_k, max_k, max_total, min_parity.max(1))
+        .min(max_total.saturating_sub(1));
+    // A single-copy shard needs parity for every lost physical domain it
+    // occupies. Multi-homed paths and extra shard copies can absorb losses
+    // without consuming parity, so their exact effect is checked by placement.
+    let min_parity = if p.chunk_replicas == 1 {
+        p.tolerate
+            .disks
+            .max(p.tolerate.hosts)
+            .max(p.tolerate.racks)
+            .max(p.tolerate.sites)
+            .max(1)
+    } else {
+        1
+    };
+    (min_k, max_k, max_total, min_parity)
 }
 /// Implements the push unique step and keeps its validation and state transitions visible at the call site.
 fn push_unique(out: &mut Vec<Protection>, seen: &mut BTreeSet<String>, p: Protection) {
@@ -3038,10 +3213,17 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
         push_unique(&mut out, &mut seen, p.protection.clone())
     }
     match schema {
+        "replication" => {
+            if let Some(search) = &p.optimize {
+                for &copies in &search.replication_copies {
+                    push_unique(&mut out, &mut seen, Protection::Replication { copies });
+                }
+            }
+        }
         "reed_solomon" => {
             for k in min_k..=max_k {
                 for m in min_parity..=max_total.saturating_sub(k) {
-                    if k + m <= max_total {
+                    if k.saturating_add(m) <= max_total {
                         push_unique(&mut out, &mut seen, Protection::ReedSolomon { k, m })
                     }
                 }
@@ -3049,7 +3231,7 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
             if let Some(s) = &p.optimize {
                 for &k in &s.rs_k {
                     for &m in &s.rs_m {
-                        if k >= 2 && m >= 1 && k + m <= max_total {
+                        if k >= 2 && m >= 1 && k.saturating_add(m) <= max_total {
                             push_unique(&mut out, &mut seen, Protection::ReedSolomon { k, m })
                         }
                     }
@@ -3058,55 +3240,41 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
         }
         "lrc" => {
             for k in min_k..=max_k {
-                for groups in 1..=k.min(8) {
-                    if !k.is_multiple_of(groups) {
-                        continue;
+                for groups in 1..=k.min(max_total.saturating_sub(k + 1)) {
+                    if groups + 1 >= min_parity {
+                        push_unique(
+                            &mut out,
+                            &mut seen,
+                            Protection::Lrc {
+                                k,
+                                local_groups: groups,
+                                local_parity: 1,
+                                global_parity: 1,
+                            },
+                        );
                     }
-                    for lp in 1..=2usize {
-                        let local = groups * lp;
-                        if k + local >= max_total {
-                            continue;
-                        }
-                        for gp in 1..=max_total - k - local {
-                            if local + gp < min_parity {
-                                continue;
-                            }
+                }
+            }
+            if let Some(search) = &p.optimize {
+                for &k in search.lrc_k.iter().filter(|&&k| k <= max_total) {
+                    for &groups in search
+                        .lrc_local_groups
+                        .iter()
+                        .filter(|&&groups| groups <= max_total)
+                    {
+                        if search.lrc_local_parity.contains(&1)
+                            && search.lrc_global_parity.contains(&1)
+                        {
                             push_unique(
                                 &mut out,
                                 &mut seen,
                                 Protection::Lrc {
                                     k,
                                     local_groups: groups,
-                                    local_parity: lp,
-                                    global_parity: gp,
+                                    local_parity: 1,
+                                    global_parity: 1,
                                 },
                             );
-                        }
-                    }
-                }
-            }
-            if let Some(s) = &p.optimize {
-                for &k in &s.lrc_k {
-                    for &g in &s.lrc_local_groups {
-                        for &lp in &s.lrc_local_parity {
-                            for &gp in &s.lrc_global_parity {
-                                if g > 0
-                                    && k >= 2
-                                    && k.is_multiple_of(g)
-                                    && k + g * lp + gp <= max_total
-                                {
-                                    push_unique(
-                                        &mut out,
-                                        &mut seen,
-                                        Protection::Lrc {
-                                            k,
-                                            local_groups: g,
-                                            local_parity: lp,
-                                            global_parity: gp,
-                                        },
-                                    );
-                                }
-                            }
                         }
                     }
                 }
@@ -3116,7 +3284,7 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
             for k in min_k..=max_k {
                 let d = 2 * k - 2;
                 for m in min_parity.max(k.saturating_sub(1))..=max_total.saturating_sub(k) {
-                    let n = k + m;
+                    let n = k.saturating_add(m);
                     if n <= max_total && n > d {
                         push_unique(&mut out, &mut seen, Protection::Msr { k, m, d })
                     }
@@ -3128,9 +3296,9 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
                         for &d in &s.msr_d {
                             if k >= 2
                                 && m >= k.saturating_sub(1)
-                                && d == 2 * k - 2
-                                && d < k + m
-                                && k + m <= max_total
+                                && d == k.saturating_mul(2).saturating_sub(2)
+                                && d < k.saturating_add(m)
+                                && k.saturating_add(m) <= max_total
                             {
                                 push_unique(&mut out, &mut seen, Protection::Msr { k, m, d })
                             }
@@ -3142,7 +3310,7 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
         "clay" => {
             for k in min_k..=max_k {
                 for m in min_parity..=max_total.saturating_sub(k) {
-                    let n = k + m;
+                    let n = k.saturating_add(m);
                     if n <= max_total && n > k {
                         push_unique(&mut out, &mut seen, Protection::Clay { k, m, d: n - 1 })
                     }
@@ -3152,7 +3320,12 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
                 for &k in &s.clay_k {
                     for &m in &s.clay_m {
                         for &d in &s.clay_d {
-                            if k >= 2 && m >= 1 && d >= k && d < k + m && k + m <= max_total {
+                            if k >= 2
+                                && m >= 1
+                                && d >= k
+                                && d < k.saturating_add(m)
+                                && k.saturating_add(m) <= max_total
+                            {
                                 push_unique(&mut out, &mut seen, Protection::Clay { k, m, d })
                             }
                         }
@@ -3162,189 +3335,167 @@ fn scheme_candidates(cfg: &Config, p: &Policy, schema: &str) -> Vec<Protection> 
         }
         _ => {}
     }
+    out.retain(|protection| {
+        if validate_protection_geometry(protection).is_err()
+            || protection.fragments() > max_total
+            || protection
+                .fragments()
+                .checked_mul(p.chunk_replicas)
+                .is_none_or(|n| n > u32::MAX as usize)
+        {
+            return false;
+        }
+        let mut candidate = p.clone();
+        candidate.protection = protection.clone();
+        candidate.within_overhead_limit()
+    });
     out
 }
-/// Implements the candidate placeable step and keeps its validation and state transitions visible at the call site.
-fn candidate_placeable(cfg: &Config, p: &Policy, salt: u64) -> bool {
-    (0..16u64).all(|i| {
-        place(
-            hash64(&[b"geometry-place", &i.to_le_bytes()]),
-            p,
-            &cfg.topology.disks,
-            salt,
-        )
-        .is_some()
-    })
+
+fn estimate_object_storage(cfg: &Config, p: &Policy) -> Result<Vec<ObjectStorageEstimate>> {
+    cfg.example_object_sizes_bytes
+        .iter()
+        .map(|&logical_bytes| {
+            let encoded_payload_bytes = p
+                .protection
+                .layout()
+                .payload_bytes(logical_bytes, p.chunk_replicas)?;
+            Ok(ObjectStorageEstimate {
+                logical_bytes,
+                encoded_payload_bytes,
+                extra_payload_bytes: encoded_payload_bytes.saturating_sub(logical_bytes),
+            })
+        })
+        .collect()
 }
-/// Implements the scheme result from candidate step and keeps its validation and state transitions visible at the call site.
-fn scheme_result_from_candidate(
-    cfg: &Config,
-    base: &Policy,
-    prot: Protection,
-    metrics: SchemeCandidateMetrics,
-) -> SchemeOptimization {
-    let mut p = base.clone();
-    p.protection = prot.clone();
-    SchemeOptimization {
-        schema: prot.schema_name().into(),
-        feasible: metrics.feasible,
-        reason: if metrics.feasible {
-            None
-        } else {
-            Some("no tested geometry in this schema satisfied the configured deterministic failure tolerance".into())
-        },
-        data_fragments: prot.data_fragments(),
-        parity_fragments: prot.parity_fragments(),
-        total_fragments: prot.fragments(),
-        storage_overhead: prot.overhead(),
-        selected_protection: Some(prot),
-        simulated_unreadable_probability: metrics.loss,
-        simulation_trials: metrics.trials,
-        objective_score: metrics.score,
-        tolerance_validated: metrics.feasible,
-        minimum_counterexample: metrics.counterexample,
-        estimated_repair_window_hours: repair_window(cfg, &p),
-    }
-}
-/// Find the lowest simulated-loss geometry for one schema, using storage overhead as
-/// the existing secondary objective.  Candidates are ranked by Monte Carlo first, then
-/// checked against explicit disk/host/rack/site/network tolerance combinations.
 fn optimize_scheme(
     cfg: &Config,
     name: &str,
     base: &Policy,
     schema: &str,
     run: SchemeSearchRun,
-) -> SchemeOptimization {
+) -> Result<SchemeOptimization> {
     let SchemeSearchRun {
         salt,
         seed,
         trials,
-        validation_keys,
         backend,
     } = run;
     let candidates = scheme_candidates(cfg, base, schema);
     let geometry_trials = (trials / 200).clamp(250, 2_000);
-    let placeable: Vec<Protection> = candidates
-        .into_iter()
-        .filter(|prot| {
-            let mut p = base.clone();
-            p.protection = prot.clone();
-            candidate_placeable(cfg, &p, salt)
-        })
-        .collect();
     progress_operation(
         format!(
             "geometry MC policy={name} schema={schema} candidates={}",
-            placeable.len()
+            candidates.len()
         ),
-        geometry_trials.saturating_mul(placeable.len() as u64),
+        geometry_trials.saturating_mul(candidates.len() as u64),
     );
-    let mut ranked = Vec::<(f64, f64, Protection)>::new();
-    let placeable_count = placeable.len();
-    for (candidate_index, prot) in placeable.into_iter().enumerate() {
+    let mut best = None::<(f64, f64, Policy, Option<String>, Option<usize>, u64)>;
+    let mut first_invalid = None;
+    for protection in candidates {
+        let mut candidate = base.clone();
+        candidate.protection = protection;
         progress_operation_label(format!(
-            "geometry MC policy={name} schema={schema} candidate {}/{} {}",
-            candidate_index + 1,
-            placeable_count,
-            protection_summary(&prot),
+            "mixed tolerance validation policy={name} {}",
+            protection_summary(&candidate.protection),
         ));
-        let mut p = base.clone();
-        p.protection = prot.clone();
-        let e = evaluate_policy(
+        if let Err(error) = validate_policy(cfg, &candidate, salt) {
+            if first_invalid.is_none() {
+                first_invalid = Some((0.0, 1.0, candidate, Some(format!("{error:#}")), None, 0));
+            }
+            progress_step(geometry_trials);
+            continue;
+        }
+        let cache = PlacementCache::new(cfg, &candidate, salt);
+        let estimate = evaluate_policy(
             cfg,
             name,
-            &p,
-            salt,
-            geometry_trials,
-            seed ^ hash64(&[
-                name.as_bytes(),
-                schema.as_bytes(),
-                format!("{:?}", prot).as_bytes(),
-            ]),
-            backend,
+            &candidate,
+            SchemeSearchRun {
+                salt,
+                seed,
+                trials: geometry_trials,
+                backend,
+            },
+            &cache,
         );
-        let loss = e.losses as f64 / e.trials.max(1) as f64;
+        let loss = estimate.weighted_loss / estimate.trials.max(1) as f64;
+        let margin = disk_loss_margin(&candidate.protection, &cache);
         let score = cfg.optimization.loss_weight * loss
-            + cfg.optimization.overhead_weight * prot.overhead();
+            + cfg.optimization.overhead_weight * candidate.overhead();
         progress_best_schema(
             loss,
             format!(
                 "loss={loss:.3e} policy={name} {} objective={score:.6e}",
-                protection_summary(&prot)
+                protection_summary(&candidate.protection)
             ),
         );
-        ranked.push((score, loss, prot));
+        let improved =
+            best.as_ref()
+                .is_none_or(|(best_score, best_loss, best_policy, _, best_margin, _)| {
+                    loss.total_cmp(best_loss)
+                        .then_with(|| match (best_margin, margin) {
+                            (Some(best), Some(current)) => best.cmp(&current),
+                            _ => std::cmp::Ordering::Equal,
+                        })
+                        .then_with(|| score.total_cmp(best_score))
+                        .then_with(|| {
+                            candidate
+                                .protection
+                                .fragments()
+                                .cmp(&best_policy.protection.fragments())
+                        })
+                        .is_lt()
+                });
+        if improved {
+            best = Some((score, loss, candidate, None, margin, estimate.losses));
+        }
     }
-    ranked.sort_by(|a, b| {
-        a.1.total_cmp(&b.1)
-            .then_with(|| a.0.total_cmp(&b.0))
-            .then_with(|| a.2.fragments().cmp(&b.2.fragments()))
-    });
-    if ranked.is_empty() {
-        return SchemeOptimization {
+    let best = best.or(first_invalid);
+    let Some((score, loss, candidate, error, margin, sampled_loss_events)) = best else {
+        return Ok(SchemeOptimization {
             schema: schema.into(),
             feasible: false,
             reason: Some(
-                "no chunk geometry can be placed under the current host/disk locality limits"
-                    .into(),
+                "no deployable geometry meets the placement limits and max_storage_overhead".into(),
             ),
             selected_protection: None,
             data_fragments: 0,
             parity_fragments: 0,
             total_fragments: 0,
             simulated_unreadable_probability: 1.0,
-            simulation_trials: geometry_trials,
-            objective_score: f64::INFINITY,
+            simulation_trials: 0,
+            sampled_loss_events: 0,
+            loss_probability_resolved: false,
+            disk_failures_to_unreadable: None,
+            objective_score: 0.0,
             storage_overhead: 0.0,
+            estimated_object_storage: Vec::new(),
             tolerance_validated: false,
-            minimum_counterexample: None,
             estimated_repair_window_hours: 0.0,
-        };
-    }
-    let mut best_invalid = None;
-    for (score, loss, prot) in ranked {
-        let mut p = base.clone();
-        p.protection = prot.clone();
-        progress_operation(
-            format!(
-                "tolerance validation policy={name} {}",
-                protection_summary(&prot)
-            ),
-            validation_keys as u64,
-        );
-        let (ok, ce) = validate_policy(cfg, &p, salt, validation_keys);
-        if ok {
-            return scheme_result_from_candidate(
-                cfg,
-                base,
-                prot,
-                SchemeCandidateMetrics {
-                    loss,
-                    trials: geometry_trials,
-                    score,
-                    feasible: true,
-                    counterexample: None,
-                },
-            );
-        }
-        if best_invalid.is_none() {
-            best_invalid = Some((score, loss, prot, ce));
-        }
-    }
-    let (score, loss, prot, ce) = best_invalid.expect("ranked candidate exists");
-    scheme_result_from_candidate(
-        cfg,
-        base,
-        prot,
-        SchemeCandidateMetrics {
-            loss,
-            trials: geometry_trials,
-            score,
-            feasible: false,
-            counterexample: ce,
-        },
-    )
+        });
+    };
+    let feasible = error.is_none();
+    let protection = &candidate.protection;
+    Ok(SchemeOptimization {
+        schema: schema.into(),
+        feasible,
+        reason: error,
+        selected_protection: Some(protection.clone()),
+        data_fragments: protection.data_fragments(),
+        parity_fragments: protection.parity_fragments(),
+        total_fragments: protection.fragments(),
+        simulated_unreadable_probability: loss,
+        simulation_trials: if feasible { geometry_trials } else { 0 },
+        sampled_loss_events,
+        loss_probability_resolved: sampled_loss_events > 0,
+        disk_failures_to_unreadable: margin,
+        objective_score: score,
+        storage_overhead: candidate.overhead(),
+        estimated_object_storage: estimate_object_storage(cfg, &candidate)?,
+        tolerance_validated: feasible,
+        estimated_repair_window_hours: repair_window(cfg, &candidate),
+    })
 }
 /// Implements the schema preference step and keeps its validation and state transitions visible at the call site.
 fn schema_preference(schema: &str) -> u8 {
@@ -3356,139 +3507,81 @@ fn schema_preference(schema: &str) -> u8 {
         _ => 4,
     }
 }
-/// Compare all supported EC families for every policy.  When auto_geometry is enabled,
-/// the policy itself is updated to the feasible geometry with the lowest objective.
 fn optimize_protections(
     cfg: &mut Config,
     salt: u64,
     seed: u64,
     trials: u64,
-    validation_keys: usize,
     backend: McBackend,
-) -> BTreeMap<String, BTreeMap<String, SchemeOptimization>> {
+) -> Result<BTreeMap<String, BTreeMap<String, SchemeOptimization>>> {
     let names: Vec<_> = cfg.policies.keys().cloned().collect();
     let mut reports = BTreeMap::new();
     for name in names {
         let base = cfg.policies[&name].clone();
         let mut per = BTreeMap::new();
-        for schema in ["reed_solomon", "lrc", "msr", "clay"] {
-            let r = optimize_scheme(
-                cfg,
-                &name,
-                &base,
-                schema,
-                SchemeSearchRun {
-                    salt,
-                    seed,
-                    trials,
-                    validation_keys,
-                    backend,
-                },
-            );
-            per.insert(schema.into(), r);
-        }
-        if base
-            .optimize
-            .as_ref()
-            .map(|s| s.auto_geometry)
-            .unwrap_or(false)
-        {
-            if let Some(best) = per.values().filter(|r| r.feasible).min_by(|a, b| {
+        if !base.auto_geometry() {
+            validate_policy(cfg, &base, salt).with_context(|| {
+                format!("policy {name} cannot meet the configured mixed failure tolerance")
+            })?;
+        } else {
+            let mut schemes = vec!["reed_solomon", "lrc", "msr", "clay"];
+            if base
+                .optimize
+                .as_ref()
+                .is_some_and(|search| !search.replication_copies.is_empty())
+            {
+                schemes.push("replication");
+            }
+            for schema in schemes {
+                let report = optimize_scheme(
+                    cfg,
+                    &name,
+                    &base,
+                    schema,
+                    SchemeSearchRun {
+                        salt,
+                        seed,
+                        trials,
+                        backend,
+                    },
+                )?;
+                per.insert(schema.into(), report);
+            }
+            let best = per.values().filter(|r| r.feasible).min_by(|a, b| {
                 a.simulated_unreadable_probability
                     .total_cmp(&b.simulated_unreadable_probability)
+                    .then_with(|| {
+                        match (a.disk_failures_to_unreadable, b.disk_failures_to_unreadable) {
+                            (Some(a), Some(b)) => b.cmp(&a),
+                            _ => std::cmp::Ordering::Equal,
+                        }
+                    })
                     .then_with(|| a.objective_score.total_cmp(&b.objective_score))
                     .then_with(|| a.total_fragments.cmp(&b.total_fragments))
                     .then_with(|| schema_preference(&a.schema).cmp(&schema_preference(&b.schema)))
-            }) {
-                if let Some(prot) = &best.selected_protection {
-                    cfg.policies.get_mut(&name).unwrap().protection = prot.clone();
-                }
-            }
+            });
+            let Some(best) = best else {
+                let reasons = per
+                    .iter()
+                    .filter_map(|(schema, r)| {
+                        r.reason
+                            .as_ref()
+                            .map(|reason| format!("{schema}: {reason}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                bail!("policy {name} has no feasible protection for the configured mixed failure tolerance and storage overhead: {reasons}");
+            };
+            cfg.policies.get_mut(&name).unwrap().protection = best
+                .selected_protection
+                .clone()
+                .expect("feasible geometry selected");
         }
         reports.insert(name, per);
     }
-    reports
+    Ok(reports)
 }
-// ---- Explicit slot/key-range deployment plan -------------------------------
-fn slot_key_bounds(slot_bits: u8, start: u64, end: u64) -> (String, String) {
-    let shift = 64 - slot_bits as u32;
-    let sk = start << shift;
-    let ek = if end == (1u64 << slot_bits) - 1 {
-        u64::MAX
-    } else {
-        ((end + 1) << shift) - 1
-    };
-    (format!("0x{sk:016x}"), format!("0x{ek:016x}"))
-}
-/// Implements the slot range step and keeps its validation and state transitions visible at the call site.
-fn slot_range(cfg: &Config, start: u64, end: u64, disk: &str) -> SlotRange {
-    let (start_key, end_key) = slot_key_bounds(cfg.slot_bits, start, end);
-    SlotRange {
-        start_slot: start,
-        end_slot: end,
-        start_key,
-        end_key,
-        disk: disk.into(),
-    }
-}
-/// Implements the slot map step and keeps its validation and state transitions visible at the call site.
-fn slot_map(cfg: &Config, salt: u64) -> (Vec<SlotRange>, Vec<u64>, f64) {
-    let slots = 1u64 << cfg.slot_bits;
-    let mut owners = Vec::with_capacity(slots as usize);
-    let mut counts = vec![0u64; cfg.topology.disks.len()];
-    for s in 0..slots {
-        let key = s << (64 - cfg.slot_bits);
-        let (i, _) = cfg
-            .topology
-            .disks
-            .iter()
-            .enumerate()
-            .map(|(i, d)| (i, score(key, 0, salt, d)))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-            .unwrap();
-        owners.push(i);
-        counts[i] += 1;
-    }
-    let mut ranges = vec![];
-    if !owners.is_empty() {
-        let mut st = 0u64;
-        let mut cur = owners[0];
-        for (i, &owner) in owners.iter().enumerate().skip(1) {
-            if owner != cur {
-                ranges.push(slot_range(
-                    cfg,
-                    st,
-                    i as u64 - 1,
-                    &cfg.topology.disks[cur].id,
-                ));
-                st = i as u64;
-                cur = owner;
-            }
-        }
-        ranges.push(slot_range(
-            cfg,
-            st,
-            owners.len() as u64 - 1,
-            &cfg.topology.disks[cur].id,
-        ));
-    }
-    let tw: f64 = cfg
-        .topology
-        .disks
-        .iter()
-        .map(|d| d.weight * d.capacity_bytes as f64)
-        .sum();
-    let imbalance = counts
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let target =
-                (cfg.topology.disks[i].weight * cfg.topology.disks[i].capacity_bytes as f64) / tw;
-            ((*c as f64 / slots as f64) - target).abs()
-        })
-        .fold(0.0, f64::max);
-    (ranges, counts, imbalance)
-}
+
 /// Implements the repair window step and keeps its validation and state transitions visible at the call site.
 fn repair_window(cfg: &Config, p: &Policy) -> f64 {
     let base = cfg
@@ -3528,8 +3621,16 @@ fn select_best_salt(cfg: &Config, args: &Args) -> Result<u64> {
     );
     let mut prelim: Vec<(u64, Eval)> = (0..args.candidates)
         .into_par_iter()
-        .map(|c| {
+        .filter_map(|c| {
             let salt = hash64(&[&args.seed.to_le_bytes(), &c.to_le_bytes()]);
+            if cfg
+                .policies
+                .values()
+                .any(|policy| validate_policy(cfg, policy, salt).is_err())
+            {
+                progress_tick(args.trials);
+                return None;
+            }
             let eval = evaluate(cfg, salt, args.trials, args.seed, false);
             let loss = eval.losses as f64 / eval.trials.max(1) as f64;
             progress_best_keyspace(
@@ -3539,7 +3640,7 @@ fn select_best_salt(cfg: &Config, args: &Args) -> Result<u64> {
                     policy_schema_summary(cfg)
                 ),
             );
-            (salt, eval)
+            Some((salt, eval))
         })
         .collect();
     prelim.sort_by(|a, b| {
@@ -3564,16 +3665,9 @@ fn select_best_salt(cfg: &Config, args: &Args) -> Result<u64> {
     let mut best = None::<(f64, u64)>;
     for (salt, _) in finals {
         let rare = evaluate(cfg, *salt, args.rare_trials, args.seed ^ 0xA5A5A5A5, true);
-        let (_, _, imb) = slot_map(cfg, *salt);
         let p = rare.weighted_loss / rare.trials.max(1) as f64;
-        let overhead = cfg
-            .policies
-            .values()
-            .map(|x| x.protection.overhead())
-            .sum::<f64>();
-        let obj = cfg.optimization.loss_weight * p
-            + cfg.optimization.overhead_weight * overhead
-            + cfg.optimization.imbalance_weight * imb;
+        let overhead = cfg.policies.values().map(Policy::overhead).sum::<f64>();
+        let obj = cfg.optimization.loss_weight * p + cfg.optimization.overhead_weight * overhead;
         progress_best_keyspace(
             p,
             format!(
@@ -3585,11 +3679,18 @@ fn select_best_salt(cfg: &Config, args: &Args) -> Result<u64> {
             best = Some((obj, *salt));
         }
     }
-    best.map(|x| x.1).context("no optimizer candidates")
+    if let Some((_, salt)) = best {
+        return Ok(salt);
+    }
+    bail!("no placement salt met every mixed failure budget")
 }
+const CHECKPOINT_PLANNER_FORMAT: u32 = 3;
+
 #[derive(Serialize, Deserialize)]
 struct SavedRun {
     version: String,
+    #[serde(default)]
+    planner_format: u32,
     args: Args,
     config: Config,
     admission_key: String,
@@ -3610,6 +3711,12 @@ fn main() -> Result<()> {
     };
     let (mut cfg, admission_key) = if cli.resume.is_some() {
         let saved: SavedRun = store.as_ref().unwrap().manifest()?;
+        if saved.planner_format != CHECKPOINT_PLANNER_FORMAT {
+            bail!(
+                "checkpoint uses incompatible planner format {}; start a new configuration run",
+                saved.planner_format
+            );
+        }
         if saved.version != env!("CARGO_PKG_VERSION") {
             bail!("checkpoint requires Kagi {}", saved.version);
         }
@@ -3624,12 +3731,7 @@ fn main() -> Result<()> {
             apply_run_mode(&mut args);
         }
         let mut config = if args.wizard {
-            let config = run_wizard(&mut args)?;
-            checkpoint::atomic_write(
-                &args.wizard_config_output,
-                serde_saphyr::to_string(&config)?.as_bytes(),
-            )?;
-            config
+            run_wizard(&mut args)?
         } else {
             let path = args
                 .config
@@ -3638,8 +3740,27 @@ fn main() -> Result<()> {
             serde_saphyr::from_str(&fs::read_to_string(path).context("read config")?)
                 .context("parse YAML")?
         };
-        normalize_topology(&mut config, args.mount_root.as_deref());
-        validate_config(&config)?;
+        if !args.example_object_size_bytes.is_empty() {
+            config.example_object_sizes_bytes = args.example_object_size_bytes.clone();
+        }
+        for policy in config.policies.values_mut() {
+            if let Some(copies) = args.object_replicas {
+                policy.protection = Protection::Replication { copies };
+                policy.chunk_replicas = 1;
+                if let Some(search) = &mut policy.optimize {
+                    search.auto_geometry = false;
+                }
+            }
+            if let Some(copies) = args.chunk_replicas {
+                policy.chunk_replicas = copies;
+            }
+            if let Some(limit) = args.max_storage_overhead {
+                policy
+                    .optimize
+                    .get_or_insert_with(ProtectionSearch::default)
+                    .max_storage_overhead = Some(limit);
+            }
+        }
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
         (
@@ -3652,10 +3773,20 @@ fn main() -> Result<()> {
         || args.time_trials == 0
         || args.candidates == 0
         || args.finalists == 0
+        || args.horizon_years <= 0.0
+        || !args.horizon_years.is_finite()
     {
-        bail!("trial/candidate/finalist counts must be positive");
+        bail!("trial/candidate/finalist counts and horizon_years must be positive");
     }
+    normalize_topology(&mut cfg, args.mount_root.as_deref());
     validate_config(&cfg)?;
+    let acknowledged_unsafe_two_site = acknowledge_site_risk(&cfg)?;
+    if cli.resume.is_none() && args.wizard {
+        checkpoint::atomic_write(
+            &args.wizard_config_output,
+            serde_saphyr::to_string(&cfg)?.as_bytes(),
+        )?;
+    }
     validate_requested_backend(args.mc_backend)?;
     if cli.resume.is_none() {
         let cwd = std::env::current_dir().context("resolve output directory")?;
@@ -3673,6 +3804,7 @@ fn main() -> Result<()> {
         if cli.resume.is_none() {
             store.save_manifest(&SavedRun {
                 version: env!("CARGO_PKG_VERSION").into(),
+                planner_format: CHECKPOINT_PLANNER_FORMAT,
                 args: args.clone(),
                 config: cfg.clone(),
                 admission_key: admission_key.clone(),
@@ -3684,117 +3816,107 @@ fn main() -> Result<()> {
         !args.no_progress && io::stderr().is_terminal(),
         args.progress_interval_ms,
     );
-    const PHASES: u64 = 9;
-    // Alternate placement-salt and chunk-geometry optimization. Two geometry passes
-    // make the selected k/m/group/d values respond to their eventual placement.
-    progress_phase(1, PHASES, "placement search pass 1");
-    let first_salt = select_best_salt(&cfg, &args)?;
-    progress_phase(2, PHASES, "erasure geometry search pass 1");
-    let _ = optimize_protections(
-        &mut cfg,
-        first_salt,
-        args.seed,
-        args.trials,
-        args.validation_keys,
-        args.mc_backend,
-    );
-    progress_phase(3, PHASES, "placement search pass 2");
-    let salt = select_best_salt(&cfg, &args)?;
-    progress_phase(4, PHASES, "erasure geometry search pass 2");
-    let scheme_reports = optimize_protections(
-        &mut cfg,
-        salt,
-        args.seed ^ 0x31415926,
-        args.trials,
-        args.validation_keys,
-        args.mc_backend,
-    );
-    progress_phase(5, PHASES, "final ordinary Monte Carlo");
+    const PHASES: u64 = 8;
+    progress_phase(1, PHASES, "initial mixed tolerance and geometry search");
+    let preferred_salt = hash64(&[&args.seed.to_le_bytes(), &0u64.to_le_bytes()]);
+    let mut salt_candidates = std::iter::once(preferred_salt)
+        .chain(
+            (0..args.candidates)
+                .map(|i| hash64(&[&args.seed.to_le_bytes(), &i.to_le_bytes()]))
+                .filter(|salt| *salt != preferred_salt),
+        )
+        .peekable();
+    let (first_salt, first_reports) = loop {
+        let salt = salt_candidates
+            .next()
+            .context("no placement salt candidates")?;
+        let mut candidate = cfg.clone();
+        match optimize_protections(
+            &mut candidate,
+            salt,
+            args.seed,
+            args.trials,
+            args.mc_backend,
+        ) {
+            Ok(reports) => {
+                cfg = candidate;
+                break (salt, reports);
+            }
+            Err(error) if salt_candidates.peek().is_none() => return Err(error),
+            Err(_) => progress_operation_label(format!(
+                "placement salt {salt:#x} has no feasible geometry"
+            )),
+        }
+    };
+    progress_phase(2, PHASES, "placement search across verified salts");
+    let salt = select_best_salt(&cfg, &args).unwrap_or(first_salt);
+    progress_phase(3, PHASES, "erasure geometry search at selected salt");
+    let scheme_reports = if salt == first_salt {
+        first_reports
+    } else {
+        optimize_protections(&mut cfg, salt, args.seed, args.trials, args.mc_backend)?
+    };
+    progress_phase(4, PHASES, "final ordinary Monte Carlo");
     progress_operation("final ordinary Monte Carlo", args.trials);
     let mc = evaluate(&cfg, salt, args.trials, args.seed, false);
-    progress_phase(6, PHASES, "final rare-event Monte Carlo");
+    progress_phase(5, PHASES, "final rare-event Monte Carlo");
     progress_operation("final importance-sampled Monte Carlo", args.rare_trials);
     let rare = evaluate(&cfg, salt, args.rare_trials, args.seed ^ 0xA5A5A5A5, true);
     progress_phase(
-        7,
+        6,
         PHASES,
         "deployment-plan and deterministic tolerance validation",
     );
-    progress_operation("building explicit keyspace slot map", 0);
-    let (ranges, counts, imbalance) = slot_map(&cfg, salt);
     let objective = cfg.optimization.loss_weight * (rare.weighted_loss / rare.trials.max(1) as f64)
         + cfg.optimization.overhead_weight
-            * cfg
-                .policies
-                .values()
-                .map(|x| x.protection.overhead())
-                .sum::<f64>()
-        + cfg.optimization.imbalance_weight * imbalance;
-    let slots = 1u64 << cfg.slot_bits;
-    let tw: f64 = cfg
-        .topology
-        .disks
-        .iter()
-        .map(|d| d.weight * d.capacity_bytes as f64)
-        .sum();
+            * cfg.policies.values().map(Policy::overhead).sum::<f64>();
     let disks = cfg
         .topology
         .disks
         .iter()
-        .enumerate()
-        .map(|(i, d)| {
-            let w = d.weight * d.capacity_bytes as f64;
-            let f = w / tw;
-            let dr = ranges
-                .iter()
-                .filter(|r| r.disk == d.id)
-                .map(|r| DiskSlotRange {
-                    start_slot: r.start_slot,
-                    end_slot: r.end_slot,
-                    start_key: r.start_key.clone(),
-                    end_key: r.end_key.clone(),
-                })
-                .collect();
-            DiskShare {
-                id: d.id.clone(),
-                host: d.host.clone(),
-                class: d.class.clone(),
-                ordinal: d.ordinal,
-                mount_name: d.mount_name.clone(),
-                path: d.path.clone(),
-                device_path: d.device_path.clone(),
-                weight: w,
-                expected_fraction: f,
-                expected_slots: (f * slots as f64).round() as u64,
-                actual_slots: counts[i],
-                slot_ranges: dr,
-            }
+        .map(|d| DiskShare {
+            id: d.id.clone(),
+            host: d.host.clone(),
+            class: d.class.clone(),
+            ordinal: d.ordinal,
+            mount_name: d.mount_name.clone(),
+            path: d.path.clone(),
+            device_path: d.device_path.clone(),
+            weight: d.weight,
         })
         .collect();
+    let mut host_ranges = Vec::new();
     let mut po = BTreeMap::new();
     for (name, p) in &cfg.policies {
         progress_operation(
             format!(
-                "final tolerance validation policy={name} {}",
+                "final mixed tolerance validation policy={name} {}",
                 protection_summary(&p.protection)
             ),
-            args.validation_keys as u64,
+            0,
         );
-        let (ok, ce) = validate_policy(&cfg, p, salt, args.validation_keys);
+        let deployment = p.plan(&cfg.topology, salt, acknowledged_unsafe_two_site);
+        deployment
+            .validate_tolerance()
+            .with_context(|| format!("cannot emit deployment for policy {name}"))?;
+        if host_ranges.is_empty() {
+            host_ranges = deployment.host_ranges();
+        }
         po.insert(
             name.clone(),
             PolicyOutput {
                 selected_protection: p.protection.clone(),
                 fragments: p.protection.fragments(),
-                storage_overhead: p.protection.overhead(),
-                tolerance_validated: ok,
-                minimum_counterexample: ce,
+                storage_overhead: p.overhead(),
+                estimated_object_storage: estimate_object_storage(&cfg, p)?,
+                tolerance_validated: true,
                 estimated_repair_window_hours: repair_window(&cfg, p),
                 erasure_scheme_optimization: scheme_reports.get(name).cloned().unwrap_or_default(),
+                deployment,
             },
         );
     }
-    progress_phase(8, PHASES, "adaptive importance sampling");
+    progress_phase(7, PHASES, "adaptive importance sampling");
     progress_operation(
         format!(
             "adaptive importance sampling {} rounds",
@@ -3811,7 +3933,7 @@ fn main() -> Result<()> {
         args.ais_rounds,
         args.elite_fraction,
     );
-    progress_phase(9, PHASES, "continuous-time failure and repair simulation");
+    progress_phase(8, PHASES, "continuous-time failure and repair simulation");
     progress_operation(
         format!(
             "time-domain trajectories over {:.2} years",
@@ -3827,7 +3949,7 @@ fn main() -> Result<()> {
         args.seed ^ 0x5A5A5A5A,
     );
     let out = Output {
-        format_version: 6,
+        format_version: 7,
         infrastructure: InfrastructureOutput {
             mount_root: cfg.topology.mount_root.clone(),
             network_domains: cfg.topology.network_domains.clone(),
@@ -3835,14 +3957,12 @@ fn main() -> Result<()> {
             hosts: cfg.topology.hosts.clone(),
         },
         keyspace: AddressSpacePlan {
-            bits: 64,
+            bits: KEYSPACE_BITS,
             min: "0x0000000000000000".into(),
-            max: "0xffffffffffffffff".into(),
-            slot_bits: cfg.slot_bits,
-            slots,
-            mapping: "capacity_weighted_rendezvous_with_explicit_slot_map".into(),
+            max: format!("0x{:016x}", mask_position(u64::MAX)),
+            mapping: "equal_host_ranges".into(),
             salt,
-            slot_assignment: ranges,
+            host_ranges,
             disks,
         },
         optimizer: {
@@ -3858,7 +3978,6 @@ fn main() -> Result<()> {
                 adaptive_importance_sampling: ais,
                 time_domain: td,
                 objective_score: objective,
-                slot_imbalance: imbalance,
                 rarest_observed_data_loss_scenario: rare.rare,
             }
         },
@@ -3912,10 +4031,11 @@ mod tests {
         let mut disks = Vec::new();
         for hi in 1..=6 {
             let host = format!("h{hi}");
+            let rack = if hi <= 3 { "r1" } else { "r2" };
             hosts.push(HostTopology {
                 name: host.clone(),
                 site: Some("s1".into()),
-                rack: Some("r1".into()),
+                rack: Some(rack.into()),
                 networks: vec!["n1".into(), "n2".into(), "n3".into()],
                 addresses: vec![
                     format!("10.0.0.{hi}"),
@@ -3934,7 +4054,7 @@ mod tests {
                     mount_name: "".into(),
                     networks: vec![],
                     site: Some("s1".into()),
-                    rack: Some("r1".into()),
+                    rack: Some(rack.into()),
                     host: host.clone(),
                     weight: 1.0,
                 });
@@ -3954,6 +4074,7 @@ mod tests {
                 }],
                 hosts,
                 disks,
+                placement_disks: Vec::new(),
             },
             policies: BTreeMap::from([(
                 "p".into(),
@@ -3966,13 +4087,14 @@ mod tests {
                         max_fragments_per_disk: 1,
                     },
                     tolerate: Tolerance {
-                        disks: 2,
-                        hosts: 2,
-                        racks: 0,
+                        disks: 1,
+                        hosts: 1,
+                        racks: 1,
                         sites: 0,
-                        networks: 2,
+                        networks: 1,
                     },
                     optimize: Some(default_auto_search()),
+                    chunk_replicas: 1,
                 },
             )]),
             failure_model: FailureModel {
@@ -3986,6 +4108,7 @@ mod tests {
             },
             repair_model: default_repair_model(),
             optimization: Optimization::default(),
+            example_object_sizes_bytes: default_example_object_sizes(),
         }
     }
     #[test]
@@ -4006,11 +4129,11 @@ mod tests {
         assert_eq!(quick_ipv4_cidr(256).unwrap(), "10.1.0.0/24")
     }
     #[test]
-    fn minimum_tolerance_targets_two_when_possible() {
+    fn minimum_tolerance_targets_one_when_possible() {
         assert_eq!(minimum_tolerance_for_count(1), 0);
         assert_eq!(minimum_tolerance_for_count(2), 1);
-        assert_eq!(minimum_tolerance_for_count(3), 2);
-        assert_eq!(minimum_tolerance_for_count(99), 2)
+        assert_eq!(minimum_tolerance_for_count(3), 1);
+        assert_eq!(minimum_tolerance_for_count(99), 1)
     }
     #[test]
     fn multihoming_requires_all_paths_failed() {
@@ -4041,24 +4164,18 @@ mod tests {
         assert!(c.topology.disks[0].path.ends_with("h1-sas-01"))
     }
     #[test]
-    fn slot_ranges_cover_keyspace() {
+    fn equal_host_ranges_cover_keyspace() {
         let mut c = base_cfg();
         normalize_topology(&mut c, None);
-        let (ranges, counts, _) = slot_map(&c, 42);
-        assert_eq!(counts.iter().sum::<u64>(), 256);
-        assert_eq!(ranges.first().unwrap().start_slot, 0);
-        assert_eq!(ranges.last().unwrap().end_slot, 255);
-        for w in ranges.windows(2) {
-            assert_eq!(w[0].end_slot + 1, w[1].start_slot)
+        let ranges = c.policies["p"].plan(&c.topology, 42, false).host_ranges();
+        assert_eq!(ranges.len(), 6);
+        assert_eq!(ranges.first().unwrap().start_key, 0);
+        assert_eq!(ranges.last().unwrap().end_key, (1 << 60) - 1);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].end_key + 1, pair[1].start_key);
+            let width = |range: &HostRange| range.end_key - range.start_key + 1;
+            assert!(width(&pair[0]).abs_diff(width(&pair[1])) <= 1);
         }
-    }
-    #[test]
-    fn slot_key_bounds_are_exact() {
-        let (s, e) = slot_key_bounds(8, 0, 0);
-        assert_eq!(s, "0x0000000000000000");
-        assert_eq!(e, "0x00ffffffffffffff");
-        let (_, last) = slot_key_bounds(8, 255, 255);
-        assert_eq!(last, "0xffffffffffffffff")
     }
     #[test]
     fn validation_rejects_duplicate_disk_ids() {
@@ -4093,7 +4210,7 @@ mod tests {
     #[test]
     fn validation_enforces_minimum_failure_tolerance() {
         let mut c = base_cfg();
-        c.policies.get_mut("p").unwrap().tolerate.hosts = 1;
+        c.policies.get_mut("p").unwrap().tolerate.hosts = 0;
         normalize_topology(&mut c, None);
         assert!(validate_config(&c).is_err())
     }
@@ -4107,18 +4224,34 @@ mod tests {
         assert_eq!(d.topology.network_domains.len(), 3);
     }
     #[test]
-    fn per_disk_ranges_match_global_counts() {
+    fn planner_uses_shared_placement_and_counts_only_distinct_surviving_shards() {
         let mut c = base_cfg();
         normalize_topology(&mut c, None);
-        let (ranges, counts, _) = slot_map(&c, 7);
-        for (i, d) in c.topology.disks.iter().enumerate() {
-            let n: u64 = ranges
-                .iter()
-                .filter(|r| r.disk == d.id)
-                .map(|r| r.end_slot - r.start_slot + 1)
-                .sum();
-            assert_eq!(n, counts[i]);
+        let p = &c.policies["p"];
+        let plan = p.plan(&c.topology, 7, false);
+        let cache = PlacementCache::new(&c, p, 7);
+        let range = &plan.host_ranges()[1];
+        for key in [range.start_key, range.start_key + 1, range.end_key] {
+            let placement = cache.lookup(key).unwrap();
+            assert_eq!(
+                placement
+                    .shards()
+                    .map(Iterator::collect::<Vec<_>>)
+                    .collect::<Vec<_>>(),
+                plan.locations(key).unwrap()
+            );
         }
+        let base = vec![vec![0, 1], vec![2, 3]];
+        let placement = TrialPlacement {
+            base: &base,
+            permutations: &cache.permutations,
+            position: range.start_key,
+            owner: 1,
+        };
+        assert_eq!(
+            surviving_shards(&placement, &[true, false, true, true]),
+            vec![true, false]
+        );
     }
     #[test]
     fn mount_root_override_changes_generated_paths() {
@@ -4158,12 +4291,57 @@ mod tests {
         }
     }
     #[test]
-    fn reed_solomon_four_plus_two_meets_two_host_tolerance() {
+    fn a_recoverable_disk_outage_does_not_prove_mixed_tolerance() {
         let mut c = base_cfg();
         normalize_topology(&mut c, None);
-        let p = c.policies["p"].clone();
-        let (ok, ce) = validate_policy(&c, &p, 123, 4);
-        assert!(ok, "counterexample: {ce:?}");
+        let mut p = c.policies["p"].clone();
+        assert!(p
+            .protection
+            .readable(&[false, true, true, true, true, true]));
+        assert!(validate_policy(&c, &p, 123).is_err());
+        p.protection = Protection::Replication { copies: 6 };
+        assert!(validate_policy(&c, &p, 123).is_ok());
+    }
+
+    #[test]
+    fn overhead_cap_filters_geometry_and_estimate_includes_copies_and_padding() {
+        let mut c = base_cfg();
+        normalize_topology(&mut c, None);
+        let mut p = c.policies["p"].clone();
+        p.chunk_replicas = 2;
+        p.locality.max_fragments_per_host = 2;
+        p.optimize.as_mut().unwrap().max_storage_overhead = Some(3.0);
+        c.example_object_sizes_bytes = vec![5];
+        assert_eq!(p.overhead(), 3.0);
+        assert_eq!(
+            estimate_object_storage(&c, &p).unwrap()[0].encoded_payload_bytes,
+            24
+        );
+        let candidates = scheme_candidates(&c, &p, "reed_solomon");
+        assert!(candidates.contains(&p.protection));
+        assert!(candidates
+            .iter()
+            .all(|geometry| geometry.layout().nominal_overhead(2) <= 3.0));
+        p.optimize.as_mut().unwrap().max_storage_overhead = Some(2.0);
+        assert!(scheme_candidates(&c, &p, "reed_solomon").is_empty());
+    }
+
+    #[test]
+    fn two_site_zero_tolerance_requires_explicit_acknowledgment() {
+        let mut c = base_cfg();
+        for host in &mut c.topology.hosts[3..] {
+            host.site = Some("s2".into());
+        }
+        for disk in &mut c.topology.disks[18..] {
+            disk.site = Some("s2".into());
+        }
+        normalize_topology(&mut c, None);
+        assert!(validate_config(&c).is_ok());
+        assert!(requires_site_acknowledgment(&c));
+        let mut p = c.policies["p"].clone();
+        p.protection = Protection::Replication { copies: 6 };
+        assert!(p.plan(&c.topology, 7, false).validate_tolerance().is_err());
+        assert!(p.plan(&c.topology, 7, true).validate_tolerance().is_ok());
     }
     #[test]
     fn invalid_msr_repair_fanin_is_rejected() {
@@ -4205,6 +4383,10 @@ mod tests {
             progress_interval_ms: 150,
             run_mode: RunMode::Quick30,
             mc_backend: McBackend::Cpu,
+            max_storage_overhead: None,
+            example_object_size_bytes: Vec::new(),
+            chunk_replicas: None,
+            object_replicas: None,
         };
         apply_run_mode(&mut a);
         assert_eq!(a.candidates, 32);
@@ -4242,31 +4424,15 @@ mod tests {
             return;
         }
 
-        let cases = [
-            (
-                Protection::ReedSolomon { k: 4, m: 2 },
-                vec![
-                    vec![true, true, true, true, false, false],
-                    vec![true, true, true, false, false, false],
-                    vec![false, true, true, true, true, false],
-                    vec![false, false, true, true, true, true],
-                ],
-            ),
-            (
-                Protection::Lrc {
-                    k: 4,
-                    local_groups: 2,
-                    local_parity: 1,
-                    global_parity: 1,
-                },
-                vec![
-                    vec![true, true, true, true, true, true, true],
-                    vec![true, false, true, true, true, true, false],
-                    vec![false, false, true, true, true, true, true],
-                    vec![false, false, true, false, true, true, true],
-                ],
-            ),
-        ];
+        let cases = [(
+            Protection::ReedSolomon { k: 4, m: 2 },
+            vec![
+                vec![true, true, true, true, false, false],
+                vec![true, true, true, false, false, false],
+                vec![false, true, true, true, true, false],
+                vec![false, false, true, true, true, true],
+            ],
+        )];
 
         for (protection, rows) in cases {
             let fragments = protection.fragments();

@@ -4,9 +4,9 @@
 
 ## Scope
 
-Kagi is a distributed 64-bit-keyspace object-storage system with deterministic capacity-weighted placement, failure-domain-aware protection, Raft-replicated metadata, immutable object versions, WORM/retention controls, point-in-time snapshots, object-backed virtual block volumes, SCSI-3 persistent reservations, background maintenance QoS, and post-quantum-hardened internal authentication.
+Kagi is a distributed object store with deterministic 60-bit placement for planned deployments, failure-domain-aware protection, Raft-replicated metadata, immutable object versions, WORM/retention controls, point-in-time snapshots, object-backed virtual block volumes, SCSI-3 persistent reservations, background maintenance QoS, and post-quantum-hardened internal authentication.
 
-The codebase is divided into a simulation/planning plane and a runtime plane. `kagi-config` models a proposed installation and emits the placement salt, explicit slot ownership plan, mount layout, and selected protection policy. Runtime daemons consume compatible topology information and persist authoritative object/cluster state through Raft.
+The codebase is divided into a simulation/planning plane and a runtime plane. `kagi-config` models a proposed installation and emits equal host ranges, a placement salt, mount layout, and a deployment for each selected protection policy. Runtime daemons consume the deployment and persist authoritative object and cluster state through Raft.
 
 ## SysML v2 architecture model
 
@@ -37,19 +37,42 @@ The physical topology is modeled as site → rack → host → disk. Network dom
 
 Disk classes describe media/transport characteristics and can override the global disk annual-failure probability. Current runtime storage probing understands NVMe, direct-attached SATA HDD, SAS HDD, Fibre Channel rotational LUNs, and directory-backed development storage.
 
-## 64-bit keyspace and slots
+## 60-bit keyspace
 
-The logical object keyspace is the complete unsigned 64-bit range. The simulator partitions it into `2^slot_bits` slots. For each slot, capacity-weighted rendezvous hashing chooses an owning disk. The generated plan records both the global contiguous slot ranges and the same ranges grouped per disk.
-
-A disk's placement weight is `capacity_bytes × weight`. The optimizer searches candidate placement salts and evaluates failure probability, protection overhead, and slot imbalance. The output is deterministic for a fixed configuration, seed, and selected salt.
+One object key maps to a position in the unsigned 60-bit keyspace. Every host
+owns a contiguous range with a size that differs from any other host's range by
+at most one address. The planner and runtime use the same algorithm to
+derive the destination site, rack, host, and disk for each chunk and copy from
+the key and placement plan. The derived chunk position falls in the disk's
+subrange of its host's range. The runtime rotates among disks on the same host
+with equivalent network paths while preserving the placement's failure
+properties. The manifest records the actual locations so existing versions remain
+readable when the plan changes. Deployments without a plan use legacy 64-bit
+placement.
 
 ## Data protection
 
-The simulation supports replication, Reed-Solomon, LRC, MSR, and CLAY policy modeling. The runtime data plane implements Reed-Solomon, canonical product-matrix MSR (`d=2k-2`), and CLAY. CLAY is the runtime EC default; LRC remains planner-only. A shared GF(2^8) matrix engine has CPU and optional CUDA execution paths. Failure tolerance is checked across configured disk, host, rack, site, and network domains.
+The planner and data plane support replication, Reed-Solomon, the runtime LRC
+geometry, canonical product-matrix MSR (`d=2k-2`), and CLAY. A shared GF(2^8)
+matrix engine has CPU and optional GPU execution paths. The planner verifies
+reconstruction against concurrent failures of the configured disk, host, rack,
+site, and network domains.
 
 ## Metadata consistency
 
-Externally visible metadata is committed through Raft. Membership changes use joint consensus, and object-changing REST operations do not return success until the mutation has crossed the configured commit/apply barrier. Background rebalance writes replacement data first, commits the new manifest, then removes superseded fragments.
+Externally visible metadata is committed through Raft. Membership changes use
+joint consensus, and object-changing REST operations do not return success until
+the mutation has crossed the configured commit/apply barrier. Background repair
+and rebalance update the same immutable version in current, historical, and
+snapshot references. Planned rebalance retains obsolete physical copies for
+in-flight readers that may still hold the previous locations. Those copies can
+continue to consume disk space.
+
+Reconstructing the chunks and serving the object are separate availability
+conditions. When a site is lost, the metadata service still needs a surviving
+Raft majority. With voters only in two sites, at least one site-loss scenario
+leaves too few voters for a majority. Cluster status and the web console report
+the site losses that threaten metadata quorum.
 
 ## Snapshots and archival
 
@@ -71,7 +94,9 @@ Internal requests use ML-DSA-87 request authentication with signed method/path/b
 
 The planner treats protection geometry and placement salt as coupled variables. It first selects a placement salt for the seed policy, evaluates feasible chunk geometries for each EC family against that placement, then repeats placement selection with the improved geometry. Geometry candidates are bounded by the actual fragment capacity implied by host/disk locality limits. Deterministic tolerance validation is a hard feasibility gate; Monte Carlo probability is the primary ranking metric among feasible candidates.
 
-The minimum supported simulated/runtime topology is six servers with six disks per server. This gives the placement layer enough independent host/disk domains to request two-loss host and disk tolerance while retaining readable fragments.
+The minimum supported topology is six servers with six disks per server. A
+placement plan additionally requires enough independent domains and fragments to
+meet the concurrent failure budget.
 
 
 ## exact-repair data path

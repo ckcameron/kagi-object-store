@@ -17,7 +17,7 @@ runtime-dispatched x86-64 CPU implementation. See [acceleration details](docs/AC
 for implemented paths and explicitly deferred frameworks, and [scheduling](docs/SCHEDULING.md)
 for the opt-in `kagi-run` real-time launcher.
 
-Kagi distributes a deterministic 64-bit keyspace across failure-aware storage locations, protects data with replication or erasure coding, keeps authoritative metadata in Raft, and exposes the same storage substrate through object, namespace, and virtual-block abstractions. The project also includes a Monte Carlo topology planner, CUDA acceleration paths, failure/recovery control, lifecycle and immutability features, post-quantum authenticated internal traffic, and an embedded browser-based operations console.
+Kagi divides a 60-bit object keyspace evenly among storage hosts in planner-managed deployments. It places replicated or erasure-coded chunks across failure domains, keeps authoritative metadata in Raft, and exposes the same storage substrate through object, namespace, and virtual-block abstractions. The project also includes a Monte Carlo topology planner, CUDA acceleration paths, failure/recovery control, lifecycle and immutability features, post-quantum authenticated internal traffic, and an embedded browser-based operations console.
 
 ## What is in this edition
 
@@ -90,9 +90,8 @@ Kagi now includes a version-controlled SysML v2 architecture model, requirement 
 
 ### Distributed object storage
 
-- 64-bit object keyspace with deterministic placement.
-- Capacity-weighted distribution across sites, racks, hosts, and disks.
-- Failure-domain-aware placement to avoid concentrating fragments on correlated resources.
+- Equal host ranges in a shared 60-bit keyspace with deterministic chunk addresses.
+- Placement and verification across site, rack, host, disk, and network failure domains.
 - Replicated object mode with configurable replication factor and write quorum.
 - Immutable object versions with persistent manifests.
 - Fragment checksums on write and read.
@@ -138,9 +137,9 @@ The `kagi-config` binary models a proposed installation before data is placed on
 - Continuous-time failure/repair simulation using competing exponential clocks.
 - Independent disk/host/rack/site MTTR handling.
 - Repair-bandwidth/vulnerability-window estimation.
-- Capacity-weighted slot ownership.
-- Explicit global slot ranges and corresponding 64-bit key ranges.
-- Per-disk slot-range output.
+- Per-policy mixed failure requirements and a hard nominal storage overhead cap.
+- Equal host key ranges and a deployment policy the cluster runtime can load.
+- Encoded storage estimates for supplied object sizes, including codec padding and copies.
 - Generated disk mount names and paths.
 - Terminal progress display with phase, current work, simulation rate, elapsed time, best placement, and best EC geometry.
 - `--run-mode full|quick30|quick60` presets. Quick modes intentionally trade statistical confidence for shorter runtime classes; the names are not wall-clock guarantees.
@@ -415,9 +414,11 @@ The exact validation status of this packaged edition is recorded in `BUILD-VALID
 
 ## Configuration and generated plans
 
-Typical cluster configuration lives under `/etc/kagi`. The planner emits a deterministic slot plan rather than relying on implicit runtime ordering. A generated topology should be reviewed and then treated as deployment input: silently reordering disk identities after planning changes placement assumptions.
-
-The generated YAML includes the full keyspace slot geometry, per-disk slot ranges, generated mount paths, selected protection policy, optimizer statistics, and cluster-admission material references.
+Typical cluster configuration lives under `/etc/kagi`. The planner emits equal
+host key ranges, generated disk mount paths, validated protection policies,
+optimizer statistics, and an admission-key hash. Set `planner_output` in each
+node's configuration to load the same generated policy. See
+[deployment configuration](docs/CONFIGURATION.md#deploying-a-placement-plan).
 
 ## Source layout
 
