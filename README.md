@@ -2,7 +2,9 @@
 
 # Kagi
 
-**Development release 0.39.0 — experimental; not production-ready.**
+**Latest published release: [v0.0.1](https://github.com/ckcameron/kagi-object-store/releases/tag/v0.0.1).**
+
+The source on `main` identifies itself as version `0.39.0`. Kagi is experimental and not production-ready.
 
 Kagi is a distributed object store written in Rust, with a filesystem namespace,
 object-backed block volumes, a durability planner, and an operations console.
