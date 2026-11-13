@@ -186,7 +186,8 @@ that legitimate deletion and retries still succeed. The earlier local tables
 above describe the completion-series baseline. Local follow-up validation passed: formatting, all-target checks, 126 default
 tests, 141 reported all-feature tests, strict default/all-feature Clippy, and
 dependency advisory/source checks. Hardware/provider limitations above still
-apply. Repository execution is tracked on the GC replica-fence follow-up PR.
+apply. Repository execution is tracked on the GC replica-fence follow-up PR. The earlier
+completion-series execution results are recorded on [PR #4](https://github.com/ckcameron/kagi-object-store/pull/4).
 
 ### Hardware-acceleration integration follow-up (2026-10-02)
 
